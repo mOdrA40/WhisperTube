@@ -19,7 +19,13 @@ function Require-Command($Name, $Help) {
 
 function Download-File($Url, $OutFile) {
     Write-Host "    Downloading $Url"
-    Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing
+    $previousProgressPreference = $ProgressPreference
+    try {
+        $ProgressPreference = "Continue"
+        Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing
+    } finally {
+        $ProgressPreference = $previousProgressPreference
+    }
 }
 
 Write-Host "WhisperTube Windows bootstrap" -ForegroundColor Magenta

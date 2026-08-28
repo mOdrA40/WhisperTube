@@ -22,7 +22,13 @@ if (Test-Path $Extract) { Remove-Item $Extract -Recurse -Force }
 
 $Url = "https://github.com/ggml-org/whisper.cpp/releases/download/$WhisperVersion/whisper-cublas-$CudaBuild-bin-x64.zip"
 Write-Host "`nDownloading whisper.cpp CUDA package (~hundreds of MB)..." -ForegroundColor Cyan
-Invoke-WebRequest -Uri $Url -OutFile $Zip -UseBasicParsing
+$previousProgressPreference = $ProgressPreference
+try {
+    $ProgressPreference = "Continue"
+    Invoke-WebRequest -Uri $Url -OutFile $Zip -UseBasicParsing
+} finally {
+    $ProgressPreference = $previousProgressPreference
+}
 Expand-Archive -Path $Zip -DestinationPath $Extract -Force
 
 $ReleaseDir = Get-ChildItem -Path $Extract -Directory -Recurse | Where-Object { $_.Name -eq "Release" } | Select-Object -First 1

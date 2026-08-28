@@ -1,0 +1,27 @@
+[package]
+name = "whispertube"
+version = "0.1.0"
+description = "Local-first YouTube transcription with whisper.cpp"
+authors = ["WhisperTube"]
+edition = "2021"
+
+[lib]
+name = "whispertube_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+regex = "1"
+sha1 = "0.10"
+url = "2"
+tokio = { version = "1", features = ["rt-multi-thread"] }

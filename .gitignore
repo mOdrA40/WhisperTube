@@ -1,0 +1,13 @@
+node_modules/
+dist/
+src-tauri/target/
+.DS_Store
+*.log
+
+# Downloaded runtime binaries are intentionally not stored in source control
+src-tauri/runtime/windows/*.exe
+src-tauri/runtime/windows/cpu/*
+src-tauri/runtime/windows/cuda/*
+src-tauri/runtime/macos/*
+src-tauri/runtime/linux/*
+!src-tauri/runtime/**/.gitkeep

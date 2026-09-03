@@ -22,6 +22,18 @@ Rust orchestration
        └─ whisper.cpp CPU/CUDA
 ```
 
+## Source layout
+
+Frontend mengikuti alur satu arah: `App.tsx` menyusun halaman, `useWhisperTube`
+memegang state dan side effect, `services/tauri.ts` menjadi adapter IPC, dan
+komponen di `components/` hanya menangani tampilan serta callback pengguna.
+
+Backend memakai boundary serupa: `commands.rs` hanya adapter command Tauri,
+`types.rs` menyimpan DTO IPC, `state.rs` menyimpan state job runtime,
+`paths.rs` menangani lokasi storage/runtime, sedangkan `models.rs`, `youtube.rs`,
+`transcription.rs`, dan `history.rs` menangani domain masing-masing. `lib.rs`
+hanya melakukan bootstrap aplikasi dan registrasi command.
+
 ## Transcription state machine
 
 ```text

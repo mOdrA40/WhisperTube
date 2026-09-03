@@ -2,7 +2,7 @@ use std::process::Command;
 use tauri::AppHandle;
 
 use crate::{
-    models,
+    accelerators, models,
     paths::{engine_path, runtime_dir, tool_path},
     types::SystemStatus,
 };
@@ -132,5 +132,6 @@ pub fn system_status(app: &AppHandle) -> Result<SystemStatus, String> {
         recommendation,
         recommended_model_id,
         recommended_backend,
+        accelerators: accelerators::catalog(app)?,
     })
 }

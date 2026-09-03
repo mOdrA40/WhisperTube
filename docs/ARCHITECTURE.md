@@ -112,10 +112,19 @@ GPU applications are running. `Auto` does not silently fall back to CPU when
 NVIDIA is present but CUDA is not installed; the user is prompted to install
 the CUDA pack or explicitly choose CPU.
 
+The repository also contains `.github/workflows/build-accelerator-packs.yml`.
+It builds Metal packs for macOS Intel/Apple Silicon and Vulkan packs for Linux
+and Windows x64 from a pinned official whisper.cpp tag, then publishes ZIP
+assets and SHA-256 sidecars on an `accelerators-v*` GitHub Release. The source
+repository may remain private during development; those release assets must be
+public before a shipped EXE can download them without a GitHub credential.
+ROCm and OpenVINO remain separate targets because they require specialized
+toolchains or hardware runners.
+
 ## Next production milestones
 
-1. Separate runtime/model component updater with signed manifests.
-2. Build our own Vulkan engine pack in CI for AMD/Intel Windows GPUs.
+1. Sign runtime/model manifests and release assets.
+2. Add ROCm/OpenVINO packs with dedicated compatible runners.
 3. Persist job queue and crash recovery.
 4. Add playlist/batch processing.
 5. Add local file drag-and-drop.

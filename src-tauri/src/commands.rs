@@ -1,9 +1,9 @@
 use std::process::{Command, Stdio};
-use std::sync::atomic::Ordering;
+use std::sync::{atomic::Ordering, Arc};
 use tauri::{AppHandle, State};
 
 use crate::{
-    browsers, history, models,
+    accelerators, browsers, history, models,
     state::AppState,
     system, transcription,
     types::{
@@ -11,6 +11,30 @@ use crate::{
     },
     youtube,
 };
+
+fn begin_runtime_install(
+    state: &AppState,
+    operation: &str,
+) -> Result<Arc<std::sync::atomic::AtomicBool>, String> {
+    let mut active = state
+        .runtime_installing
+        .lock()
+        .map_err(|_| "State runtime terkunci")?;
+    if let Some(current) = active.as_deref() {
+        return Err(format!("Installer runtime {current} sedang berjalan."));
+    }
+    *active = Some(operation.to_string());
+    state.runtime_cancelled.store(false, Ordering::SeqCst);
+    Ok(state.runtime_cancelled.clone())
+}
+
+fn end_runtime_install(state: &AppState, operation: &str) {
+    if let Ok(mut active) = state.runtime_installing.lock() {
+        if active.as_deref() == Some(operation) {
+            *active = None;
+        }
+    }
+}
 
 #[tauri::command]
 pub fn system_status(app: AppHandle) -> Result<SystemStatus, String> {
@@ -37,8 +61,24 @@ pub async fn install_cuda_engine(app: AppHandle, state: State<'_, AppState>) -> 
     if system::detect_nvidia().is_none() {
         return Err("NVIDIA GPU/driver tidak terdeteksi. CUDA engine tidak perlu dipasang.".into());
     }
-    state.cuda_cancelled.store(false, Ordering::SeqCst);
-    models::install_cuda_engine(app, state.cuda_cancelled.clone()).await
+    let operation = "cuda";
+    let cancelled = begin_runtime_install(&state, operation)?;
+    let result = models::install_cuda_engine(app, cancelled).await;
+    end_runtime_install(&state, operation);
+    result
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn install_accelerator(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    backend: String,
+) -> Result<(), String> {
+    let operation = backend.clone();
+    let cancelled = begin_runtime_install(&state, &operation)?;
+    let result = accelerators::install(app, backend, cancelled).await;
+    end_runtime_install(&state, &operation);
+    result
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -81,7 +121,7 @@ pub async fn start_transcription(
 #[tauri::command]
 pub fn cancel_job(state: State<'_, AppState>) -> Result<(), String> {
     state.cancelled.store(true, Ordering::SeqCst);
-    state.cuda_cancelled.store(true, Ordering::SeqCst);
+    state.runtime_cancelled.store(true, Ordering::SeqCst);
     let guard = state
         .active_pid
         .lock()

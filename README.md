@@ -147,6 +147,17 @@ Jika dipasang dari script development, engine berada di:
 src-tauri\runtime\windows\cuda\
 ```
 
+## Accelerator release untuk maintainer
+
+Workflow `.github/workflows/build-accelerator-packs.yml` membangun pack Metal
+dan Vulkan dari source resmi `whisper.cpp`. Jalankan workflow secara manual
+untuk test artifact, atau push tag seperti `accelerators-v0.1.0` untuk membuat
+GitHub Release beserta file SHA-256.
+
+Repository boleh private selama development/CI. Sebelum EXE production
+disebar, release accelerator harus public karena aplikasi user tidak membawa
+GitHub token. CUDA Windows tetap memakai release upstream yang dipin.
+
 ## 6. Jalankan aplikasi development
 
 ```powershell

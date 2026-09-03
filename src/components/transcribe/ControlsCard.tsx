@@ -1,6 +1,6 @@
 import { AlertCircle, Check, CircleStop, Download, Gauge, LoaderCircle, Sparkles } from "lucide-react";
 import { formatMemory } from "../../lib/format";
-import type { BackendChoice, ModelInfo, SystemStatus } from "../../types";
+import type { AcceleratorInfo, BackendChoice, ModelInfo, SystemStatus } from "../../types";
 
 type ControlsCardProps = {
   models: ModelInfo[];
@@ -14,11 +14,17 @@ type ControlsCardProps = {
   busy: boolean;
   runtimeReady: boolean;
   downloadingModel: Record<string, number>;
+  accelerators: AcceleratorInfo[];
   installingCuda: boolean;
   cudaDownloadPercent: number;
+  installingAccelerator: Exclude<BackendChoice, "auto" | "cpu" | "cuda"> | null;
+  acceleratorDownloadPercent: number;
   vramWarning: string | null;
+  acceleratorWarning: string | null;
   onInstallCuda: () => void;
   onCancelCuda: () => void;
+  onInstallAccelerator: (backend: Exclude<BackendChoice, "auto" | "cpu" | "cuda">) => void;
+  onCancelAccelerator: () => void;
   onModelChange: (id: string) => void;
   onBackendChange: (backend: BackendChoice) => void;
   onLanguageChange: (language: string) => void;
@@ -39,11 +45,17 @@ export function ControlsCard({
   busy,
   runtimeReady,
   downloadingModel,
+  accelerators,
   installingCuda,
   cudaDownloadPercent,
+  installingAccelerator,
+  acceleratorDownloadPercent,
   vramWarning,
+  acceleratorWarning,
   onInstallCuda,
   onCancelCuda,
+  onInstallAccelerator,
+  onCancelAccelerator,
   onModelChange,
   onBackendChange,
   onLanguageChange,
@@ -78,13 +90,24 @@ export function ControlsCard({
       {system?.nvidia && !system.cudaEngine && (
         <>
           <div className="info-box"><Sparkles size={16} /><span>NVIDIA terdeteksi. Pasang CUDA agar transkripsi memakai GPU, bukan CPU.</span></div>
-          <button className="download-button" onClick={onInstallCuda} disabled={installingCuda || busy}>
+          <button className="download-button" onClick={onInstallCuda} disabled={installingCuda || installingAccelerator !== null || busy}>
             {installingCuda ? <LoaderCircle className="spin" size={17} /> : <Download size={17} />}
             {installingCuda ? `Installing CUDA ${Math.round(cudaDownloadPercent)}%` : "Install CUDA acceleration (~437 MB)"}
           </button>
           {installingCuda && <button className="danger-ghost" onClick={onCancelCuda}><CircleStop size={16} /> Cancel CUDA download</button>}
         </>
       )}
+
+      {accelerators.filter((accelerator) => accelerator.supported && accelerator.downloadable && !accelerator.installed).map((accelerator) => (
+        <div key={accelerator.id}>
+          <div className="info-box"><Download size={16} /><span>{accelerator.description}. Download dari accelerator release project.</span></div>
+          <button className="download-button" onClick={() => onInstallAccelerator(accelerator.backend as Exclude<BackendChoice, "auto" | "cpu" | "cuda">)} disabled={installingAccelerator !== null || installingCuda || busy}>
+            {installingAccelerator === accelerator.backend ? <LoaderCircle className="spin" size={17} /> : <Download size={17} />}
+            {installingAccelerator === accelerator.backend ? `Installing ${accelerator.label} ${Math.round(acceleratorDownloadPercent)}%` : `Install ${accelerator.label}`}
+          </button>
+          {installingAccelerator === accelerator.backend && <button className="danger-ghost" onClick={onCancelAccelerator}><CircleStop size={16} /> Cancel accelerator download</button>}
+        </div>
+      ))}
 
       <div className="divider" />
       <label className="field-label">Language</label>
@@ -102,6 +125,9 @@ export function ControlsCard({
         <option value="auto">Auto — recommended</option>
         <option value="cpu">CPU</option>
         <option value="cuda" disabled={!system?.cudaEngine || !system?.nvidia}>NVIDIA CUDA{system?.cudaEngine && system?.nvidia ? "" : " — not available"}</option>
+        {accelerators.map((accelerator) => (
+          <option value={accelerator.backend} disabled={!accelerator.installed} key={accelerator.id}>{accelerator.label}{accelerator.installed ? "" : " — not installed"}</option>
+        ))}
       </select>
       <div className="recommendation"><Sparkles size={14} /> {system?.recommendation ?? "Mendeteksi hardware…"}</div>
 
@@ -111,6 +137,7 @@ export function ControlsCard({
       </label>
 
       {vramWarning && <p className="setup-hint"><AlertCircle size={14} /> {vramWarning}</p>}
+      {acceleratorWarning && <p className="setup-hint"><AlertCircle size={14} /> {acceleratorWarning}</p>}
       <button className="start-button" disabled={!canStart} onClick={onStart}>
         <Sparkles size={18} /> Transcribe now
       </button>

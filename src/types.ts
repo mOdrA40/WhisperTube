@@ -1,6 +1,16 @@
 export type AppTab = "transcribe" | "history" | "settings";
 export type BrowserChoice = "none" | "chrome" | "edge" | "firefox" | "brave" | "chromium" | "opera" | "vivaldi" | "whale" | "safari";
-export type BackendChoice = "auto" | "cpu" | "cuda";
+export type BackendChoice = "auto" | "cpu" | "cuda" | "metal" | "vulkan";
+
+export type AcceleratorInfo = {
+  id: string;
+  label: string;
+  backend: Exclude<BackendChoice, "auto" | "cpu" | "cuda">;
+  supported: boolean;
+  installed: boolean;
+  downloadable: boolean;
+  description: string;
+};
 
 export type BrowserProfile = {
   id: string;
@@ -27,6 +37,7 @@ export type SystemStatus = {
   recommendation: string;
   recommendedModelId: string;
   recommendedBackend: BackendChoice;
+  accelerators: AcceleratorInfo[];
 };
 
 export type ModelInfo = {
@@ -69,6 +80,11 @@ export type ModelDownloadPayload = {
 };
 
 export type CudaDownloadPayload = {
+  percent: number;
+};
+
+export type AcceleratorDownloadPayload = {
+  backend: Exclude<BackendChoice, "auto" | "cpu" | "cuda">;
   percent: number;
 };
 

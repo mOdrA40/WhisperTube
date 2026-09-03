@@ -1,3 +1,4 @@
+mod accelerators;
 mod browsers;
 mod commands;
 mod history;
@@ -25,6 +26,7 @@ pub fn run() {
             commands::list_models,
             commands::download_model,
             commands::install_cuda_engine,
+            commands::install_accelerator,
             commands::delete_model,
             commands::inspect_youtube,
             commands::start_transcription,

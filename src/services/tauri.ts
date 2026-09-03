@@ -4,6 +4,8 @@ import { save } from "@tauri-apps/plugin-dialog";
 import type {
   BrowserChoice,
   BrowserInfo,
+  AcceleratorDownloadPayload,
+  BackendChoice,
   CudaDownloadPayload,
   HistoryItem,
   ModelDownloadPayload,
@@ -17,6 +19,10 @@ import type {
 
 export function getSystemStatus() {
   return invoke<SystemStatus>("system_status");
+}
+
+export function installAccelerator(backend: Exclude<BackendChoice, "auto" | "cpu" | "cuda">) {
+  return invoke("install_accelerator", { backend });
 }
 
 export function listModels() {
@@ -69,6 +75,10 @@ export function subscribeToModelDownload(onDownload: (payload: ModelDownloadPayl
 
 export function subscribeToCudaDownload(onDownload: (payload: CudaDownloadPayload) => void) {
   return listen<CudaDownloadPayload>("cuda-download", (event) => onDownload(event.payload));
+}
+
+export function subscribeToAcceleratorDownload(onDownload: (payload: AcceleratorDownloadPayload) => void) {
+  return listen<AcceleratorDownloadPayload>("accelerator-download", (event) => onDownload(event.payload));
 }
 
 export async function exportTranscriptFile(result: TranscriptResult, kind: "txt" | "srt" | "vtt") {

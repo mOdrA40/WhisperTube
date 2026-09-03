@@ -5,6 +5,7 @@ import {
   downloadModel,
   exportTranscriptFile,
   getSystemStatus,
+  installAccelerator,
   installCudaEngine,
   inspectYoutube,
   listBrowsers,
@@ -13,6 +14,7 @@ import {
   loadHistory,
   startTranscription,
   subscribeToModelDownload,
+  subscribeToAcceleratorDownload,
   subscribeToCudaDownload,
   subscribeToProgress,
 } from "../services/tauri";
@@ -56,6 +58,8 @@ export function useWhisperTube() {
   const [copied, setCopied] = useState(false);
   const [installingCuda, setInstallingCuda] = useState(false);
   const [cudaDownloadPercent, setCudaDownloadPercent] = useState(0);
+  const [installingAccelerator, setInstallingAccelerator] = useState<Exclude<BackendChoice, "auto" | "cpu" | "cuda"> | null>(null);
+  const [acceleratorDownloadPercent, setAcceleratorDownloadPercent] = useState(0);
   const autoConfigured = useRef(false);
 
   const selectedModel = models.find((model) => model.id === modelId);
@@ -89,11 +93,15 @@ export function useWhisperTube() {
     const unlistenCuda = subscribeToCudaDownload(({ percent }) => {
       setCudaDownloadPercent(percent);
     });
+    const unlistenAccelerator = subscribeToAcceleratorDownload(({ percent }) => {
+      setAcceleratorDownloadPercent(percent);
+    });
 
     return () => {
       unlistenProgress.then((unlisten) => unlisten());
       unlistenModel.then((unlisten) => unlisten());
       unlistenCuda.then((unlisten) => unlisten());
+      unlistenAccelerator.then((unlisten) => unlisten());
     };
   }, [refreshSystem]);
 
@@ -115,16 +123,18 @@ export function useWhisperTube() {
     return result.segments.filter((segment) => segment.text.toLowerCase().includes(query));
   }, [result, searchQuery]);
 
-  const cudaInstallRequired = Boolean(system?.nvidia && backend === "auto" && !system.cudaEngine);
+  const autoAcceleratorInstalled = Boolean(system?.accelerators.some((accelerator) => accelerator.installed));
+  const cudaInstallRequired = Boolean(system?.nvidia && backend === "auto" && !system.cudaEngine && !autoAcceleratorInstalled);
   const vramWarning = useMemo(() => {
-    if (!selectedModel || backend === "cpu" || !system) return null;
+    if (!selectedModel || backend === "cpu" || backend === "metal" || backend === "vulkan" || !system) return null;
     if (backend === "cuda" && !system.nvidia) {
       return "NVIDIA GPU tidak terdeteksi. Pilih Auto atau CPU.";
     }
     if (!system.nvidia) return null;
-    if (!system.cudaEngine) {
+    if (!system.cudaEngine && backend === "auto" && !system.accelerators.some((accelerator) => accelerator.installed)) {
       return "CUDA acceleration belum terpasang. Install CUDA agar proses tidak jatuh ke CPU.";
     }
+    if (!system.cudaEngine) return null;
     if (backend === "cuda" && !system.gpuFreeMemoryMb && !system.gpuMemoryMb) {
       return "VRAM NVIDIA tidak terbaca. Tutup aplikasi GPU lain lalu klik Re-check components.";
     }
@@ -134,7 +144,15 @@ export function useWhisperTube() {
     }
     return null;
   }, [backend, selectedModel, system]);
-  const canStart = Boolean(metadata && selectedModel?.installed && runtimeReady && !installingCuda && !cudaInstallRequired && !vramWarning);
+  const acceleratorWarning = useMemo(() => {
+    if (!system || backend === "auto" || backend === "cpu" || backend === "cuda") return null;
+    const accelerator = system.accelerators.find((item) => item.backend === backend);
+    if (!accelerator?.installed) {
+      return `${accelerator?.label ?? backend} belum terpasang. Install dari Settings terlebih dahulu.`;
+    }
+    return null;
+  }, [backend, system]);
+  const canStart = Boolean(metadata && selectedModel?.installed && runtimeReady && !installingCuda && !installingAccelerator && !cudaInstallRequired && !vramWarning && !acceleratorWarning);
 
   async function inspectVideo() {
     if (!url.trim()) {
@@ -182,6 +200,10 @@ export function useWhisperTube() {
   }
 
   async function handleInstallCuda() {
+    if (installingAccelerator !== null) {
+      setError("Installer accelerator lain sedang berjalan. Tunggu sampai selesai atau batalkan terlebih dahulu.");
+      return;
+    }
     setError(null);
     setInstallingCuda(true);
     setCudaDownloadPercent(0);
@@ -193,6 +215,25 @@ export function useWhisperTube() {
       if (!message.toLowerCase().includes("dibatalkan")) setError(message);
     } finally {
       setInstallingCuda(false);
+    }
+  }
+
+  async function handleInstallAccelerator(backendToInstall: Exclude<BackendChoice, "auto" | "cpu" | "cuda">) {
+    if (installingCuda || installingAccelerator !== null) {
+      setError("Installer runtime lain sedang berjalan. Tunggu sampai selesai atau batalkan terlebih dahulu.");
+      return;
+    }
+    setError(null);
+    setInstallingAccelerator(backendToInstall);
+    setAcceleratorDownloadPercent(0);
+    try {
+      await installAccelerator(backendToInstall);
+      await refreshSystem();
+    } catch (cause) {
+      const message = friendlyError(cause);
+      if (!message.toLowerCase().includes("dibatalkan")) setError(message);
+    } finally {
+      setInstallingAccelerator(null);
     }
   }
 
@@ -215,6 +256,10 @@ export function useWhisperTube() {
     }
     if (vramWarning) {
       setError(vramWarning);
+      return;
+    }
+    if (acceleratorWarning) {
+      setError(acceleratorWarning);
       return;
     }
 
@@ -324,11 +369,15 @@ export function useWhisperTube() {
     canStart,
     cudaInstallRequired,
     vramWarning,
+    acceleratorWarning,
     refreshSystem,
     inspectVideo,
     downloadModel: handleDownloadModel,
     removeModel: handleRemoveModel,
     installCuda: handleInstallCuda,
+    installAccelerator: handleInstallAccelerator,
+    installingAccelerator,
+    acceleratorDownloadPercent,
     startTranscription: handleStartTranscription,
     cancelJob: handleCancelJob,
     loadHistory: handleLoadHistory,

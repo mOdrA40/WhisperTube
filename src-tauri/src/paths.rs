@@ -71,13 +71,11 @@ pub fn tool_path(app: &AppHandle, name: &str) -> Result<PathBuf, String> {
 }
 
 pub fn engine_path(app: &AppHandle, backend: &str) -> Result<PathBuf, String> {
-    if backend == "cuda" {
-        let user_path = user_runtime_dir(app)?
-            .join("cuda")
-            .join(exe_name("whisper-cli"));
-        if user_path.exists() {
-            return Ok(user_path);
-        }
+    let user_path = user_runtime_dir(app)?
+        .join(backend)
+        .join(exe_name("whisper-cli"));
+    if user_path.exists() {
+        return Ok(user_path);
     }
     Ok(runtime_dir(app)?
         .join(backend)

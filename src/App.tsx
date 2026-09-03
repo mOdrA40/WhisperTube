@@ -35,9 +35,13 @@ export default function App() {
           canStart={app.canStart}
           runtimeReady={app.runtimeReady}
           downloadingModel={app.downloadingModel}
+          accelerators={app.system?.accelerators ?? []}
           installingCuda={app.installingCuda}
           cudaDownloadPercent={app.cudaDownloadPercent}
+          installingAccelerator={app.installingAccelerator}
+          acceleratorDownloadPercent={app.acceleratorDownloadPercent}
           vramWarning={app.vramWarning}
+          acceleratorWarning={app.acceleratorWarning}
           result={app.result}
           copied={app.copied}
           searchQuery={app.searchQuery}
@@ -53,6 +57,8 @@ export default function App() {
           onDownloadModel={app.downloadModel}
           onInstallCuda={app.installCuda}
           onCancelCuda={app.cancelJob}
+          onInstallAccelerator={app.installAccelerator}
+          onCancelAccelerator={app.cancelJob}
           onStart={app.startTranscription}
           onCopy={app.copyTranscript}
           onExport={app.exportFile}
@@ -76,8 +82,11 @@ export default function App() {
           models={app.models}
           busy={app.busy}
           downloadingModel={app.downloadingModel}
+          accelerators={app.system?.accelerators ?? []}
           installingCuda={app.installingCuda}
           cudaDownloadPercent={app.cudaDownloadPercent}
+          installingAccelerator={app.installingAccelerator}
+          acceleratorDownloadPercent={app.acceleratorDownloadPercent}
           onBrowserChange={app.setBrowser}
           onBrowserProfileChange={app.setBrowserProfile}
           onDownloadModel={app.downloadModel}
@@ -85,6 +94,8 @@ export default function App() {
           onRefresh={app.refreshSystem}
           onInstallCuda={app.installCuda}
           onCancelCuda={app.cancelJob}
+          onInstallAccelerator={app.installAccelerator}
+          onCancelAccelerator={app.cancelJob}
         />
       )}
     </AppShell>

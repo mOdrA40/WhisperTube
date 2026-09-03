@@ -4,6 +4,7 @@ import { SourceCard } from "./SourceCard";
 import { TranscriptCard } from "./TranscriptCard";
 import type {
   AppTab,
+  AcceleratorInfo,
   BackendChoice,
   ModelInfo,
   ProgressPayload,
@@ -29,9 +30,13 @@ type TranscribePageProps = {
   keepAudio: boolean;
   runtimeReady: boolean;
   downloadingModel: Record<string, number>;
+  accelerators: AcceleratorInfo[];
   installingCuda: boolean;
   cudaDownloadPercent: number;
+  installingAccelerator: Exclude<BackendChoice, "auto" | "cpu" | "cuda"> | null;
+  acceleratorDownloadPercent: number;
   vramWarning: string | null;
+  acceleratorWarning: string | null;
   result: TranscriptResult | null;
   copied: boolean;
   searchQuery: string;
@@ -47,6 +52,8 @@ type TranscribePageProps = {
   onDownloadModel: (id: string) => void;
   onInstallCuda: () => void;
   onCancelCuda: () => void;
+  onInstallAccelerator: (backend: Exclude<BackendChoice, "auto" | "cpu" | "cuda">) => void;
+  onCancelAccelerator: () => void;
   onStart: () => void;
   onCopy: () => void;
   onExport: (kind: "txt" | "srt" | "vtt") => void;
@@ -69,9 +76,13 @@ export function TranscribePage({
   keepAudio,
   runtimeReady,
   downloadingModel,
+  accelerators,
   installingCuda,
   cudaDownloadPercent,
+  installingAccelerator,
+  acceleratorDownloadPercent,
   vramWarning,
+  acceleratorWarning,
   result,
   copied,
   searchQuery,
@@ -87,6 +98,8 @@ export function TranscribePage({
   onDownloadModel,
   onInstallCuda,
   onCancelCuda,
+  onInstallAccelerator,
+  onCancelAccelerator,
   onStart,
   onCopy,
   onExport,
@@ -131,9 +144,13 @@ export function TranscribePage({
           busy={busy}
           runtimeReady={runtimeReady}
           downloadingModel={downloadingModel}
+          accelerators={accelerators}
           installingCuda={installingCuda}
           cudaDownloadPercent={cudaDownloadPercent}
+          installingAccelerator={installingAccelerator}
+          acceleratorDownloadPercent={acceleratorDownloadPercent}
           vramWarning={vramWarning}
+          acceleratorWarning={acceleratorWarning}
           onModelChange={onModelChange}
           onBackendChange={onBackendChange}
           onLanguageChange={onLanguageChange}
@@ -141,6 +158,8 @@ export function TranscribePage({
           onDownloadModel={onDownloadModel}
           onInstallCuda={onInstallCuda}
           onCancelCuda={onCancelCuda}
+          onInstallAccelerator={onInstallAccelerator}
+          onCancelAccelerator={onCancelAccelerator}
           onStart={onStart}
         />
       </aside>

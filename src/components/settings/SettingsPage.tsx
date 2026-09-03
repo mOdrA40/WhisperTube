@@ -1,6 +1,6 @@
 import { CircleStop, Cpu, Download, LockKeyhole, LoaderCircle, MonitorCog, RotateCcw, Trash2 } from "lucide-react";
 import { formatMemory } from "../../lib/format";
-import type { BrowserChoice, BrowserInfo, ModelInfo, SystemStatus } from "../../types";
+import type { AcceleratorInfo, BackendChoice, BrowserChoice, BrowserInfo, ModelInfo, SystemStatus } from "../../types";
 
 type SettingsPageProps = {
   browser: BrowserChoice;
@@ -10,8 +10,11 @@ type SettingsPageProps = {
   models: ModelInfo[];
   busy: boolean;
   downloadingModel: Record<string, number>;
+  accelerators: AcceleratorInfo[];
   installingCuda: boolean;
   cudaDownloadPercent: number;
+  installingAccelerator: Exclude<BackendChoice, "auto" | "cpu" | "cuda"> | null;
+  acceleratorDownloadPercent: number;
   onBrowserChange: (browser: BrowserChoice) => void;
   onBrowserProfileChange: (profile: string) => void;
   onDownloadModel: (id: string) => void;
@@ -19,6 +22,8 @@ type SettingsPageProps = {
   onRefresh: () => void;
   onInstallCuda: () => void;
   onCancelCuda: () => void;
+  onInstallAccelerator: (backend: Exclude<BackendChoice, "auto" | "cpu" | "cuda">) => void;
+  onCancelAccelerator: () => void;
 };
 
 export function SettingsPage({
@@ -29,8 +34,11 @@ export function SettingsPage({
   models,
   busy,
   downloadingModel,
+  accelerators,
   installingCuda,
   cudaDownloadPercent,
+  installingAccelerator,
+  acceleratorDownloadPercent,
   onBrowserChange,
   onBrowserProfileChange,
   onDownloadModel,
@@ -38,6 +46,8 @@ export function SettingsPage({
   onRefresh,
   onInstallCuda,
   onCancelCuda,
+  onInstallAccelerator,
+  onCancelAccelerator,
 }: SettingsPageProps) {
   return (
     <div className="settings-grid">
@@ -77,7 +87,7 @@ export function SettingsPage({
         {system?.nvidia ? (
           <>
             <div className="info-box"><Download size={16} /><span>CUDA engine diunduh dari release resmi whisper.cpp dan dipasang ke storage aplikasi (~437 MB).</span></div>
-            <button className="secondary-button full" onClick={onInstallCuda} disabled={installingCuda || system.cudaEngine || busy}>
+            <button className="secondary-button full" onClick={onInstallCuda} disabled={installingCuda || installingAccelerator !== null || system.cudaEngine || busy}>
               {installingCuda ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}
               {installingCuda ? `Installing CUDA ${Math.round(cudaDownloadPercent)}%` : system.cudaEngine ? "CUDA engine installed" : "Install CUDA acceleration"}
             </button>
@@ -86,6 +96,16 @@ export function SettingsPage({
         ) : (
           <p className="settings-note">NVIDIA GPU tidak terdeteksi. CUDA acceleration hanya tersedia jika driver NVIDIA aktif.</p>
         )}
+        {accelerators.map((accelerator) => (
+          <div className="info-box" key={accelerator.id}>
+            <Download size={16} />
+            <span>{accelerator.label}: {accelerator.installed ? "Installed" : accelerator.description}</span>
+            {!accelerator.installed && <button className="secondary-button compact" onClick={() => onInstallAccelerator(accelerator.backend as Exclude<BackendChoice, "auto" | "cpu" | "cuda">)} disabled={installingAccelerator !== null || installingCuda || busy}>
+              {installingAccelerator === accelerator.backend ? `${Math.round(acceleratorDownloadPercent)}%` : "Install"}
+            </button>}
+          </div>
+        ))}
+        {installingAccelerator && <button className="danger-ghost" onClick={onCancelAccelerator}><CircleStop size={16} /> Cancel accelerator download</button>}
       </section>
 
       <section className="card settings-card models-settings">

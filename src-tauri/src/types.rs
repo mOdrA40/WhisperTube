@@ -15,6 +15,18 @@ pub struct BrowserInfo {
     pub label: String,
     pub profiles: Vec<BrowserProfile>,
 }
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AcceleratorInfo {
+    pub id: String,
+    pub label: String,
+    pub backend: String,
+    pub supported: bool,
+    pub installed: bool,
+    pub downloadable: bool,
+    pub description: String,
+}
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SystemStatus {
@@ -30,6 +42,7 @@ pub struct SystemStatus {
     pub recommendation: String,
     pub recommended_model_id: String,
     pub recommended_backend: String,
+    pub accelerators: Vec<AcceleratorInfo>,
 }
 
 #[derive(Serialize)]
@@ -73,6 +86,13 @@ pub struct ModelDownloadPayload {
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct CudaDownloadPayload {
+    pub percent: f64,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AcceleratorDownloadPayload {
+    pub backend: String,
     pub percent: f64,
 }
 

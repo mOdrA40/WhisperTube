@@ -1,0 +1,141 @@
+name: Build accelerator packs
+
+on:
+  workflow_dispatch:
+    inputs:
+      whisper_version:
+        description: "whisper.cpp tag to build"
+        required: false
+        default: "v1.9.1"
+  push:
+    tags:
+      - "accelerators-v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.package }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            package: whispertube-macos-arm64-metal
+            backend: metal
+          - os: macos-15-intel
+            package: whispertube-macos-x64-metal
+            backend: metal
+          - os: ubuntu-24.04
+            package: whispertube-linux-x64-vulkan
+            backend: vulkan
+          - os: windows-2025
+            package: whispertube-windows-x64-vulkan
+            backend: vulkan
+
+    steps:
+      - name: Checkout build recipe
+        uses: actions/checkout@v4
+
+      - name: Install Linux Vulkan dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes build-essential cmake libvulkan-dev glslc spirv-headers zip
+
+      - name: Install Windows Vulkan SDK
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install vulkan-sdk --yes --no-progress
+          $sdk = Get-ChildItem -Path 'C:\VulkanSDK' -Directory | Sort-Object Name -Descending | Select-Object -First 1
+          if (-not $sdk) { throw 'Vulkan SDK tidak ditemukan setelah instalasi.' }
+          "VULKAN_SDK=$($sdk.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build whisper.cpp backend
+        shell: bash
+        env:
+          WHISPER_VERSION: ${{ inputs.whisper_version || 'v1.9.1' }}
+          BACKEND: ${{ matrix.backend }}
+          PACKAGE_NAME: ${{ matrix.package }}
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/whisper.cpp"
+          stage="$RUNNER_TEMP/$PACKAGE_NAME"
+          git clone --depth 1 --branch "$WHISPER_VERSION" https://github.com/ggml-org/whisper.cpp.git "$work"
+
+          if [ "$BACKEND" = "metal" ]; then
+            cmake -S "$work" -B "$work/build" -DGGML_METAL=ON -DWHISPER_BUILD_TESTS=OFF -DCMAKE_BUILD_TYPE=Release
+          else
+            cmake -S "$work" -B "$work/build" -DGGML_VULKAN=ON -DWHISPER_BUILD_TESTS=OFF -DCMAKE_BUILD_TYPE=Release
+          fi
+          cmake --build "$work/build" --config Release --target whisper-cli --parallel 2
+
+          cli=$(find "$work/build" -type f \( -name whisper-cli -o -name whisper-cli.exe \) | head -n 1)
+          if [ -z "$cli" ]; then
+            echo "whisper-cli tidak ditemukan setelah build" >&2
+            exit 1
+          fi
+          mkdir -p "$stage"
+          cp -R "$(dirname "$cli")"/* "$stage"/
+          echo "$stage" > "$RUNNER_TEMP/stage-path"
+
+      - name: Package and checksum (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          PACKAGE_NAME: ${{ matrix.package }}
+        run: |
+          set -euo pipefail
+          stage=$(cat "$RUNNER_TEMP/stage-path")
+          mkdir -p "$RUNNER_TEMP/packages"
+          (cd "$stage" && zip -qr "$RUNNER_TEMP/packages/$PACKAGE_NAME.zip" .)
+          (cd "$RUNNER_TEMP/packages" && shasum -a 256 "$PACKAGE_NAME.zip" > "$PACKAGE_NAME.sha256")
+
+      - name: Package and checksum (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          PACKAGE_NAME: ${{ matrix.package }}
+        run: |
+          $stage = Get-Content -Raw "$env:RUNNER_TEMP/stage-path"
+          $stage = $stage.Trim()
+          $packages = Join-Path $env:RUNNER_TEMP 'packages'
+          New-Item -ItemType Directory -Force -Path $packages | Out-Null
+          $archive = Join-Path $packages "$env:PACKAGE_NAME.zip"
+          Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $archive -Force
+          $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          "$hash  $env:PACKAGE_NAME.zip" | Set-Content (Join-Path $packages "$env:PACKAGE_NAME.sha256")
+
+      - name: Upload pack artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.package }}
+          path: ${{ runner.temp }}/packages/*
+          if-no-files-found: error
+
+  release:
+    name: Publish accelerator release
+    if: startsWith(github.ref, 'refs/tags/accelerators-')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download built packs
+        uses: actions/download-artifact@v4
+        with:
+          path: packages
+          merge-multiple: true
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" packages/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "WhisperTube accelerator packs $GITHUB_REF_NAME" \
+            --notes "Built from the pinned whisper.cpp source tag. Each pack includes a SHA-256 sidecar file."

@@ -205,6 +205,8 @@ fn run_ffmpeg(
 fn choose_backend(app: &AppHandle, requested: &str) -> Result<(String, PathBuf), String> {
     let cpu = engine_path(app, "cpu")?;
     let cuda = engine_path(app, "cuda")?;
+    let metal = engine_path(app, "metal")?;
+    let vulkan = engine_path(app, "vulkan")?;
     let nvidia = detect_nvidia().is_some();
     match requested {
         "cpu" => {
@@ -223,9 +225,34 @@ fn choose_backend(app: &AppHandle, requested: &str) -> Result<(String, PathBuf),
                 Ok(("cuda".into(), cuda))
             }
         }
+        "metal" => {
+            if !cfg!(target_os = "macos") {
+                Err("Apple Metal hanya tersedia di macOS.".into())
+            } else if !metal.exists() {
+                Err("Metal engine belum terpasang. Install Apple Metal dari Settings terlebih dahulu.".into())
+            } else {
+                Ok(("metal".into(), metal))
+            }
+        }
+        "vulkan" => {
+            if !cfg!(any(target_os = "windows", target_os = "linux")) {
+                Err("Vulkan accelerator saat ini tersedia di Windows/Linux.".into())
+            } else if !vulkan.exists() {
+                Err(
+                    "Vulkan engine belum terpasang. Install Vulkan dari Settings terlebih dahulu."
+                        .into(),
+                )
+            } else {
+                Ok(("vulkan".into(), vulkan))
+            }
+        }
         "auto" => {
             if nvidia && cuda.exists() {
                 Ok(("cuda".into(), cuda))
+            } else if metal.exists() {
+                Ok(("metal".into(), metal))
+            } else if vulkan.exists() {
+                Ok(("vulkan".into(), vulkan))
             } else if nvidia {
                 Err("NVIDIA GPU terdeteksi tetapi CUDA engine belum terpasang. Pasang CUDA acceleration terlebih dahulu.".into())
             } else if cpu.exists() {

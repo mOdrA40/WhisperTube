@@ -29,6 +29,7 @@ export type SystemStatus = {
   ffmpeg: boolean;
   cpuEngine: boolean;
   cudaEngine: boolean;
+  cudaSupported: boolean;
   nvidia: boolean;
   gpuName: string | null;
   gpuMemoryMb: number | null;
@@ -72,6 +73,7 @@ export type ProgressPayload = {
   stage: ProgressStage;
   percent: number;
   message: string;
+  backend: string | null;
 };
 
 export type ModelDownloadPayload = {

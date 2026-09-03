@@ -25,8 +25,9 @@ Rust orchestration
 ## Source layout
 
 Frontend mengikuti alur satu arah: `App.tsx` menyusun halaman, `useWhisperTube`
-memegang state dan side effect, `services/tauri.ts` menjadi adapter IPC, dan
-komponen di `components/` hanya menangani tampilan serta callback pengguna.
+memegang state dan side effect, `services/tauri.ts` menjadi adapter IPC,
+`i18n.tsx` menyediakan English/Indonesia/Mandarin, dan komponen di
+`components/` hanya menangani tampilan serta callback pengguna.
 
 Backend memakai boundary serupa: `commands.rs` hanya adapter command Tauri,
 `types.rs` menyimpan DTO IPC, `state.rs` menyimpan state job runtime,
@@ -105,12 +106,13 @@ activation. The request has a 30-second connection/response timeout, a
 download chunks.
 
 The system status query reads NVIDIA name, total VRAM, and free VRAM through
-`nvidia-smi`. Model entries expose conservative CUDA guardrails: Fast requires
+`nvidia-smi`, and uses platform-specific graphics detection for other GPU
+vendors. Model entries expose conservative CUDA guardrails: Fast requires
 about 2 GB, Balanced 4 GB, and Accurate 7 GB of free VRAM. These are
 preflight safety thresholds; actual available memory can change when other
-GPU applications are running. `Auto` does not silently fall back to CPU when
-NVIDIA is present but CUDA is not installed; the user is prompted to install
-the CUDA pack or explicitly choose CPU.
+GPU applications are running. CUDA is offered only on supported Windows x64
+NVIDIA builds. Metal/Vulkan catalog entries are filtered by target platform,
+architecture, and detected GPU before they reach the UI or installer.
 
 The repository also contains `.github/workflows/build-accelerator-packs.yml`.
 It builds Metal packs for macOS Intel/Apple Silicon and Vulkan packs for Linux

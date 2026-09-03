@@ -19,6 +19,7 @@ import {
   subscribeToProgress,
 } from "../services/tauri";
 import { friendlyError } from "../lib/format";
+import { getAcceleratorCopy, getModelCopy, useI18n } from "../i18n";
 import type {
   AppTab,
   BackendChoice,
@@ -32,9 +33,10 @@ import type {
   VideoMetadata,
 } from "../types";
 
-const initialProgress: ProgressPayload = { stage: "idle", percent: 0, message: "" };
+const initialProgress: ProgressPayload = { stage: "idle", percent: 0, message: "", backend: null };
 
 export function useWhisperTube() {
+  const { t } = useI18n();
   const [tab, setTab] = useState<AppTab>("transcribe");
   const [url, setUrl] = useState("");
   const [browser, setBrowser] = useState<BrowserChoice>("none");
@@ -105,6 +107,13 @@ export function useWhisperTube() {
     };
   }, [refreshSystem]);
 
+  useEffect(() => {
+    if (browser !== "none" && !browsers.some((item) => item.id === browser)) {
+      setBrowser("none");
+      setBrowserProfile("");
+    }
+  }, [browser, browsers]);
+
   function handleUrlChange(nextUrl: string) {
     setUrl(nextUrl);
     setMetadata(null);
@@ -124,39 +133,48 @@ export function useWhisperTube() {
   }, [result, searchQuery]);
 
   const autoAcceleratorInstalled = Boolean(system?.accelerators.some((accelerator) => accelerator.installed));
-  const cudaInstallRequired = Boolean(system?.nvidia && backend === "auto" && !system.cudaEngine && !autoAcceleratorInstalled);
+  const cudaInstallRequired = Boolean(system?.cudaSupported && system.nvidia && backend === "auto" && !system.cudaEngine && !autoAcceleratorInstalled);
   const vramWarning = useMemo(() => {
     if (!selectedModel || backend === "cpu" || backend === "metal" || backend === "vulkan" || !system) return null;
-    if (backend === "cuda" && !system.nvidia) {
-      return "NVIDIA GPU tidak terdeteksi. Pilih Auto atau CPU.";
+    if (backend === "cuda" && (!system.cudaSupported || !system.nvidia)) {
+      return t("error.cudaUnavailable");
     }
     if (!system.nvidia) return null;
+    if (!system.cudaSupported) {
+      return t("error.cudaUnavailable");
+    }
     if (!system.cudaEngine && backend === "auto" && !system.accelerators.some((accelerator) => accelerator.installed)) {
-      return "CUDA acceleration belum terpasang. Install CUDA agar proses tidak jatuh ke CPU.";
+      return t("error.cudaRequired");
     }
     if (!system.cudaEngine) return null;
     if (backend === "cuda" && !system.gpuFreeMemoryMb && !system.gpuMemoryMb) {
-      return "VRAM NVIDIA tidak terbaca. Tutup aplikasi GPU lain lalu klik Re-check components.";
+      return t("error.vramUnreadable");
     }
     const available = system.gpuFreeMemoryMb ?? system.gpuMemoryMb;
     if (available !== null && available !== undefined && available < selectedModel.vramRequiredMb) {
-      return `${selectedModel.label} membutuhkan sekitar ${(selectedModel.vramRequiredMb / 1024).toFixed(1)} GB VRAM bebas; tersedia ${(available / 1024).toFixed(1)} GB.`;
+      return t("error.vramTooLow", {
+        model: getModelCopy(selectedModel, t).label,
+        required: `${(selectedModel.vramRequiredMb / 1024).toFixed(1)} GB`,
+        available: `${(available / 1024).toFixed(1)} GB`,
+      });
     }
     return null;
-  }, [backend, selectedModel, system]);
+  }, [backend, selectedModel, system, t]);
   const acceleratorWarning = useMemo(() => {
     if (!system || backend === "auto" || backend === "cpu" || backend === "cuda") return null;
     const accelerator = system.accelerators.find((item) => item.backend === backend);
     if (!accelerator?.installed) {
-      return `${accelerator?.label ?? backend} belum terpasang. Install dari Settings terlebih dahulu.`;
+      return t("error.acceleratorMissing", {
+        accelerator: accelerator ? getAcceleratorCopy(accelerator, t).label : backend,
+      });
     }
     return null;
-  }, [backend, system]);
+  }, [backend, system, t]);
   const canStart = Boolean(metadata && selectedModel?.installed && runtimeReady && !installingCuda && !installingAccelerator && !cudaInstallRequired && !vramWarning && !acceleratorWarning);
 
   async function inspectVideo() {
     if (!url.trim()) {
-      setError("Tempel URL YouTube terlebih dahulu.");
+      setError(t("error.emptyUrl"));
       return;
     }
     setInspecting(true);
@@ -200,8 +218,12 @@ export function useWhisperTube() {
   }
 
   async function handleInstallCuda() {
+    if (!system?.cudaSupported || !system.nvidia) {
+      setError(t("error.cudaUnavailable"));
+      return;
+    }
     if (installingAccelerator !== null) {
-      setError("Installer accelerator lain sedang berjalan. Tunggu sampai selesai atau batalkan terlebih dahulu.");
+      setError(t("error.installerBusy"));
       return;
     }
     setError(null);
@@ -220,7 +242,7 @@ export function useWhisperTube() {
 
   async function handleInstallAccelerator(backendToInstall: Exclude<BackendChoice, "auto" | "cpu" | "cuda">) {
     if (installingCuda || installingAccelerator !== null) {
-      setError("Installer runtime lain sedang berjalan. Tunggu sampai selesai atau batalkan terlebih dahulu.");
+      setError(t("error.installerBusy"));
       return;
     }
     setError(null);
@@ -239,19 +261,19 @@ export function useWhisperTube() {
 
   async function handleStartTranscription() {
     if (!metadata) {
-      setError("Periksa video terlebih dahulu.");
+      setError(t("error.videoCheckFirst"));
       return;
     }
     if (!selectedModel?.installed) {
-      setError("Model yang dipilih belum diunduh.");
+      setError(t("error.modelNotDownloaded"));
       return;
     }
     if (!runtimeReady) {
-      setError("Runtime belum lengkap. Jalankan scripts/setup-windows.ps1 terlebih dahulu.");
+      setError(t("error.runtimeIncomplete"));
       return;
     }
     if (cudaInstallRequired) {
-      setError("CUDA acceleration belum terpasang. Install CUDA terlebih dahulu agar tidak memakai CPU.");
+      setError(t("error.cudaRequired"));
       return;
     }
     if (vramWarning) {
@@ -266,7 +288,7 @@ export function useWhisperTube() {
     setBusy(true);
     setError(null);
     setResult(null);
-    setProgress({ stage: "downloading", percent: 0, message: "Memulai job…" });
+    setProgress({ stage: "downloading", percent: 0, message: "", backend: null });
     try {
       setResult(await startTranscription({
         url: metadata.webpageUrl,

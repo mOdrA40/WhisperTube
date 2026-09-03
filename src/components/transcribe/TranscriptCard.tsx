@@ -1,5 +1,6 @@
 import { Check, Copy, FileText, Play, Search } from "lucide-react";
 import type { Segment, TranscriptResult } from "../../types";
+import { getModelLabel, useI18n } from "../../i18n";
 
 type TranscriptCardProps = {
   result: TranscriptResult;
@@ -20,22 +21,24 @@ export function TranscriptCard({
   onExport,
   onSearchChange,
 }: TranscriptCardProps) {
+  const { t } = useI18n();
+
   return (
     <div className="transcript-card card">
       <div className="transcript-toolbar">
         <div>
           <span className="success-label">
-            <Check size={14} /> Transcription complete
+            <Check size={14} /> {t("transcript.complete")}
           </span>
           <h3>{result.title}</h3>
           <p>
-            {result.language.toUpperCase()} • {result.model} • {result.backend.toUpperCase()}
+            {result.language.toUpperCase()} • {getModelLabel(result.model, t)} • {result.backend.toUpperCase()}
           </p>
         </div>
         <div className="toolbar-actions">
           <button type="button" className="secondary-button" onClick={onCopy}>
             {copied ? <Check size={16} /> : <Copy size={16} />}
-            {copied ? "Copied" : "Copy"}
+            {copied ? t("transcript.copied") : t("transcript.copy")}
           </button>
           <button type="button" className="secondary-button" onClick={() => onExport("txt")}>
             <FileText size={16} /> TXT
@@ -54,9 +57,9 @@ export function TranscriptCard({
         <input
           value={searchQuery}
           onChange={(event) => onSearchChange(event.target.value)}
-          placeholder="Cari di transcript…"
+          placeholder={t("transcript.search")}
         />
-        <span>{filteredSegments.length} segments</span>
+        <span>{filteredSegments.length} {t("transcript.segments")}</span>
       </div>
 
       <div className="segments">
@@ -69,7 +72,7 @@ export function TranscriptCard({
           </div>
         ))}
         {filteredSegments.length === 0 && (
-          <div className="empty-inline">Tidak ada bagian transcript yang cocok.</div>
+          <div className="empty-inline">{t("transcript.empty")}</div>
         )}
       </div>
     </div>

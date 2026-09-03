@@ -1,5 +1,6 @@
 import { CircleStop, Cpu, Download, LockKeyhole, LoaderCircle, MonitorCog, RotateCcw, Trash2 } from "lucide-react";
 import { formatMemory } from "../../lib/format";
+import { getAcceleratorCopy, getModelCopy, uiLanguageOptions, useI18n } from "../../i18n";
 import type { AcceleratorInfo, BackendChoice, BrowserChoice, BrowserInfo, ModelInfo, SystemStatus } from "../../types";
 import { CustomSelect, type SelectOption } from "../common/CustomSelect";
 
@@ -50,16 +51,21 @@ export function SettingsPage({
   onInstallAccelerator,
   onCancelAccelerator,
 }: SettingsPageProps) {
+  const { language: uiLanguage, setLanguage: setUiLanguage, t } = useI18n();
   const browserOptions: SelectOption[] = [
-    { value: "none", label: "Public videos only" },
+    { value: "none", label: t("settings.publicOnly") },
     ...browsers.map((item) => ({ value: item.id, label: item.label })),
   ];
+  const interfaceLanguageOptions: SelectOption[] = uiLanguageOptions.map((option) => ({
+    value: option.value,
+    label: option.label,
+  }));
 
   const activeBrowser = browsers.find((item) => item.id === browser);
-  const profileOptions: SelectOption[] =
+    const profileOptions: SelectOption[] =
     activeBrowser?.profiles.map((profile) => ({
       value: profile.id,
-      label: `${profile.label}${profile.isDefault ? " (Default)" : ""}`,
+      label: `${profile.label}${profile.isDefault ? ` (${t("settings.default")})` : ""}`,
     })) ?? [];
 
   return (
@@ -67,26 +73,27 @@ export function SettingsPage({
       <section className="card settings-card">
         <div className="card-title-row">
           <div>
-            <span className="eyebrow">Authentication</span>
-            <h3>YouTube access</h3>
+            <span className="eyebrow">{t("settings.eyebrow")}</span>
+            <h3>{t("settings.accessTitle")}</h3>
           </div>
           <LockKeyhole size={20} />
         </div>
         <p className="settings-intro">
-          WhisperTube tidak meminta email/password Google. Untuk Member-only, yt-dlp membaca session browser lokal yang sudah login.
+          {t("settings.accessIntro")}
         </p>
 
-        <label className="field-label">Browser session</label>
+        <label className="field-label">{t("settings.browserSession")}</label>
         <CustomSelect
           value={browser}
           options={browserOptions}
           onChange={(val) => onBrowserChange(val as BrowserChoice)}
           disabled={busy}
         />
+        <p className="settings-note">{t("settings.browserDetectNote")}</p>
 
         {browser !== "none" && activeBrowser && (
           <>
-            <label className="field-label">Browser profile</label>
+            <label className="field-label">{t("settings.browserProfile")}</label>
             <CustomSelect
               value={browserProfile}
               options={profileOptions}
@@ -94,67 +101,80 @@ export function SettingsPage({
               disabled={busy}
             />
             <p className="settings-note">
-              Profile terdeteksi dari konfigurasi lokal. Status login diverifikasi saat Check video.
+              {t("settings.profileNote")}
             </p>
           </>
         )}
 
         {browser === "none" && browsers.length === 0 && (
           <p className="settings-note">
-            Tidak ada browser session yang terdeteksi. Public videos tetap bisa diproses tanpa cookies.
+            {t("settings.noBrowsers")}
           </p>
         )}
 
         <div className="info-box">
           <LockKeyhole size={16} />
-          <span>Cookies tidak disimpan oleh aplikasi. yt-dlp membacanya saat proses berjalan.</span>
+          <span>{t("settings.cookies")}</span>
         </div>
+
+        <label className="field-label">{t("settings.interfaceLanguage")}</label>
+        <CustomSelect
+          value={uiLanguage}
+          options={interfaceLanguageOptions}
+          onChange={(value) => setUiLanguage(value as typeof uiLanguage)}
+          disabled={busy}
+        />
+        <p className="settings-note">{t("settings.interfaceLanguageNote")}</p>
       </section>
 
       <section className="card settings-card">
         <div className="card-title-row">
           <div>
-            <span className="eyebrow">Hardware</span>
-            <h3>Compute engine</h3>
+            <span className="eyebrow">{t("settings.hardwareEyebrow")}</span>
+            <h3>{t("settings.computeTitle")}</h3>
           </div>
           <Cpu size={20} />
         </div>
         <div className="status-table">
           <div>
-            <span>CPU engine</span>
+            <span>{t("settings.cpuEngine")}</span>
             <strong className={system?.cpuEngine ? "ok-text" : "bad-text"}>
-              {system?.cpuEngine ? "Installed" : "Missing"}
+              {system?.cpuEngine ? t("settings.installed") : t("settings.missing")}
             </strong>
           </div>
           <div>
-            <span>NVIDIA GPU</span>
-            <strong>{system?.gpuName ?? "Not detected"}</strong>
+            <span>{t("settings.gpu")}</span>
+            <strong>{system?.gpuName ?? t("hardware.notDetected")}</strong>
           </div>
           <div>
-            <span>Total VRAM</span>
-            <strong>{formatMemory(system?.gpuMemoryMb)}</strong>
+            <span>{t("settings.totalVram")}</span>
+            <strong>{formatMemory(system?.gpuMemoryMb, t("hardware.notDetected"))}</strong>
           </div>
           <div>
-            <span>Free VRAM</span>
-            <strong>{formatMemory(system?.gpuFreeMemoryMb)}</strong>
+            <span>{t("settings.freeVram")}</span>
+            <strong>{formatMemory(system?.gpuFreeMemoryMb, t("hardware.notDetected"))}</strong>
           </div>
           <div>
-            <span>CUDA engine</span>
-            <strong className={system?.cudaEngine ? "ok-text" : "muted-text"}>
-              {system?.cudaEngine ? "Installed" : "Optional"}
+            <span>{t("settings.cudaEngine")}</span>
+            <strong className={system?.cudaSupported && system.cudaEngine ? "ok-text" : "muted-text"}>
+              {system?.cudaSupported && system.cudaEngine
+                ? t("settings.installed")
+                : system?.cudaSupported
+                  ? t("settings.optional")
+                : t("settings.unavailable")}
             </strong>
           </div>
           <div>
-            <span>CPU threads</span>
+            <span>{t("hardware.cpuThreads")}</span>
             <strong>{system?.cpuThreads ?? "—"}</strong>
           </div>
         </div>
 
-        {system?.nvidia ? (
+        {system?.cudaSupported && system.nvidia ? (
           <>
             <div className="info-box">
               <Download size={16} />
-              <span>CUDA engine diunduh dari release resmi whisper.cpp dan dipasang ke storage aplikasi (~437 MB).</span>
+              <span>{t("settings.cudaInfo")}</span>
             </div>
             <button
               type="button"
@@ -164,28 +184,30 @@ export function SettingsPage({
             >
               {installingCuda ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}
               {installingCuda
-                ? `Installing CUDA ${Math.round(cudaDownloadPercent)}%`
+                ? t("settings.installingCuda", { percent: Math.round(cudaDownloadPercent) })
                 : system.cudaEngine
-                  ? "CUDA engine installed"
-                  : "Install CUDA acceleration"}
+                  ? t("settings.cudaInstalled")
+                  : t("settings.installCuda")}
             </button>
             {installingCuda && (
               <button type="button" className="danger-ghost" onClick={onCancelCuda}>
-                <CircleStop size={16} /> Cancel CUDA download
+                <CircleStop size={16} /> {t("settings.cancelCuda")}
               </button>
             )}
           </>
         ) : (
           <p className="settings-note">
-            NVIDIA GPU tidak terdeteksi. CUDA acceleration hanya tersedia jika driver NVIDIA aktif.
+            {system?.gpuName && !system.nvidia ? t("settings.cudaUnavailable") : t("settings.noGpu")}
           </p>
         )}
 
-        {accelerators.map((accelerator) => (
+        {accelerators.filter((accelerator) => accelerator.supported).map((accelerator) => {
+          const copy = getAcceleratorCopy(accelerator, t);
+          return (
           <div className="info-box" key={accelerator.id}>
             <Download size={16} />
             <span>
-              {accelerator.label}: {accelerator.installed ? "Installed" : accelerator.description}
+              {copy.label}: {accelerator.installed ? t("settings.acceleratorInstalled") : copy.description}
             </span>
             {!accelerator.installed && (
               <button
@@ -199,15 +221,16 @@ export function SettingsPage({
                 disabled={installingAccelerator !== null || installingCuda || busy}
               >
                 {installingAccelerator === accelerator.backend
-                  ? `${Math.round(acceleratorDownloadPercent)}%`
-                  : "Install"}
+                  ? t("settings.acceleratorInstalling", { percent: Math.round(acceleratorDownloadPercent) })
+                  : t("settings.acceleratorInstall")}
               </button>
             )}
           </div>
-        ))}
+          );
+        })}
         {installingAccelerator && (
           <button type="button" className="danger-ghost" onClick={onCancelAccelerator}>
-            <CircleStop size={16} /> Cancel accelerator download
+            <CircleStop size={16} /> {t("controls.cancelAccelerator")}
           </button>
         )}
       </section>
@@ -215,8 +238,8 @@ export function SettingsPage({
       <section className="card settings-card models-settings">
         <div className="card-title-row">
           <div>
-            <span className="eyebrow">Storage</span>
-            <h3>Whisper models</h3>
+            <span className="eyebrow">{t("settings.storageEyebrow")}</span>
+            <h3>{t("settings.modelsTitle")}</h3>
           </div>
           <Download size={20} />
         </div>
@@ -224,9 +247,9 @@ export function SettingsPage({
           {models.map((model) => (
             <div className="model-manage-row" key={model.id}>
               <div>
-                <strong>{model.label}</strong>
+                <strong>{getModelCopy(model, t).label}</strong>
                 <span>
-                  {model.description} • {model.sizeMb} MB • CUDA ≥ {formatMemory(model.vramRequiredMb)}
+                  {getModelCopy(model, t).description} • {model.sizeMb} MB • {t("controls.cudaRequirement", { memory: formatMemory(model.vramRequiredMb, t("hardware.notDetected")) })}
                 </span>
               </div>
               {model.installed ? (
@@ -234,7 +257,8 @@ export function SettingsPage({
                   type="button"
                   className="icon-button danger"
                   onClick={() => onRemoveModel(model.id)}
-                  title="Delete model"
+                  title={t("settings.deleteModel")}
+                  aria-label={t("settings.deleteModel")}
                 >
                   <Trash2 size={17} />
                 </button>
@@ -252,7 +276,7 @@ export function SettingsPage({
                   )}
                   {downloadingModel[model.id] !== undefined
                     ? `${Math.round(downloadingModel[model.id])}%`
-                    : "Download"}
+                    : t("settings.download")}
                 </button>
               )}
             </div>
@@ -263,8 +287,8 @@ export function SettingsPage({
       <section className="card settings-card">
         <div className="card-title-row">
           <div>
-            <span className="eyebrow">Runtime</span>
-            <h3>External components</h3>
+            <span className="eyebrow">{t("settings.runtimeEyebrow")}</span>
+            <h3>{t("settings.externalTitle")}</h3>
           </div>
           <MonitorCog size={20} />
         </div>
@@ -272,24 +296,24 @@ export function SettingsPage({
           <div>
             <span>yt-dlp</span>
             <strong className={system?.ytDlp ? "ok-text" : "bad-text"}>
-              {system?.ytDlp ? "Ready" : "Missing"}
+              {system?.ytDlp ? t("settings.ready") : t("settings.missing")}
             </strong>
           </div>
           <div>
             <span>FFmpeg</span>
             <strong className={system?.ffmpeg ? "ok-text" : "bad-text"}>
-              {system?.ffmpeg ? "Ready" : "Missing"}
+              {system?.ffmpeg ? t("settings.ready") : t("settings.missing")}
             </strong>
           </div>
           <div>
             <span>whisper.cpp CPU</span>
             <strong className={system?.cpuEngine ? "ok-text" : "bad-text"}>
-              {system?.cpuEngine ? "Ready" : "Missing"}
+              {system?.cpuEngine ? t("settings.ready") : t("settings.missing")}
             </strong>
           </div>
         </div>
         <button type="button" className="secondary-button full" onClick={onRefresh}>
-          <RotateCcw size={16} /> Re-check components
+          <RotateCcw size={16} /> {t("settings.recheck")}
         </button>
       </section>
     </div>

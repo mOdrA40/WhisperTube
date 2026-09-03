@@ -58,6 +58,11 @@ pub async fn download_model(app: AppHandle, model_id: String) -> Result<(), Stri
 
 #[tauri::command]
 pub async fn install_cuda_engine(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    if !cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        return Err(
+            "CUDA engine otomatis saat ini hanya tersedia pada build Windows yang didukung.".into(),
+        );
+    }
     if system::detect_nvidia().is_none() {
         return Err("NVIDIA GPU/driver tidak terdeteksi. CUDA engine tidak perlu dipasang.".into());
     }

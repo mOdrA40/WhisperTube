@@ -425,7 +425,7 @@ fn finalize_cuda_engine_blocking(
 }
 
 pub async fn install_cuda_engine(app: AppHandle, cancelled: Arc<AtomicBool>) -> Result<(), String> {
-    if !cfg!(target_os = "windows") {
+    if !cfg!(all(target_os = "windows", target_arch = "x86_64")) {
         return Err("Download CUDA otomatis saat ini hanya didukung di Windows.".into());
     }
     let runtime_root = user_runtime_dir(&app)?;

@@ -75,9 +75,10 @@ fn executable_name() -> &'static str {
     }
 }
 
-pub fn catalog(app: &AppHandle) -> Result<Vec<AcceleratorInfo>, String> {
+pub fn catalog(app: &AppHandle, gpu_detected: bool) -> Result<Vec<AcceleratorInfo>, String> {
     Ok(pack_specs()
         .into_iter()
+        .filter(|_| cfg!(target_os = "macos") || gpu_detected)
         .map(|spec| AcceleratorInfo {
             id: spec.backend.into(),
             label: spec.label.into(),

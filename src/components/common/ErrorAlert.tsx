@@ -1,4 +1,5 @@
 import { AlertCircle, X } from "lucide-react";
+import { useI18n } from "../../i18n";
 
 type ErrorAlertProps = {
   message: string | null;
@@ -6,6 +7,7 @@ type ErrorAlertProps = {
 };
 
 export function ErrorAlert({ message, onDismiss }: ErrorAlertProps) {
+  const { t } = useI18n();
   if (!message) return null;
 
   return (
@@ -14,14 +16,15 @@ export function ErrorAlert({ message, onDismiss }: ErrorAlertProps) {
         <AlertCircle size={18} />
       </div>
       <div className="alert-body">
-        <strong className="alert-title">Terjadi Kendala Teknis</strong>
+        <strong className="alert-title">{t("error.title")}</strong>
         <p className="alert-message-text">{message}</p>
       </div>
       <button
         type="button"
         className="alert-dismiss-btn"
         onClick={onDismiss}
-        title="Tutup Pesan Error"
+        title={t("error.dismiss")}
+        aria-label={t("error.dismiss")}
       >
         <X size={16} />
       </button>

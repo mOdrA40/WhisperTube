@@ -1,207 +1,142 @@
 # WhisperTube 0.1
 
-Desktop app lokal untuk mengubah video YouTube menjadi transcript memakai `yt-dlp + FFmpeg + whisper.cpp`.
+WhisperTube is a local-first desktop app that turns YouTube videos into transcripts using `yt-dlp`, FFmpeg, and whisper.cpp. Audio and transcript processing stay on the user's device.
 
-## Target utama versi ini
+Other languages: [Bahasa Indonesia](README_ID.md) · [中文（普通话）](README_CN.md)
 
-- Windows 10/11 x64: **jalur development utama dan paling siap dicoba**.
-- NVIDIA CUDA: opsional, dipasang terpisah agar setup CPU tidak menjadi ratusan MB.
-- macOS/Linux: struktur backend sudah cross-platform dan tersedia bootstrap development, tetapi jalur packaging/distribusi belum sekeras Windows pada v0.1.
+## Current scope
 
-## Fitur yang sudah ada
+- Windows 10/11 x64 is the primary development and testing target.
+- English is the default interface language. Indonesian and Simplified Chinese are also available from Settings.
+- CPU inference is included in the development setup.
+- NVIDIA CUDA is optional and installed separately so the base setup stays small.
+- The app detects the current operating system, architecture, GPU, and installed browsers before offering optional components.
 
-- Paste URL YouTube lalu baca metadata sebelum download.
-- Public video.
-- Member-only/authenticated video melalui `yt-dlp --cookies-from-browser` dengan pilihan browser dan profile lokal. Browser yang didukung mengikuti platform: Chrome, Edge, Firefox, Brave, Chromium, Opera, Vivaldi, Whale, serta Safari di macOS. Aplikasi tidak meminta password Google.
-- Download `bestaudio/best`; **tidak mengubahnya dulu menjadi MP3**.
-- FFmpeg menormalisasi ke WAV PCM signed 16-bit, mono, 16 kHz.
-- whisper.cpp local inference.
+## Features
+
+- Paste a YouTube URL and inspect metadata before downloading.
+- Public videos.
+- Member-only/authenticated videos through `yt-dlp --cookies-from-browser` using a detected local browser profile. The app never asks for a Google password.
+- Browser discovery for Chrome, Edge, Firefox, Brave, Chromium, Opera, Vivaldi, Whale, and Safari on macOS. Settings only shows browsers and profiles detected on the current device.
+- Download `bestaudio/best`; the original download is not converted to MP3 first.
+- FFmpeg normalization to signed 16-bit PCM WAV, mono, 16 kHz.
+- Local whisper.cpp inference.
+- Three interface languages: English, Bahasa Indonesia, and 中文（普通话）.
 - Model manager:
   - Fast: `base` (~142 MB)
   - Balanced: `large-v3-turbo-q5_0` (~547 MB)
   - Accurate: `large-v3-q5_0` (~1.1 GB)
-- Verifikasi SHA-1 model sesuai manifest upstream whisper.cpp sebelum model dipasang.
+- SHA-1 verification for models against the known upstream manifest.
 - CPU fallback.
-- NVIDIA CUDA engine opsional.
-- Auto backend: memakai CUDA bila NVIDIA + CUDA engine tersedia; jika NVIDIA ada tetapi CUDA belum siap, aplikasi meminta instalasi CUDA atau pilihan CPU secara eksplisit.
-- Progress download / conversion / transcription.
-- Cancel job yang membunuh child process aktif.
-- Transcript bertimestamp.
-- Export TXT, SRT, VTT.
-- History lokal memakai SQLite.
-- Audio sumber dan WAV sementara dihapus setelah selesai kecuali `Keep processed audio` dinyalakan.
+- Windows x64 NVIDIA CUDA acceleration, installed on demand from the pinned official whisper.cpp release.
+- Metal and Vulkan accelerator packs only appear when the platform, architecture, and compatible GPU detection match.
+- Progress reporting, cancellation, timestamped transcripts, TXT/SRT/VTT export, and local SQLite history.
+- Temporary audio and WAV files are removed after processing unless `Keep processed audio` is enabled.
 
----
+## Windows development setup
 
-# Windows 11 — mulai dari ZIP
+### 1. Extract the project
 
-## 1. Extract ZIP
-
-Contoh:
+For example:
 
 ```text
 D:\Projects\WhisperTube
 ```
 
-Hindari folder yang membutuhkan Administrator seperti `C:\Program Files`.
+Avoid protected directories such as `C:\Program Files` during development.
 
-## 2. Prasyarat development
+### 2. Install prerequisites
 
-### A. Node.js
+#### Node.js
 
-Gunakan Node.js 22 atau lebih baru.
-
-Cek PowerShell:
+Use Node.js 22 or newer:
 
 ```powershell
 node -v
 npm -v
 ```
 
-### B. Rust
+#### Rust
 
-Install Rust dari:
-
-```text
-https://rustup.rs/
-```
-
-Setelah install, tutup/buka PowerShell dan cek:
+Install Rust from <https://rustup.rs/>. Open a new PowerShell window afterward:
 
 ```powershell
 rustc --version
 cargo --version
 ```
 
-### C. Microsoft C++ Build Tools
+#### Microsoft C++ Build Tools
 
-Tauri di Windows membutuhkan Microsoft C++ Build Tools.
+Install Visual Studio Build Tools 2022 and select the **Desktop development with C++** workload. Keep the MSVC compiler and a Windows SDK selected. WebView2 Runtime is normally already available on Windows 10/11.
 
-Install **Visual Studio Build Tools 2022** dan centang workload:
-
-```text
-Desktop development with C++
-```
-
-Pastikan komponen MSVC + Windows SDK ikut terpasang.
-
-Windows 10/11 biasanya sudah memiliki WebView2 Runtime.
-
-## 3. Buka PowerShell pada folder project
+### 3. Open PowerShell in the project folder
 
 ```powershell
 cd D:\Projects\WhisperTube
 ```
 
-Jika PowerShell memblokir `.ps1`, hanya untuk terminal saat ini:
+If PowerShell blocks local scripts, bypass the policy only for the current terminal:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
 ```
 
-## 4. Jalankan bootstrap
+### 4. Run the bootstrap
 
 ```powershell
 .\scripts\setup-windows.ps1
 ```
 
-Script akan:
+The script checks Node/npm/Rust, downloads `yt-dlp.exe`, FFmpeg, and the whisper.cpp CPU engine, installs JavaScript dependencies, and runs a runtime self-check. Whisper models are downloaded later from the UI.
 
-1. memeriksa Node/npm/Rust,
-2. mengunduh `yt-dlp.exe`,
-3. mengunduh FFmpeg,
-4. mengunduh whisper.cpp CPU engine v1.9.1,
-5. menjalankan `npm install`,
-6. mengetes ketiga binary.
-
-Runtime disimpan di:
+Development runtime files are stored under:
 
 ```text
 src-tauri\runtime\windows\
 ```
 
-Model AI **belum** diunduh pada tahap ini; model diunduh melalui UI.
-
-## 5. Jika punya NVIDIA GPU — opsional tetapi direkomendasikan
-
-Pada packaged EXE, CUDA dapat dipasang langsung dari aplikasi melalui:
-
-```text
-Settings → Hardware → Install CUDA acceleration
-```
-
-WhisperTube mengunduh release CUDA `whisper.cpp` yang sudah dipin, memvalidasi
-SHA-256, melakukan self-check, lalu menyimpan engine di app data user. Tidak
-perlu meminta user menjalankan PowerShell. Script berikut tetap tersedia untuk
-workflow development dari source:
-
-```powershell
-.\scripts\install-cuda-engine.ps1
-```
-
-Package CUDA whisper.cpp besar, sehingga sengaja tidak ikut setup dasar.
-
-Jika dipasang dari script development, engine berada di:
-
-```text
-src-tauri\runtime\windows\cuda\
-```
-
-## Accelerator release untuk maintainer
-
-Workflow `.github/workflows/build-accelerator-packs.yml` membangun pack Metal
-dan Vulkan dari source resmi `whisper.cpp`. Jalankan workflow secara manual
-untuk test artifact, atau push tag seperti `accelerators-v0.1.0` untuk membuat
-GitHub Release beserta file SHA-256.
-
-Repository boleh private selama development/CI. Sebelum EXE production
-disebar, release accelerator harus public karena aplikasi user tidak membawa
-GitHub token. CUDA Windows tetap memakai release upstream yang dipin.
-
-## 6. Jalankan aplikasi development
+### 5. Start the development app
 
 ```powershell
 .\scripts\run-dev.ps1
 ```
 
-atau:
+or:
 
 ```powershell
 npm run tauri:dev
 ```
 
-Pertama kali Rust compile akan mengompilasi dependencies Tauri/Rust.
+The first Rust compilation can take a while. Later runs use incremental compilation. If Vite reports that port `1420` is already in use, close the previous development process before starting another one.
 
-## 7. Download model dari aplikasi
+### 6. Download a model
 
-Pada panel kanan pilih model.
+Open the model panel and choose a model. `Balanced` is a good starting point for general use. Model files are stored in the user's application data, not in the source tree.
 
-Rekomendasi awal:
+When a supported NVIDIA CUDA path is available, WhisperTube reads total and free VRAM and applies conservative model guardrails. These limits are safety checks, not a universal guarantee because drivers and other applications can consume VRAM.
 
-```text
-Balanced — Large V3 Turbo Q5
-```
+### 7. Optional acceleration
 
-Klik `Download Balanced`. File sekitar 547 MB.
+Open **Settings → Hardware**. WhisperTube only offers an accelerator that matches the current platform and detected hardware:
 
-Model tersimpan di app data lokal Windows, bukan di source tree.
+- Windows x64 + detected NVIDIA GPU: CUDA may be installed from the official pinned whisper.cpp release.
+- macOS: the matching Apple Metal pack can be offered.
+- Windows/Linux x64 with a detected GPU: the matching Vulkan pack can be offered.
+- A CPU-only or unsupported device does not receive an irrelevant accelerator download button.
 
-Jika CUDA aktif, aplikasi membaca total dan free VRAM NVIDIA untuk memberi
-rekomendasi model. Aplikasi menolak kombinasi model CUDA yang melewati batas
-VRAM konservatif. Batas ini adalah guardrail, bukan jaminan universal karena
-driver dan aplikasi GPU lain dapat memakai VRAM.
+The CUDA package is large, so it is deliberately excluded from the base setup. The app downloads it into user app storage and verifies its SHA-256 before activation.
 
-## 8. Transkripsi pertama
+### 8. First transcription
 
-1. Tempel link YouTube.
-2. Klik `Check video`.
-3. Pastikan metadata tampil.
-4. Pilih `Balanced`.
-5. `Compute backend = Auto`.
-6. `Language = Auto detect`.
-7. Klik `Transcribe now`.
+1. Paste a YouTube link.
+2. Select **Check video**.
+3. Confirm that the metadata preview appears.
+4. Download and select a model.
+5. Leave **Compute backend** on **Auto** unless you need a specific backend.
+6. Choose a transcription language or **Auto detect**.
+7. Select **Transcribe now**.
 
-Pipeline internal:
+The internal pipeline is:
 
 ```text
 YouTube
@@ -215,115 +150,81 @@ segments + timestamps
 JSON + TXT + SRT + VTT + SQLite history
 ```
 
-## 9. Video YouTube Member
+## Member-only YouTube videos
 
-Login YouTube seperti biasa di Chrome/Edge/Firefox/Brave terlebih dahulu.
+Log in to YouTube in a supported browser first. In WhisperTube, open **Settings → YouTube access** and choose the detected browser and profile containing the membership. Then return to Transcribe and select **Check video**.
 
-Di WhisperTube:
+WhisperTube does not request Google credentials and does not copy cookies into its database. `yt-dlp` reads the selected browser session only while the process runs. YouTube extractor, authentication, and PO Token changes can still affect authenticated downloads; keeping `yt-dlp` current is the first line of defense.
 
-```text
-Settings → YouTube access → Browser session
-```
+## Build a Windows installer
 
-Pilih browser yang memiliki membership tersebut.
-
-Lalu kembali ke Transcribe dan klik `Check video`.
-
-WhisperTube tidak meminta email/password Google dan tidak menulis cookies ke database aplikasi. `yt-dlp` membaca browser session ketika process dijalankan.
-
-Catatan: YouTube terus mengubah extractor, login flow, dan PO Token. Dukungan authenticated video bergantung juga pada kompatibilitas versi `yt-dlp` terbaru.
-
----
-
-# Build installer Windows
-
-Setelah development berhasil:
+After development testing succeeds:
 
 ```powershell
 .\scripts\build-windows.ps1
 ```
 
-Hasil Tauri berada di sekitar:
+The installer is produced under:
 
 ```text
 src-tauri\target\release\bundle\
 ```
 
-Untuk produk yang akan didistribusikan, jangan langsung publish build development ini sebelum audit lisensi exact FFmpeg/yt-dlp binary, signing, auto-update, dan installer QA.
+`npm run tauri:build` is the full release build: it compiles Rust in release mode, builds the frontend, bundles runtime resources, and creates the Windows installer. It is not required for every development test.
 
----
+## Accelerator releases for maintainers
 
-# Struktur project
+`.github/workflows/build-accelerator-packs.yml` builds Metal and Vulkan packs from a pinned official whisper.cpp tag. Run the workflow manually to test artifacts, or push a tag such as `accelerators-v0.1.0` to publish a GitHub Release with SHA-256 sidecars.
+
+The repository can remain private during development and CI. Before shipping an EXE, the accelerator release must be public because the app does not embed a GitHub token. CUDA Windows downloads continue to use the pinned upstream whisper.cpp release.
+
+## Project structure
 
 ```text
 WhisperTube/
 ├─ src/
-│  ├─ App.tsx              # UI dan flow frontend
-│  ├─ main.tsx
+│  ├─ components/          # UI components
+│  ├─ assets/fonts/        # Bundled interface fonts
+│  ├─ i18n.tsx             # English/Indonesian/Chinese UI translations
+│  ├─ hooks/               # Application state and actions
+│  ├─ services/            # Tauri IPC boundary
 │  └─ styles.css
-│
 ├─ src-tauri/
-│  ├─ src/
-│  │  ├─ lib.rs            # orchestration Rust
-│  │  └─ main.rs
+│  ├─ src/                  # Rust commands and domain modules
 │  ├─ capabilities/
-│  ├─ runtime/             # binary runtime hasil bootstrap
+│  ├─ runtime/              # Development runtime downloads
 │  ├─ Cargo.toml
 │  └─ tauri.conf.json
-│
 ├─ scripts/
-│  ├─ setup-windows.ps1
-│  ├─ install-cuda-engine.ps1
-│  ├─ run-dev.ps1
-│  ├─ build-windows.ps1
-│  ├─ diagnose-windows.ps1
-│  ├─ setup-macos.sh
-│  └─ setup-linux.sh
-│
 ├─ THIRD_PARTY_NOTICES.md
-├─ docs/
-│  ├─ ARCHITECTURE.md
-│  └─ TROUBLESHOOTING.md
-└─ README.md
+├─ README.md               # English, default documentation
+├─ README_ID.md            # Indonesian documentation
+└─ README_CN.md            # Simplified Chinese documentation
 ```
 
----
+## Local data
 
-# Lokasi data user
+Tauri selects the platform-specific app-local-data directory. WhisperTube stores model files, job data, exports, and `whispertube.db` there. Temporary source audio and WAV files are deleted when `Keep processed audio` is off.
 
-Tauri menentukan app-local-data sesuai OS. Di dalamnya WhisperTube membuat kurang lebih:
+## Security decisions
 
-```text
-models/
-jobs/
-whispertube.db
-```
+- YouTube URLs are restricted to official YouTube hosts before downloader execution.
+- The frontend has no arbitrary shell execution capability.
+- External processes are launched by Rust with argument arrays, not concatenated shell commands.
+- Known model and accelerator downloads are verified with checksums before activation.
+- Browser discovery reads local profile metadata; cookies are read by yt-dlp only for the selected job.
+- Only one transcription job and one runtime installer can run at a time.
+- Cancellation terminates the active process tree on Windows with `taskkill /T /F`.
 
-Setiap job menyimpan final transcript + exports. Audio sementara dibuang bila opsi keep audio mati.
+## Known limitations
 
----
+1. The pinned CUDA bootstrap currently targets Windows x64 with a detected NVIDIA driver.
+2. Metal and Vulkan packs require matching public GitHub Release assets and are not bundled into the base source setup.
+3. Browser support depends on yt-dlp's current cookie extraction support and the browser's OS security behavior.
+4. Member-only downloads can break when YouTube changes authentication or PO Token requirements.
+5. There are no playlist/batch jobs, speaker diarization, word-level subtitle editing, or runtime auto-updates yet.
+6. macOS/Linux bootstrap and installer QA are not as production-ready as the Windows path in v0.1.
 
-# Security decisions
+## License
 
-- URL dibatasi ke host YouTube resmi untuk command downloader.
-- Frontend tidak diberi arbitrary shell execution.
-- Semua process external dipanggil oleh Rust dengan argument array, bukan string command hasil concatenation.
-- Model hanya dari manifest yang dikenal dan diverifikasi checksum.
-- Tidak meminta Google credentials.
-- Satu transcription job aktif pada satu waktu di v0.1.
-- Cancel membunuh process tree di Windows memakai `taskkill /T /F`.
-
----
-
-# Known limitations v0.1
-
-1. CUDA bootstrap yang disediakan khusus Windows x64/NVIDIA.
-2. AMD/Intel Vulkan belum dibundel karena official upstream Windows release belum konsisten menyediakan Vulkan binary; arsitektur backend dapat diperluas setelah engine pack Vulkan kita build sendiri di CI.
-3. Member-only YouTube dapat rusak sewaktu-waktu jika YouTube mengubah authentication/PO Token; update yt-dlp adalah garis pertahanan pertama.
-4. Belum ada playlist/batch jobs.
-5. Belum ada speaker diarization.
-6. Belum ada word-level subtitle editing/player seek.
-7. macOS/Linux bootstrap ditujukan untuk development, belum installer production-grade.
-8. Belum ada auto-updater komponen runtime.
-
-Ini batasan yang sengaja dibuat eksplisit agar v0.1 tetap dapat diuji dan di-debug dengan benar.
+WhisperTube source code is MIT-licensed. Runtime components and bundled fonts retain their upstream licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

@@ -23,7 +23,7 @@ export function friendlyError(error: unknown) {
   return raw.replace(/^Error:\s*/i, "");
 }
 
-export function formatMemory(megabytes: number | null | undefined) {
-  if (megabytes === null || megabytes === undefined || megabytes <= 0) return "Not detected";
+export function formatMemory(megabytes: number | null | undefined, notDetected = "Not detected") {
+  if (megabytes === null || megabytes === undefined || megabytes <= 0) return notDetected;
   return `${(megabytes / 1024).toFixed(1)} GB`;
 }

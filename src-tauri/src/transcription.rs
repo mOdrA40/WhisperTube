@@ -17,18 +17,25 @@ use crate::{
     browsers::browser_args,
     history, models,
     paths::{engine_path, jobs_dir, model_path, tool_path},
-    system::detect_nvidia,
+    system::{detect_gpu, detect_nvidia},
     types::{ProgressPayload, Segment, TranscriptRequest, TranscriptResult},
     youtube::validate_youtube_url,
 };
 
-fn emit_progress(app: &AppHandle, stage: &str, percent: f64, message: impl Into<String>) {
+fn emit_progress(
+    app: &AppHandle,
+    stage: &str,
+    percent: f64,
+    message: impl Into<String>,
+    backend: Option<&str>,
+) {
     let _ = app.emit(
         "job-progress",
         ProgressPayload {
             stage: stage.to_string(),
             percent: percent.clamp(0.0, 100.0),
             message: message.into(),
+            backend: backend.map(str::to_string),
         },
     );
 }
@@ -99,6 +106,7 @@ fn run_download(
                     "downloading",
                     percent,
                     "Mengunduh best available audio dari YouTube…",
+                    None,
                 );
             }
         }
@@ -181,7 +189,13 @@ fn run_ffmpeg(
                 } else {
                     0.0
                 };
-                emit_progress(app, "converting", percent, "Konversi ke PCM 16 kHz mono…");
+                emit_progress(
+                    app,
+                    "converting",
+                    percent,
+                    "Konversi ke PCM 16 kHz mono…",
+                    None,
+                );
             }
         }
         if cancelled.load(Ordering::SeqCst) {
@@ -208,6 +222,7 @@ fn choose_backend(app: &AppHandle, requested: &str) -> Result<(String, PathBuf),
     let metal = engine_path(app, "metal")?;
     let vulkan = engine_path(app, "vulkan")?;
     let nvidia = detect_nvidia().is_some();
+    let gpu_detected = detect_gpu().is_some();
     match requested {
         "cpu" => {
             if !cpu.exists() {
@@ -217,7 +232,9 @@ fn choose_backend(app: &AppHandle, requested: &str) -> Result<(String, PathBuf),
             }
         }
         "cuda" => {
-            if !nvidia {
+            if !cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+                Err("CUDA hanya tersedia pada build Windows yang didukung.".into())
+            } else if !nvidia {
                 Err("CUDA dipilih tetapi NVIDIA GPU/driver tidak terdeteksi.".into())
             } else if !cuda.exists() {
                 Err("CUDA engine belum terpasang. Install CUDA acceleration dari Settings terlebih dahulu.".into())
@@ -237,6 +254,8 @@ fn choose_backend(app: &AppHandle, requested: &str) -> Result<(String, PathBuf),
         "vulkan" => {
             if !cfg!(any(target_os = "windows", target_os = "linux")) {
                 Err("Vulkan accelerator saat ini tersedia di Windows/Linux.".into())
+            } else if !gpu_detected {
+                Err("Vulkan dipilih tetapi GPU tidak terdeteksi pada perangkat ini.".into())
             } else if !vulkan.exists() {
                 Err(
                     "Vulkan engine belum terpasang. Install Vulkan dari Settings terlebih dahulu."
@@ -247,13 +266,16 @@ fn choose_backend(app: &AppHandle, requested: &str) -> Result<(String, PathBuf),
             }
         }
         "auto" => {
-            if nvidia && cuda.exists() {
+            if nvidia && cfg!(all(target_os = "windows", target_arch = "x86_64")) && cuda.exists() {
                 Ok(("cuda".into(), cuda))
-            } else if metal.exists() {
+            } else if cfg!(target_os = "macos") && metal.exists() {
                 Ok(("metal".into(), metal))
-            } else if vulkan.exists() {
+            } else if cfg!(any(target_os = "windows", target_os = "linux"))
+                && gpu_detected
+                && vulkan.exists()
+            {
                 Ok(("vulkan".into(), vulkan))
-            } else if nvidia {
+            } else if nvidia && cfg!(all(target_os = "windows", target_arch = "x86_64")) {
                 Err("NVIDIA GPU terdeteksi tetapi CUDA engine belum terpasang. Pasang CUDA acceleration terlebih dahulu.".into())
             } else if cpu.exists() {
                 Ok(("cpu".into(), cpu))
@@ -326,6 +348,7 @@ fn run_whisper(
                         "Whisper sedang bekerja via {}…",
                         resolved_backend.to_uppercase()
                     ),
+                    Some(&resolved_backend),
                 );
             }
         }
@@ -407,7 +430,7 @@ pub fn pipeline(
     let job_dir = jobs_dir.join(Uuid::new_v4().to_string());
     fs::create_dir_all(&job_dir).map_err(|e| format!("Gagal membuat job directory: {e}"))?;
 
-    emit_progress(&app, "downloading", 0.0, "Menyiapkan download…");
+    emit_progress(&app, "downloading", 0.0, "Menyiapkan download…", None);
     let source = run_download(&app, &request, &job_dir, &active_pid, &cancelled)?;
     if cancelled.load(Ordering::SeqCst) {
         return Err("Job dibatalkan.".into());
@@ -419,6 +442,7 @@ pub fn pipeline(
         "converting",
         0.0,
         "Menormalisasi audio untuk Whisper…",
+        None,
     );
     run_ffmpeg(
         &app,
@@ -433,7 +457,7 @@ pub fn pipeline(
     }
 
     let output_prefix = job_dir.join("transcript");
-    emit_progress(&app, "transcribing", 0.0, "Memuat model Whisper…");
+    emit_progress(&app, "transcribing", 0.0, "Memuat model Whisper…", None);
     let resolved_backend = run_whisper(
         &app,
         &wav,
@@ -454,6 +478,7 @@ pub fn pipeline(
         "finalizing",
         92.0,
         "Merapikan transcript dan menyimpan history…",
+        Some(&resolved_backend),
     );
     let json_path = output_prefix.with_extension("json");
     let txt_path = output_prefix.with_extension("txt");
@@ -475,7 +500,7 @@ pub fn pipeline(
         language,
         duration: request.duration,
         model: request.model_id.clone(),
-        backend: resolved_backend,
+        backend: resolved_backend.clone(),
         segments,
         text,
         txt_path: txt_path.to_string_lossy().to_string(),
@@ -492,6 +517,12 @@ pub fn pipeline(
         let _ = fs::remove_file(&source);
         let _ = fs::remove_file(&wav);
     }
-    emit_progress(&app, "done", 100.0, "Transkripsi selesai.");
+    emit_progress(
+        &app,
+        "done",
+        100.0,
+        "Transkripsi selesai.",
+        Some(&resolved_backend),
+    );
     Ok(result)
 }

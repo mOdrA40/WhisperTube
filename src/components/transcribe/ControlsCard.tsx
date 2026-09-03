@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { formatMemory } from "../../lib/format";
 import type { AcceleratorInfo, BackendChoice, ModelInfo, SystemStatus } from "../../types";
+import { getAcceleratorCopy, getModelCopy, getRecommendation, useI18n } from "../../i18n";
 import { CustomSelect, type SelectOption } from "../common/CustomSelect";
 
 type ControlsCardProps = {
@@ -44,15 +45,6 @@ type ControlsCardProps = {
   onStart: () => void;
 };
 
-const languageOptions: SelectOption[] = [
-  { value: "auto", label: "Auto detect" },
-  { value: "id", label: "Indonesian" },
-  { value: "en", label: "English" },
-  { value: "zh", label: "Chinese" },
-  { value: "ja", label: "Japanese" },
-  { value: "ko", label: "Korean" },
-];
-
 export function ControlsCard({
   models,
   modelId,
@@ -83,40 +75,53 @@ export function ControlsCard({
   onDownloadModel,
   onStart,
 }: ControlsCardProps) {
+  const { t } = useI18n();
   const selectedDownload = selectedModel && downloadingModel[selectedModel.id];
+  const languageOptions: SelectOption[] = [
+    { value: "auto", label: t("language.auto") },
+    { value: "id", label: t("language.id") },
+    { value: "en", label: t("language.en") },
+    { value: "zh", label: t("language.zh") },
+    { value: "ja", label: t("language.ja") },
+    { value: "ko", label: t("language.ko") },
+  ];
 
   const backendOptions: SelectOption[] = [
     {
       value: "auto",
-      label: "Auto — recommended",
+      label: t("backend.auto"),
     },
     {
       value: "cpu",
-      label: "CPU",
+      label: t("backend.cpu"),
     },
-    {
-      value: "cuda",
-      label: system?.cudaEngine && system?.nvidia ? "NVIDIA CUDA" : "NVIDIA CUDA — not available",
-      disabled: !system?.cudaEngine || !system?.nvidia,
-    },
-    ...accelerators.map((acc) => ({
+    ...accelerators.filter((acc) => acc.supported).map((acc) => ({
       value: acc.backend,
-      label: acc.installed ? acc.label : `${acc.label} — not installed`,
+      label: acc.installed
+        ? getAcceleratorCopy(acc, t).label
+        : t("backend.notInstalled", { accelerator: getAcceleratorCopy(acc, t).label }),
       disabled: !acc.installed,
     })),
   ];
+  if (system?.cudaSupported) {
+    backendOptions.push({
+      value: "cuda",
+      label: system.cudaEngine && system.nvidia ? t("backend.cuda") : t("backend.cudaUnavailable"),
+      disabled: !system.cudaEngine || !system.nvidia,
+    });
+  }
 
   return (
     <div className="card control-card sticky-card">
       <div className="card-title-row">
         <div>
-          <span className="eyebrow">Transcription</span>
-          <h3>Quality & compute</h3>
+          <span className="eyebrow">{t("controls.eyebrow")}</span>
+          <h3>{t("controls.title")}</h3>
         </div>
         <Gauge size={20} />
       </div>
 
-      <label className="field-label">Model</label>
+      <label className="field-label">{t("controls.model")}</label>
       <div className="model-options">
         {models.map((model) => {
           const isSelected = modelId === model.id;
@@ -133,9 +138,9 @@ export function ControlsCard({
                 <span />
               </div>
               <div className="model-copy">
-                <strong>{model.label}</strong>
+                <strong>{getModelCopy(model, t).label}</strong>
                 <span>
-                  {model.description} • CUDA ≥ {formatMemory(model.vramRequiredMb)}
+                  {getModelCopy(model, t).description} • {t("controls.cudaRequirement", { memory: formatMemory(model.vramRequiredMb, t("hardware.notDetected")) })}
                 </span>
               </div>
               <div className="model-state">
@@ -155,16 +160,16 @@ export function ControlsCard({
         >
           {selectedDownload !== undefined ? <LoaderCircle className="spin" size={17} /> : <Download size={17} />}
           {selectedDownload !== undefined
-            ? `Downloading ${Math.round(selectedDownload)}%`
-            : `Download ${selectedModel.label}`}
+            ? t("controls.downloadingModel", { percent: Math.round(selectedDownload) })
+            : t("controls.downloadModel", { model: getModelCopy(selectedModel, t).label })}
         </button>
       )}
 
-      {system?.nvidia && !system.cudaEngine && (
+      {system?.cudaSupported && system.nvidia && !system.cudaEngine && (
         <>
           <div className="info-box">
             <Sparkles size={16} />
-            <span>NVIDIA terdeteksi. Pasang CUDA agar transkripsi memakai GPU, bukan CPU.</span>
+            <span>{t("controls.nvidiaHint")}</span>
           </div>
           <button
             type="button"
@@ -173,11 +178,13 @@ export function ControlsCard({
             disabled={installingCuda || installingAccelerator !== null || busy}
           >
             {installingCuda ? <LoaderCircle className="spin" size={17} /> : <Download size={17} />}
-            {installingCuda ? `Installing CUDA ${Math.round(cudaDownloadPercent)}%` : "Install CUDA acceleration (~437 MB)"}
+            {installingCuda
+              ? t("controls.installingCuda", { percent: Math.round(cudaDownloadPercent) })
+              : t("controls.installCuda")}
           </button>
           {installingCuda && (
             <button type="button" className="danger-ghost" onClick={onCancelCuda}>
-              <CircleStop size={16} /> Cancel CUDA download
+              <CircleStop size={16} /> {t("controls.cancelCuda")}
             </button>
           )}
         </>
@@ -189,7 +196,7 @@ export function ControlsCard({
           <div key={accelerator.id}>
             <div className="info-box">
               <Download size={16} />
-              <span>{accelerator.description}. Download dari accelerator release project.</span>
+              <span>{t("controls.acceleratorInfo", { description: getAcceleratorCopy(accelerator, t).description })}</span>
             </div>
             <button
               type="button"
@@ -203,12 +210,17 @@ export function ControlsCard({
             >
               {installingAccelerator === accelerator.backend ? <LoaderCircle className="spin" size={17} /> : <Download size={17} />}
               {installingAccelerator === accelerator.backend
-                ? `Installing ${accelerator.label} ${Math.round(acceleratorDownloadPercent)}%`
-                : `Install ${accelerator.label}`}
+                ? t("controls.installingAccelerator", {
+                    accelerator: getAcceleratorCopy(accelerator, t).label,
+                    percent: Math.round(acceleratorDownloadPercent),
+                  })
+                : t("controls.installAccelerator", {
+                    accelerator: getAcceleratorCopy(accelerator, t).label,
+                  })}
             </button>
             {installingAccelerator === accelerator.backend && (
               <button type="button" className="danger-ghost" onClick={onCancelAccelerator}>
-                <CircleStop size={16} /> Cancel accelerator download
+                <CircleStop size={16} /> {t("controls.cancelAccelerator")}
               </button>
             )}
           </div>
@@ -216,7 +228,7 @@ export function ControlsCard({
 
       <div className="divider" />
 
-      <label className="field-label">Language</label>
+      <label className="field-label">{t("controls.language")}</label>
       <CustomSelect
         value={language}
         options={languageOptions}
@@ -224,7 +236,7 @@ export function ControlsCard({
         disabled={busy}
       />
 
-      <label className="field-label">Compute backend</label>
+      <label className="field-label">{t("controls.computeBackend")}</label>
       <CustomSelect
         value={backend}
         options={backendOptions}
@@ -232,13 +244,13 @@ export function ControlsCard({
         disabled={busy}
       />
       <div className="recommendation">
-        <Sparkles size={14} /> {system?.recommendation ?? "Mendeteksi hardware…"}
+        <Sparkles size={14} /> {getRecommendation(system, t)}
       </div>
 
       <label className="toggle-row" htmlFor="keep-audio-toggle">
         <div>
-          <strong>Keep processed audio</strong>
-          <span>Default off untuk hemat storage.</span>
+          <strong>{t("controls.keepAudio")}</strong>
+          <span>{t("controls.keepAudioHint")}</span>
         </div>
         <input
           id="keep-audio-toggle"
@@ -261,12 +273,12 @@ export function ControlsCard({
       )}
 
       <button type="button" className="start-button" disabled={!canStart} onClick={onStart}>
-        <Sparkles size={18} /> Transcribe now
+        <Sparkles size={18} /> {t("controls.transcribe")}
       </button>
 
       {!runtimeReady && (
         <p className="setup-hint">
-          <AlertCircle size={14} /> Runtime belum siap. Jalankan setup Windows.
+          <AlertCircle size={14} /> {t("controls.runtimeHint")}
         </p>
       )}
     </div>

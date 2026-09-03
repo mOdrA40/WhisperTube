@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import type { VideoMetadata } from "../../types";
 import { formatDuration } from "../../lib/format";
+import { useI18n } from "../../i18n";
 
 type SourceCardProps = {
   url: string;
@@ -28,18 +29,20 @@ export function SourceCard({
   onInspect,
   onOpenSettings,
 }: SourceCardProps) {
+  const { t } = useI18n();
+
   return (
     <div className="source-card-section">
       <div className="card source-hero-card">
         <div className="hero-content">
           <div className="hero-badge">
             <Youtube size={14} className="hero-badge-icon" />
-            <span className="hero-badge-text">YouTube source</span>
+            <span className="hero-badge-text">{t("source.badge")}</span>
           </div>
 
-          <h2 className="hero-headline">Tempel link. Sisanya otomatis.</h2>
+          <h2 className="hero-headline">{t("source.headline")}</h2>
           <p className="hero-description">
-            Public video maupun video Member yang akun browser kamu memang berhak akses.
+            {t("source.description")}
           </p>
 
           <div className="url-input-container">
@@ -52,7 +55,7 @@ export function SourceCard({
                 value={url}
                 onChange={(event) => onUrlChange(event.target.value)}
                 onKeyDown={(event) => event.key === "Enter" && !busy && !inspecting && onInspect()}
-                placeholder="https://www.youtube.com/watch?v=..."
+                placeholder={t("source.placeholder")}
                 disabled={busy || inspecting}
                 className="url-text-input"
               />
@@ -67,21 +70,21 @@ export function SourceCard({
               {inspecting ? (
                 <>
                   <LoaderCircle className="spin" size={17} />
-                  <span>Checking</span>
+                  <span>{t("source.checking")}</span>
                 </>
               ) : (
                 <>
                   <Search size={17} />
-                  <span>Check video</span>
+                  <span>{t("source.checkVideo")}</span>
                 </>
               )}
             </button>
           </div>
 
           <div className="hero-footer-tips">
-            <span>Untuk Member-only, pilih browser login di Settings.</span>
+            <span>{t("source.memberHint")}</span>
             <button type="button" className="settings-link-btn" onClick={onOpenSettings}>
-              <span>YouTube access</span>
+              <span>{t("source.access")}</span>
               <ChevronRight size={14} />
             </button>
           </div>
@@ -94,6 +97,8 @@ export function SourceCard({
 }
 
 function VideoPreviewCard({ metadata }: { metadata: VideoMetadata }) {
+  const { t } = useI18n();
+
   return (
     <div className="card video-preview-card">
       <div className="preview-thumbnail-col">
@@ -116,7 +121,7 @@ function VideoPreviewCard({ metadata }: { metadata: VideoMetadata }) {
         <div className="preview-status-strip">
           <span className="status-badge-ready">
             <Check size={13} />
-            <span>Video ready</span>
+            <span>{t("source.videoReady")}</span>
           </span>
           {metadata.availability && (
             <span className="status-badge-availability">{metadata.availability}</span>

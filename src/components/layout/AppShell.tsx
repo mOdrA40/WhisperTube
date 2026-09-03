@@ -8,6 +8,7 @@ import {
   Zap,
 } from "lucide-react";
 import type { AppTab, SystemStatus } from "../../types";
+import { useI18n } from "../../i18n";
 import { WhisperTubeLogo } from "../common/WhisperTubeLogo";
 
 type AppShellProps = {
@@ -19,21 +20,6 @@ type AppShellProps = {
   children: ReactNode;
 };
 
-const pageCopy: Record<AppTab, { title: string; description: string }> = {
-  transcribe: {
-    title: "Transcribe video",
-    description: "YouTube → local Whisper → transcript. Audio tidak dikirim ke cloud.",
-  },
-  history: {
-    title: "History",
-    description: "Buka kembali hasil transkripsi lokal.",
-  },
-  settings: {
-    title: "Settings",
-    description: "Atur model, autentikasi YouTube, dan compute backend.",
-  },
-};
-
 export function AppShell({
   tab,
   historyCount,
@@ -42,6 +28,12 @@ export function AppShell({
   onTabChange,
   children,
 }: AppShellProps) {
+  const { t } = useI18n();
+  const pageCopy: Record<AppTab, { title: string; description: string }> = {
+    transcribe: { title: t("page.transcribe.title"), description: t("page.transcribe.description") },
+    history: { title: t("page.history.title"), description: t("page.history.description") },
+    settings: { title: t("page.settings.title"), description: t("page.settings.description") },
+  };
   const copy = pageCopy[tab];
 
   return (
@@ -55,7 +47,7 @@ export function AppShell({
           </div>
           <div className="brand-identity">
             <strong className="brand-name">WhisperTube</strong>
-            <span className="brand-tagline">Local Whisper transcription</span>
+            <span className="brand-tagline">{t("app.tagline")}</span>
           </div>
         </div>
 
@@ -65,7 +57,7 @@ export function AppShell({
             icon={<Youtube size={18} />}
             onClick={() => onTabChange("transcribe")}
           >
-            Transcribe
+            {t("nav.transcribe")}
           </NavItem>
           <NavItem
             active={tab === "history"}
@@ -73,14 +65,14 @@ export function AppShell({
             badge={historyCount > 0 ? historyCount : undefined}
             onClick={() => onTabChange("history")}
           >
-            History
+            {t("nav.history")}
           </NavItem>
           <NavItem
             active={tab === "settings"}
             icon={<Settings2 size={18} />}
             onClick={() => onTabChange("settings")}
           >
-            Settings
+            {t("nav.settings")}
           </NavItem>
         </nav>
 
@@ -88,21 +80,25 @@ export function AppShell({
           <div className="runtime-card">
             <div className="runtime-header">
               <span className={`status-dot ${runtimeReady ? "dot-online" : "dot-warning"}`} />
-              <span className="runtime-label">{runtimeReady ? "Ready" : "Setup needed"}</span>
+              <span className="runtime-label">
+                {runtimeReady ? t("status.ready") : t("status.setupNeeded")}
+              </span>
             </div>
 
             <div className="hardware-spec">
               <div className="hardware-icon-box">
-                {system?.nvidia ? <Zap size={14} className="nvidia-icon" /> : <Cpu size={14} />}
+                {system?.gpuName ? <Zap size={14} className="nvidia-icon" /> : <Cpu size={14} />}
               </div>
               <div className="hardware-details">
                 <span className="hardware-name">
-                  {system?.gpuName ?? `${system?.cpuThreads ?? "—"} CPU threads`}
+                  {system?.gpuName ?? `${system?.cpuThreads ?? "—"} ${t("hardware.cpuThreads")}`}
                 </span>
                 <span className="hardware-sub">
                   {system?.nvidia && system.gpuMemoryMb
-                    ? `${Math.round(system.gpuMemoryMb / 1024)} GB VRAM`
-                    : "CPU Compute"}
+                    ? `${Math.round(system.gpuMemoryMb / 1024)} ${t("hardware.vram")}`
+                    : system?.gpuName
+                      ? t("hardware.gpu")
+                      : t("hardware.cpuCompute")}
                 </span>
               </div>
             </div>
@@ -119,7 +115,7 @@ export function AppShell({
 
           <div className="privacy-chip">
             <LockKeyhole size={14} className="privacy-icon" />
-            <span className="privacy-text">Local inference</span>
+            <span className="privacy-text">{t("app.localInference")}</span>
           </div>
         </header>
 

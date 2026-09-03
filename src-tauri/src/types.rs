@@ -34,6 +34,7 @@ pub struct SystemStatus {
     pub ffmpeg: bool,
     pub cpu_engine: bool,
     pub cuda_engine: bool,
+    pub cuda_supported: bool,
     pub nvidia: bool,
     pub gpu_name: Option<String>,
     pub gpu_memory_mb: Option<u64>,
@@ -74,6 +75,7 @@ pub struct ProgressPayload {
     pub stage: String,
     pub percent: f64,
     pub message: String,
+    pub backend: Option<String>,
 }
 
 #[derive(Serialize, Clone)]

@@ -12,3 +12,5 @@ src-tauri/runtime/windows/cuda/*
 src-tauri/runtime/macos/*
 src-tauri/runtime/linux/*
 !src-tauri/runtime/**/.gitkeep
+
+skills

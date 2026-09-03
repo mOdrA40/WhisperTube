@@ -16,16 +16,26 @@ export function ProgressCard({ progress, selectedModel, backend, onCancel }: Pro
     <div className="progress-card card">
       <div className="progress-header">
         <div>
-          <span className="eyebrow"><LoaderCircle className="spin" size={15} /> Processing</span>
+          <span className="eyebrow">
+            <LoaderCircle className="spin" size={15} /> Processing
+          </span>
           <h3>{stageLabels[progress.stage]}</h3>
           <p>{progress.message || "Memproses secara lokal…"}</p>
         </div>
         <strong>{Math.round(progress.percent)}%</strong>
       </div>
-      <div className="progress-track"><div className="progress-fill" style={{ width: `${percent}%` }} /></div>
+
+      <div className="progress-track">
+        <div className="progress-fill" style={{ width: `${percent}%` }} />
+      </div>
+
       <div className="progress-footer">
-        <span>{selectedModel?.label} • {backend === "auto" ? "Auto backend" : backend.toUpperCase()}</span>
-        <button className="danger-ghost" onClick={onCancel}><CircleStop size={16} /> Cancel</button>
+        <span>
+          {selectedModel?.label} • {backend === "auto" ? "Auto backend" : backend.toUpperCase()}
+        </span>
+        <button type="button" className="danger-ghost" onClick={onCancel}>
+          <CircleStop size={16} /> Cancel
+        </button>
       </div>
     </div>
   );

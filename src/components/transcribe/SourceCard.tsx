@@ -1,4 +1,11 @@
-import { Check, ChevronRight, Clock3, LoaderCircle, Search, Youtube } from "lucide-react";
+import {
+  Check,
+  ChevronRight,
+  Clock3,
+  LoaderCircle,
+  Search,
+  Youtube,
+} from "lucide-react";
 import type { VideoMetadata } from "../../types";
 import { formatDuration } from "../../lib/format";
 
@@ -22,52 +29,108 @@ export function SourceCard({
   onOpenSettings,
 }: SourceCardProps) {
   return (
-    <>
-      <div className="hero-card card">
-        <div className="eyebrow"><Youtube size={15} /> YouTube source</div>
-        <h2>Tempel link. Sisanya otomatis.</h2>
-        <p>Public video maupun video Member yang akun browser kamu memang berhak akses.</p>
-        <div className="url-row">
-          <div className="url-input-wrap">
-            <Youtube size={19} />
-            <input
-              value={url}
-              onChange={(event) => onUrlChange(event.target.value)}
-              onKeyDown={(event) => event.key === "Enter" && onInspect()}
-              placeholder="https://www.youtube.com/watch?v=..."
-              disabled={busy}
-            />
+    <div className="source-card-section">
+      <div className="card source-hero-card">
+        <div className="hero-content">
+          <div className="hero-badge">
+            <Youtube size={14} className="hero-badge-icon" />
+            <span className="hero-badge-text">YouTube source</span>
           </div>
-          <button className="primary-button" onClick={onInspect} disabled={busy || inspecting}>
-            {inspecting ? <LoaderCircle className="spin" size={18} /> : <Search size={18} />}
-            {inspecting ? "Checking" : "Check video"}
-          </button>
-        </div>
-        <div className="helper-row">
-          <span>Untuk Member-only, pilih browser login di Settings.</span>
-          <button className="link-button" onClick={onOpenSettings}>YouTube access <ChevronRight size={14} /></button>
+
+          <h2 className="hero-headline">Tempel link. Sisanya otomatis.</h2>
+          <p className="hero-description">
+            Public video maupun video Member yang akun browser kamu memang berhak akses.
+          </p>
+
+          <div className="url-input-container">
+            <div className="url-input-box">
+              <div className="url-input-icon">
+                <Youtube size={19} className="yt-red-icon" />
+              </div>
+              <input
+                type="text"
+                value={url}
+                onChange={(event) => onUrlChange(event.target.value)}
+                onKeyDown={(event) => event.key === "Enter" && !busy && !inspecting && onInspect()}
+                placeholder="https://www.youtube.com/watch?v=..."
+                disabled={busy || inspecting}
+                className="url-text-input"
+              />
+            </div>
+
+            <button
+              type="button"
+              className="inspect-action-btn"
+              onClick={onInspect}
+              disabled={busy || inspecting || !url.trim()}
+            >
+              {inspecting ? (
+                <>
+                  <LoaderCircle className="spin" size={17} />
+                  <span>Checking</span>
+                </>
+              ) : (
+                <>
+                  <Search size={17} />
+                  <span>Check video</span>
+                </>
+              )}
+            </button>
+          </div>
+
+          <div className="hero-footer-tips">
+            <span>Untuk Member-only, pilih browser login di Settings.</span>
+            <button type="button" className="settings-link-btn" onClick={onOpenSettings}>
+              <span>YouTube access</span>
+              <ChevronRight size={14} />
+            </button>
+          </div>
         </div>
       </div>
 
-      {metadata && <VideoCard metadata={metadata} />}
-    </>
+      {metadata && <VideoPreviewCard metadata={metadata} />}
+    </div>
   );
 }
 
-function VideoCard({ metadata }: { metadata: VideoMetadata }) {
+function VideoPreviewCard({ metadata }: { metadata: VideoMetadata }) {
   return (
-    <div className="video-card card">
-      <div className="thumbnail-wrap">
-        {metadata.thumbnail ? <img src={metadata.thumbnail} alt="Video thumbnail" /> : <div className="thumbnail-placeholder"><Youtube size={34} /></div>}
-        <span className="duration-chip"><Clock3 size={13} /> {formatDuration(metadata.duration)}</span>
+    <div className="card video-preview-card">
+      <div className="preview-thumbnail-col">
+        {metadata.thumbnail ? (
+          <div className="preview-thumbnail-frame">
+            <img src={metadata.thumbnail} alt={metadata.title} className="preview-thumb-img" />
+            <div className="preview-duration-pill">
+              <Clock3 size={12} />
+              <span>{formatDuration(metadata.duration)}</span>
+            </div>
+          </div>
+        ) : (
+          <div className="preview-thumb-placeholder">
+            <Youtube size={36} className="yt-placeholder-icon" />
+          </div>
+        )}
       </div>
-      <div className="video-info">
-        <span className="success-label"><Check size={14} /> Video ready</span>
-        <h3>{metadata.title}</h3>
-        <p>{metadata.channel}</p>
-        <div className="video-meta-line">
-          {metadata.availability && <span>{metadata.availability}</span>}
-          <span>{formatDuration(metadata.duration)}</span>
+
+      <div className="preview-details-col">
+        <div className="preview-status-strip">
+          <span className="status-badge-ready">
+            <Check size={13} />
+            <span>Video ready</span>
+          </span>
+          {metadata.availability && (
+            <span className="status-badge-availability">{metadata.availability}</span>
+          )}
+        </div>
+
+        <h3 className="preview-video-title" title={metadata.title}>
+          {metadata.title}
+        </h3>
+
+        <div className="preview-channel-row">
+          <span className="preview-channel-name">{metadata.channel}</span>
+          <span className="meta-separator">•</span>
+          <span className="preview-duration-text">{formatDuration(metadata.duration)}</span>
         </div>
       </div>
     </div>

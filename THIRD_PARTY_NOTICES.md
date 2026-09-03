@@ -8,6 +8,8 @@ WhisperTube source code is MIT-licensed. Runtime components are separate upstrea
 - FFmpeg — LGPL/GPL depending on the exact build configuration. The Windows bootstrap currently downloads the Gyan.dev "essentials" build. Review that distribution's license/build configuration before redistributing binaries commercially.
 - Tauri — Apache-2.0 / MIT ecosystem components.
 - React — MIT.
+- Plus Jakarta Sans — SIL Open Font License 1.1; license text is included in `src/assets/fonts/OFL-PlusJakartaSans.txt`.
+- JetBrains Mono — SIL Open Font License 1.1; license text is included in `src/assets/fonts/OFL-JetBrainsMono.txt`.
 
 ## Important distribution note
 

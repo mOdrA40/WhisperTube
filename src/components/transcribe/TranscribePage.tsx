@@ -106,8 +106,8 @@ export function TranscribePage({
   onSearchChange,
 }: TranscribePageProps) {
   return (
-    <div className="content-grid">
-      <section className="primary-column">
+    <div className="transcribe-layout-grid">
+      <section className="transcribe-main-stream">
         <SourceCard
           url={url}
           busy={busy}
@@ -131,7 +131,7 @@ export function TranscribePage({
         )}
       </section>
 
-      <aside className="control-column">
+      <aside className="transcribe-sidebar-stream">
         <ControlsCard
           models={models}
           modelId={modelId}

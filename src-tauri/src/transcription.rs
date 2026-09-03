@@ -14,11 +14,12 @@ use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
 
 use crate::{
-    history,
+    browsers::browser_args,
+    history, models,
     paths::{engine_path, jobs_dir, model_path, tool_path},
     system::detect_nvidia,
     types::{ProgressPayload, Segment, TranscriptRequest, TranscriptResult},
-    youtube::{browser_args, validate_youtube_url},
+    youtube::validate_youtube_url,
 };
 
 fn emit_progress(app: &AppHandle, stage: &str, percent: f64, message: impl Into<String>) {
@@ -72,7 +73,10 @@ fn run_download(
             "-o",
         ])
         .arg(&template)
-        .args(browser_args(&request.browser)?)
+        .args(browser_args(
+            &request.browser,
+            request.browser_profile.as_deref(),
+        )?)
         .arg(&request.url)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -201,7 +205,7 @@ fn run_ffmpeg(
 fn choose_backend(app: &AppHandle, requested: &str) -> Result<(String, PathBuf), String> {
     let cpu = engine_path(app, "cpu")?;
     let cuda = engine_path(app, "cuda")?;
-    let (nvidia, _) = detect_nvidia();
+    let nvidia = detect_nvidia().is_some();
     match requested {
         "cpu" => {
             if !cpu.exists() {
@@ -214,7 +218,7 @@ fn choose_backend(app: &AppHandle, requested: &str) -> Result<(String, PathBuf),
             if !nvidia {
                 Err("CUDA dipilih tetapi NVIDIA GPU/driver tidak terdeteksi.".into())
             } else if !cuda.exists() {
-                Err("CUDA engine belum terpasang. Jalankan scripts/install-cuda-engine.ps1.".into())
+                Err("CUDA engine belum terpasang. Install CUDA acceleration dari Settings terlebih dahulu.".into())
             } else {
                 Ok(("cuda".into(), cuda))
             }
@@ -222,6 +226,8 @@ fn choose_backend(app: &AppHandle, requested: &str) -> Result<(String, PathBuf),
         "auto" => {
             if nvidia && cuda.exists() {
                 Ok(("cuda".into(), cuda))
+            } else if nvidia {
+                Err("NVIDIA GPU terdeteksi tetapi CUDA engine belum terpasang. Pasang CUDA acceleration terlebih dahulu.".into())
             } else if cpu.exists() {
                 Ok(("cpu".into(), cpu))
             } else {
@@ -239,10 +245,17 @@ fn run_whisper(
     model: &Path,
     language: &str,
     backend: &str,
+    model_id: &str,
     active_pid: &Arc<Mutex<Option<u32>>>,
     cancelled: &Arc<AtomicBool>,
 ) -> Result<String, String> {
     let (resolved_backend, engine) = choose_backend(app, backend)?;
+    if resolved_backend == "cuda" {
+        let gpu = detect_nvidia().ok_or_else(|| {
+            "NVIDIA GPU tidak lagi terdeteksi. Pilih CPU atau periksa driver.".to_string()
+        })?;
+        models::ensure_vram_available(model_id, gpu.available_memory_mb())?;
+    }
     let threads = std::thread::available_parallelism()
         .map(|value| value.get())
         .unwrap_or(4)
@@ -401,6 +414,7 @@ pub fn pipeline(
         &model,
         &request.language,
         &request.backend,
+        &request.model_id,
         &active_pid,
         &cancelled,
     )?;

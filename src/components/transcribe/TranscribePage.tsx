@@ -20,6 +20,7 @@ type TranscribePageProps = {
   metadata: VideoMetadata | null;
   progress: ProgressPayload;
   selectedModel: ModelInfo | undefined;
+  canStart: boolean;
   backend: BackendChoice;
   system: SystemStatus | null;
   models: ModelInfo[];
@@ -28,6 +29,9 @@ type TranscribePageProps = {
   keepAudio: boolean;
   runtimeReady: boolean;
   downloadingModel: Record<string, number>;
+  installingCuda: boolean;
+  cudaDownloadPercent: number;
+  vramWarning: string | null;
   result: TranscriptResult | null;
   copied: boolean;
   searchQuery: string;
@@ -41,6 +45,8 @@ type TranscribePageProps = {
   onLanguageChange: (language: string) => void;
   onKeepAudioChange: (keepAudio: boolean) => void;
   onDownloadModel: (id: string) => void;
+  onInstallCuda: () => void;
+  onCancelCuda: () => void;
   onStart: () => void;
   onCopy: () => void;
   onExport: (kind: "txt" | "srt" | "vtt") => void;
@@ -54,6 +60,7 @@ export function TranscribePage({
   metadata,
   progress,
   selectedModel,
+  canStart,
   backend,
   system,
   models,
@@ -62,6 +69,9 @@ export function TranscribePage({
   keepAudio,
   runtimeReady,
   downloadingModel,
+  installingCuda,
+  cudaDownloadPercent,
+  vramWarning,
   result,
   copied,
   searchQuery,
@@ -75,6 +85,8 @@ export function TranscribePage({
   onLanguageChange,
   onKeepAudioChange,
   onDownloadModel,
+  onInstallCuda,
+  onCancelCuda,
   onStart,
   onCopy,
   onExport,
@@ -111,7 +123,7 @@ export function TranscribePage({
           models={models}
           modelId={modelId}
           selectedModel={selectedModel}
-          metadataReady={metadata !== null}
+          canStart={canStart}
           backend={backend}
           language={language}
           keepAudio={keepAudio}
@@ -119,11 +131,16 @@ export function TranscribePage({
           busy={busy}
           runtimeReady={runtimeReady}
           downloadingModel={downloadingModel}
+          installingCuda={installingCuda}
+          cudaDownloadPercent={cudaDownloadPercent}
+          vramWarning={vramWarning}
           onModelChange={onModelChange}
           onBackendChange={onBackendChange}
           onLanguageChange={onLanguageChange}
           onKeepAudioChange={onKeepAudioChange}
           onDownloadModel={onDownloadModel}
+          onInstallCuda={onInstallCuda}
+          onCancelCuda={onCancelCuda}
           onStart={onStart}
         />
       </aside>

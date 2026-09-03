@@ -1,6 +1,18 @@
 export type AppTab = "transcribe" | "history" | "settings";
-export type BrowserChoice = "none" | "chrome" | "edge" | "firefox" | "brave";
+export type BrowserChoice = "none" | "chrome" | "edge" | "firefox" | "brave" | "chromium" | "opera" | "vivaldi" | "whale" | "safari";
 export type BackendChoice = "auto" | "cpu" | "cuda";
+
+export type BrowserProfile = {
+  id: string;
+  label: string;
+  isDefault: boolean;
+};
+
+export type BrowserInfo = {
+  id: string;
+  label: string;
+  profiles: BrowserProfile[];
+};
 
 export type SystemStatus = {
   ytDlp: boolean;
@@ -9,6 +21,8 @@ export type SystemStatus = {
   cudaEngine: boolean;
   nvidia: boolean;
   gpuName: string | null;
+  gpuMemoryMb: number | null;
+  gpuFreeMemoryMb: number | null;
   cpuThreads: number;
   recommendation: string;
   recommendedModelId: string;
@@ -20,6 +34,7 @@ export type ModelInfo = {
   label: string;
   description: string;
   sizeMb: number;
+  vramRequiredMb: number;
   installed: boolean;
 };
 
@@ -50,6 +65,10 @@ export type ProgressPayload = {
 
 export type ModelDownloadPayload = {
   id: string;
+  percent: number;
+};
+
+export type CudaDownloadPayload = {
   percent: number;
 };
 
@@ -92,6 +111,7 @@ export type TranscriptRequest = {
   channel: string;
   duration: number;
   browser: BrowserChoice;
+  browserProfile: string;
   backend: BackendChoice;
   language: string;
   modelId: string;

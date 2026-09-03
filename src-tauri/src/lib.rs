@@ -1,3 +1,4 @@
+mod browsers;
 mod commands;
 mod history;
 mod models;
@@ -20,8 +21,10 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::system_status,
+            commands::list_browsers,
             commands::list_models,
             commands::download_model,
+            commands::install_cuda_engine,
             commands::delete_model,
             commands::inspect_youtube,
             commands::start_transcription,

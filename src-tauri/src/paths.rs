@@ -25,12 +25,7 @@ pub fn jobs_dir(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 pub fn runtime_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    #[cfg(target_os = "windows")]
-    let platform = "windows";
-    #[cfg(target_os = "macos")]
-    let platform = "macos";
-    #[cfg(target_os = "linux")]
-    let platform = "linux";
+    let platform = runtime_platform();
 
     if cfg!(debug_assertions) {
         Ok(PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -46,6 +41,23 @@ pub fn runtime_dir(app: &AppHandle) -> Result<PathBuf, String> {
     }
 }
 
+fn runtime_platform() -> &'static str {
+    #[cfg(target_os = "windows")]
+    return "windows";
+    #[cfg(target_os = "macos")]
+    return "macos";
+    #[cfg(target_os = "linux")]
+    return "linux";
+    #[allow(unreachable_code)]
+    "unknown"
+}
+
+pub fn user_runtime_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app_data_dir(app)?.join("runtime").join(runtime_platform());
+    fs::create_dir_all(&dir).map_err(|e| format!("Gagal membuat folder runtime user: {e}"))?;
+    Ok(dir)
+}
+
 fn exe_name(base: &str) -> String {
     if cfg!(target_os = "windows") {
         format!("{base}.exe")
@@ -59,6 +71,14 @@ pub fn tool_path(app: &AppHandle, name: &str) -> Result<PathBuf, String> {
 }
 
 pub fn engine_path(app: &AppHandle, backend: &str) -> Result<PathBuf, String> {
+    if backend == "cuda" {
+        let user_path = user_runtime_dir(app)?
+            .join("cuda")
+            .join(exe_name("whisper-cli"));
+        if user_path.exists() {
+            return Ok(user_path);
+        }
+    }
     Ok(runtime_dir(app)?
         .join(backend)
         .join(exe_name("whisper-cli")))

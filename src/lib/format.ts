@@ -22,3 +22,8 @@ export function friendlyError(error: unknown) {
   const raw = String(error ?? "Terjadi kesalahan yang tidak diketahui");
   return raw.replace(/^Error:\s*/i, "");
 }
+
+export function formatMemory(megabytes: number | null | undefined) {
+  if (megabytes === null || megabytes === undefined || megabytes <= 0) return "Not detected";
+  return `${(megabytes / 1024).toFixed(1)} GB`;
+}

@@ -11,7 +11,7 @@ React UI
 Tauri IPC
   ▼
 Rust orchestration
-  ├─ validates YouTube URL and browser enum
+  ├─ validates YouTube URL and selected browser/profile
   ├─ owns process lifecycle / cancellation
   ├─ owns model paths and checksum validation
   ├─ owns SQLite history
@@ -30,7 +30,8 @@ komponen di `components/` hanya menangani tampilan serta callback pengguna.
 
 Backend memakai boundary serupa: `commands.rs` hanya adapter command Tauri,
 `types.rs` menyimpan DTO IPC, `state.rs` menyimpan state job runtime,
-`paths.rs` menangani lokasi storage/runtime, sedangkan `models.rs`, `youtube.rs`,
+`paths.rs` menangani lokasi storage/runtime, `browsers.rs` menemukan browser/profile
+tanpa membaca cookies saat discovery, sedangkan `models.rs`, `youtube.rs`,
 `transcription.rs`, dan `history.rs` menangani domain masing-masing. `lib.rs`
 hanya melakukan bootstrap aplikasi dan registrasi command.
 
@@ -94,7 +95,22 @@ runtime/windows/
     CUDA runtime DLLs...
 ```
 
-The application selects CUDA only when both NVIDIA detection and the CUDA engine pack succeed. Otherwise `Auto` falls back to CPU.
+The packaged application can download the optional CUDA pack from the UI. It
+stores the verified runtime under user app-local-data and prefers that path
+before the bundled runtime, so it does not need write access beside the EXE.
+The download is pinned to an upstream whisper.cpp release, checked with
+SHA-256, extracted with path traversal protection, and self-tested before
+activation. The request has a 30-second connection/response timeout, a
+30-second timeout per data chunk, and a cancellation token checked between
+download chunks.
+
+The system status query reads NVIDIA name, total VRAM, and free VRAM through
+`nvidia-smi`. Model entries expose conservative CUDA guardrails: Fast requires
+about 2 GB, Balanced 4 GB, and Accurate 7 GB of free VRAM. These are
+preflight safety thresholds; actual available memory can change when other
+GPU applications are running. `Auto` does not silently fall back to CPU when
+NVIDIA is present but CUDA is not installed; the user is prompted to install
+the CUDA pack or explicitly choose CPU.
 
 ## Next production milestones
 

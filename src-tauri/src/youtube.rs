@@ -3,7 +3,7 @@ use std::process::Command;
 use tauri::AppHandle;
 use url::Url;
 
-use crate::{paths::tool_path, types::VideoMetadata};
+use crate::{browsers::browser_args, paths::tool_path, types::VideoMetadata};
 
 pub fn validate_youtube_url(raw: &str) -> Result<String, String> {
     let parsed = Url::parse(raw).map_err(|_| "URL tidak valid.".to_string())?;
@@ -22,16 +22,6 @@ pub fn validate_youtube_url(raw: &str) -> Result<String, String> {
     Ok(parsed.to_string())
 }
 
-pub fn browser_args(browser: &str) -> Result<Vec<String>, String> {
-    match browser {
-        "none" | "" => Ok(vec![]),
-        "chrome" | "edge" | "firefox" | "brave" => {
-            Ok(vec!["--cookies-from-browser".into(), browser.to_string()])
-        }
-        _ => Err("Browser session tidak didukung.".into()),
-    }
-}
-
 fn run_output(mut command: Command) -> Result<std::process::Output, String> {
     command
         .output()
@@ -42,6 +32,7 @@ pub async fn inspect_youtube(
     app: AppHandle,
     url: String,
     browser: String,
+    profile: Option<String>,
 ) -> Result<VideoMetadata, String> {
     let safe_url = validate_youtube_url(&url)?;
     let yt_dlp = tool_path(&app, "yt-dlp")?;
@@ -57,7 +48,7 @@ pub async fn inspect_youtube(
             "--no-playlist",
             "--no-warnings",
         ]);
-        command.args(browser_args(&browser)?);
+        command.args(browser_args(&browser, profile.as_deref())?);
         command.arg(&safe_url);
         let output = run_output(command)?;
         if !output.status.success() {

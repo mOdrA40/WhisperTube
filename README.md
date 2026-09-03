@@ -12,7 +12,7 @@ Desktop app lokal untuk mengubah video YouTube menjadi transcript memakai `yt-dl
 
 - Paste URL YouTube lalu baca metadata sebelum download.
 - Public video.
-- Member-only/authenticated video melalui `yt-dlp --cookies-from-browser` untuk Chrome, Edge, Firefox, atau Brave. Aplikasi tidak meminta password Google.
+- Member-only/authenticated video melalui `yt-dlp --cookies-from-browser` dengan pilihan browser dan profile lokal. Browser yang didukung mengikuti platform: Chrome, Edge, Firefox, Brave, Chromium, Opera, Vivaldi, Whale, serta Safari di macOS. Aplikasi tidak meminta password Google.
 - Download `bestaudio/best`; **tidak mengubahnya dulu menjadi MP3**.
 - FFmpeg menormalisasi ke WAV PCM signed 16-bit, mono, 16 kHz.
 - whisper.cpp local inference.
@@ -23,7 +23,7 @@ Desktop app lokal untuk mengubah video YouTube menjadi transcript memakai `yt-dl
 - Verifikasi SHA-1 model sesuai manifest upstream whisper.cpp sebelum model dipasang.
 - CPU fallback.
 - NVIDIA CUDA engine opsional.
-- Auto backend: CUDA bila NVIDIA + CUDA engine tersedia, selain itu CPU.
+- Auto backend: memakai CUDA bila NVIDIA + CUDA engine tersedia; jika NVIDIA ada tetapi CUDA belum siap, aplikasi meminta instalasi CUDA atau pilihan CPU secara eksplisit.
 - Progress download / conversion / transcription.
 - Cancel job yang membunuh child process aktif.
 - Transcript bertimestamp.
@@ -124,13 +124,24 @@ Model AI **belum** diunduh pada tahap ini; model diunduh melalui UI.
 
 ## 5. Jika punya NVIDIA GPU — opsional tetapi direkomendasikan
 
+Pada packaged EXE, CUDA dapat dipasang langsung dari aplikasi melalui:
+
+```text
+Settings → Hardware → Install CUDA acceleration
+```
+
+WhisperTube mengunduh release CUDA `whisper.cpp` yang sudah dipin, memvalidasi
+SHA-256, melakukan self-check, lalu menyimpan engine di app data user. Tidak
+perlu meminta user menjalankan PowerShell. Script berikut tetap tersedia untuk
+workflow development dari source:
+
 ```powershell
 .\scripts\install-cuda-engine.ps1
 ```
 
 Package CUDA whisper.cpp besar, sehingga sengaja tidak ikut setup dasar.
 
-Setelah selesai, engine berada di:
+Jika dipasang dari script development, engine berada di:
 
 ```text
 src-tauri\runtime\windows\cuda\
@@ -163,6 +174,11 @@ Balanced — Large V3 Turbo Q5
 Klik `Download Balanced`. File sekitar 547 MB.
 
 Model tersimpan di app data lokal Windows, bukan di source tree.
+
+Jika CUDA aktif, aplikasi membaca total dan free VRAM NVIDIA untuk memberi
+rekomendasi model. Aplikasi menolak kombinasi model CUDA yang melewati batas
+VRAM konservatif. Batas ini adalah guardrail, bukan jaminan universal karena
+driver dan aplikasi GPU lain dapat memakai VRAM.
 
 ## 8. Transkripsi pertama
 

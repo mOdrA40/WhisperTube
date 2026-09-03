@@ -3,7 +3,7 @@ use std::sync::atomic::Ordering;
 use tauri::{AppHandle, State};
 
 use crate::{
-    history, models,
+    browsers, history, models,
     state::AppState,
     system, transcription,
     types::{
@@ -18,6 +18,11 @@ pub fn system_status(app: AppHandle) -> Result<SystemStatus, String> {
 }
 
 #[tauri::command]
+pub fn list_browsers() -> Vec<crate::types::BrowserInfo> {
+    browsers::discover_browsers()
+}
+
+#[tauri::command]
 pub fn list_models(app: AppHandle) -> Result<Vec<ModelInfo>, String> {
     models::list_models(&app)
 }
@@ -25,6 +30,15 @@ pub fn list_models(app: AppHandle) -> Result<Vec<ModelInfo>, String> {
 #[tauri::command(rename_all = "camelCase")]
 pub async fn download_model(app: AppHandle, model_id: String) -> Result<(), String> {
     models::download_model(app, model_id).await
+}
+
+#[tauri::command]
+pub async fn install_cuda_engine(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    if system::detect_nvidia().is_none() {
+        return Err("NVIDIA GPU/driver tidak terdeteksi. CUDA engine tidak perlu dipasang.".into());
+    }
+    state.cuda_cancelled.store(false, Ordering::SeqCst);
+    models::install_cuda_engine(app, state.cuda_cancelled.clone()).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -37,8 +51,9 @@ pub async fn inspect_youtube(
     app: AppHandle,
     url: String,
     browser: String,
+    profile: Option<String>,
 ) -> Result<VideoMetadata, String> {
-    youtube::inspect_youtube(app, url, browser).await
+    youtube::inspect_youtube(app, url, browser, profile).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -66,6 +81,7 @@ pub async fn start_transcription(
 #[tauri::command]
 pub fn cancel_job(state: State<'_, AppState>) -> Result<(), String> {
     state.cancelled.store(true, Ordering::SeqCst);
+    state.cuda_cancelled.store(true, Ordering::SeqCst);
     let guard = state
         .active_pid
         .lock()

@@ -1,4 +1,20 @@
 use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserProfile {
+    pub id: String,
+    pub label: String,
+    pub is_default: bool,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserInfo {
+    pub id: String,
+    pub label: String,
+    pub profiles: Vec<BrowserProfile>,
+}
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SystemStatus {
@@ -8,6 +24,8 @@ pub struct SystemStatus {
     pub cuda_engine: bool,
     pub nvidia: bool,
     pub gpu_name: Option<String>,
+    pub gpu_memory_mb: Option<u64>,
+    pub gpu_free_memory_mb: Option<u64>,
     pub cpu_threads: usize,
     pub recommendation: String,
     pub recommended_model_id: String,
@@ -21,6 +39,7 @@ pub struct ModelInfo {
     pub label: String,
     pub description: String,
     pub size_mb: u64,
+    pub vram_required_mb: u64,
     pub installed: bool,
 }
 
@@ -48,6 +67,12 @@ pub struct ProgressPayload {
 #[serde(rename_all = "camelCase")]
 pub struct ModelDownloadPayload {
     pub id: String,
+    pub percent: f64,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CudaDownloadPayload {
     pub percent: f64,
 }
 
@@ -98,6 +123,8 @@ pub struct TranscriptRequest {
     pub channel: String,
     pub duration: f64,
     pub browser: String,
+    #[serde(default)]
+    pub browser_profile: Option<String>,
     pub backend: String,
     pub language: String,
     pub model_id: String,

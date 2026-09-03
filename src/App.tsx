@@ -32,8 +32,12 @@ export default function App() {
           modelId={app.modelId}
           language={app.language}
           keepAudio={app.keepAudio}
+          canStart={app.canStart}
           runtimeReady={app.runtimeReady}
           downloadingModel={app.downloadingModel}
+          installingCuda={app.installingCuda}
+          cudaDownloadPercent={app.cudaDownloadPercent}
+          vramWarning={app.vramWarning}
           result={app.result}
           copied={app.copied}
           searchQuery={app.searchQuery}
@@ -47,6 +51,8 @@ export default function App() {
           onLanguageChange={app.setLanguage}
           onKeepAudioChange={app.setKeepAudio}
           onDownloadModel={app.downloadModel}
+          onInstallCuda={app.installCuda}
+          onCancelCuda={app.cancelJob}
           onStart={app.startTranscription}
           onCopy={app.copyTranscript}
           onExport={app.exportFile}
@@ -64,14 +70,21 @@ export default function App() {
       {app.tab === "settings" && (
         <SettingsPage
           browser={app.browser}
+          browsers={app.browsers}
+          browserProfile={app.browserProfile}
           system={app.system}
           models={app.models}
           busy={app.busy}
           downloadingModel={app.downloadingModel}
+          installingCuda={app.installingCuda}
+          cudaDownloadPercent={app.cudaDownloadPercent}
           onBrowserChange={app.setBrowser}
+          onBrowserProfileChange={app.setBrowserProfile}
           onDownloadModel={app.downloadModel}
           onRemoveModel={app.removeModel}
           onRefresh={app.refreshSystem}
+          onInstallCuda={app.installCuda}
+          onCancelCuda={app.cancelJob}
         />
       )}
     </AppShell>

@@ -1,28 +1,43 @@
-import { Cpu, Download, LockKeyhole, LoaderCircle, MonitorCog, RotateCcw, Trash2 } from "lucide-react";
-import type { BrowserChoice, ModelInfo, SystemStatus } from "../../types";
+import { CircleStop, Cpu, Download, LockKeyhole, LoaderCircle, MonitorCog, RotateCcw, Trash2 } from "lucide-react";
+import { formatMemory } from "../../lib/format";
+import type { BrowserChoice, BrowserInfo, ModelInfo, SystemStatus } from "../../types";
 
 type SettingsPageProps = {
   browser: BrowserChoice;
+  browsers: BrowserInfo[];
+  browserProfile: string;
   system: SystemStatus | null;
   models: ModelInfo[];
   busy: boolean;
   downloadingModel: Record<string, number>;
+  installingCuda: boolean;
+  cudaDownloadPercent: number;
   onBrowserChange: (browser: BrowserChoice) => void;
+  onBrowserProfileChange: (profile: string) => void;
   onDownloadModel: (id: string) => void;
   onRemoveModel: (id: string) => void;
   onRefresh: () => void;
+  onInstallCuda: () => void;
+  onCancelCuda: () => void;
 };
 
 export function SettingsPage({
   browser,
+  browsers,
+  browserProfile,
   system,
   models,
   busy,
   downloadingModel,
+  installingCuda,
+  cudaDownloadPercent,
   onBrowserChange,
+  onBrowserProfileChange,
   onDownloadModel,
   onRemoveModel,
   onRefresh,
+  onInstallCuda,
+  onCancelCuda,
 }: SettingsPageProps) {
   return (
     <div className="settings-grid">
@@ -32,11 +47,20 @@ export function SettingsPage({
         <label className="field-label">Browser session</label>
         <select value={browser} onChange={(event) => onBrowserChange(event.target.value as BrowserChoice)} disabled={busy}>
           <option value="none">Public videos only</option>
-          <option value="chrome">Google Chrome</option>
-          <option value="edge">Microsoft Edge</option>
-          <option value="firefox">Mozilla Firefox</option>
-          <option value="brave">Brave</option>
+          {browsers.map((item) => <option value={item.id} key={item.id}>{item.label}</option>)}
         </select>
+        {browser !== "none" && browsers.find((item) => item.id === browser) && (
+          <>
+            <label className="field-label">Browser profile</label>
+            <select value={browserProfile} onChange={(event) => onBrowserProfileChange(event.target.value)} disabled={busy}>
+              {browsers.find((item) => item.id === browser)?.profiles.map((profile) => (
+                <option value={profile.id} key={`${browser}-${profile.id}`}>{profile.label}{profile.isDefault ? " (Default)" : ""}</option>
+              ))}
+            </select>
+            <p className="settings-note">Profile terdeteksi dari konfigurasi lokal. Status login diverifikasi saat Check video.</p>
+          </>
+        )}
+        {browser === "none" && browsers.length === 0 && <p className="settings-note">Tidak ada browser session yang terdeteksi. Public videos tetap bisa diproses tanpa cookies.</p>}
         <div className="info-box"><LockKeyhole size={16} /><span>Cookies tidak disimpan oleh aplikasi. yt-dlp membacanya saat proses berjalan.</span></div>
       </section>
 
@@ -45,10 +69,23 @@ export function SettingsPage({
         <div className="status-table">
           <div><span>CPU engine</span><strong className={system?.cpuEngine ? "ok-text" : "bad-text"}>{system?.cpuEngine ? "Installed" : "Missing"}</strong></div>
           <div><span>NVIDIA GPU</span><strong>{system?.gpuName ?? "Not detected"}</strong></div>
+          <div><span>Total VRAM</span><strong>{formatMemory(system?.gpuMemoryMb)}</strong></div>
+          <div><span>Free VRAM</span><strong>{formatMemory(system?.gpuFreeMemoryMb)}</strong></div>
           <div><span>CUDA engine</span><strong className={system?.cudaEngine ? "ok-text" : "muted-text"}>{system?.cudaEngine ? "Installed" : "Optional"}</strong></div>
           <div><span>CPU threads</span><strong>{system?.cpuThreads ?? "—"}</strong></div>
         </div>
-        <p className="settings-note">Untuk CUDA, jalankan <code>scripts/install-cuda-engine.ps1</code>, lalu restart aplikasi.</p>
+        {system?.nvidia ? (
+          <>
+            <div className="info-box"><Download size={16} /><span>CUDA engine diunduh dari release resmi whisper.cpp dan dipasang ke storage aplikasi (~437 MB).</span></div>
+            <button className="secondary-button full" onClick={onInstallCuda} disabled={installingCuda || system.cudaEngine || busy}>
+              {installingCuda ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}
+              {installingCuda ? `Installing CUDA ${Math.round(cudaDownloadPercent)}%` : system.cudaEngine ? "CUDA engine installed" : "Install CUDA acceleration"}
+            </button>
+            {installingCuda && <button className="danger-ghost" onClick={onCancelCuda}><CircleStop size={16} /> Cancel CUDA download</button>}
+          </>
+        ) : (
+          <p className="settings-note">NVIDIA GPU tidak terdeteksi. CUDA acceleration hanya tersedia jika driver NVIDIA aktif.</p>
+        )}
       </section>
 
       <section className="card settings-card models-settings">
@@ -56,7 +93,7 @@ export function SettingsPage({
         <div className="model-manager">
           {models.map((model) => (
             <div className="model-manage-row" key={model.id}>
-              <div><strong>{model.label}</strong><span>{model.description} • {model.sizeMb} MB</span></div>
+              <div><strong>{model.label}</strong><span>{model.description} • {model.sizeMb} MB • CUDA ≥ {formatMemory(model.vramRequiredMb)}</span></div>
               {model.installed ? (
                 <button className="icon-button danger" onClick={() => onRemoveModel(model.id)} title="Delete model"><Trash2 size={17} /></button>
               ) : (

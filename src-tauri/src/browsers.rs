@@ -455,3 +455,22 @@ pub fn browser_args(browser: &str, profile: Option<&str>) -> Result<Vec<String>,
     };
     Ok(vec!["--cookies-from-browser".into(), token])
 }
+
+pub fn cookie_args(
+    browser: &str,
+    profile: Option<&str>,
+    cookies_path: Option<&str>,
+) -> Result<Vec<String>, String> {
+    if let Some(path) = cookies_path.filter(|path| !path.is_empty()) {
+        let path = PathBuf::from(path);
+        if !path.is_file() {
+            return Err("File cookies.txt tidak ditemukan atau tidak bisa dibaca.".into());
+        }
+        return Ok(vec![
+            "--cookies".into(),
+            path.to_string_lossy().into_owned(),
+        ]);
+    }
+
+    browser_args(browser, profile)
+}

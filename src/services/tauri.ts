@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { save } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import type {
   BrowserChoice,
   BrowserInfo,
@@ -37,8 +38,26 @@ export function listHistory() {
   return invoke<HistoryItem[]>("list_history");
 }
 
-export function inspectYoutube(url: string, browser: BrowserChoice, browserProfile: string) {
-  return invoke<VideoMetadata>("inspect_youtube", { url, browser, profile: browserProfile || null });
+export function inspectMedia(url: string, browser: BrowserChoice, browserProfile: string, cookiesPath: string) {
+  return invoke<VideoMetadata>("inspect_media", {
+    url,
+    browser,
+    profile: browserProfile || null,
+    cookiesPath: cookiesPath || null,
+  });
+}
+
+export async function pickCookiesFile() {
+  const selected = await open({
+    multiple: false,
+    directory: false,
+    filters: [{ name: "Cookies", extensions: ["txt"] }],
+  });
+  return typeof selected === "string" ? selected : null;
+}
+
+export function openExternalUrl(url: string) {
+  return openUrl(url);
 }
 
 export function downloadModel(modelId: string) {

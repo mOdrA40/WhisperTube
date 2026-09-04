@@ -58,6 +58,7 @@ export type VideoMetadata = {
   thumbnail: string | null;
   webpageUrl: string;
   availability: string | null;
+  source: string;
 };
 
 export type ProgressStage =
@@ -144,6 +145,7 @@ export type TranscriptRequest = {
   duration: number;
   browser: BrowserChoice;
   browserProfile: string;
+  cookiesPath: string;
   backend: BackendChoice;
   language: string;
   modelId: string;

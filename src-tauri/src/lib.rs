@@ -4,15 +4,16 @@ mod commands;
 mod history;
 mod models;
 mod paths;
+mod sources;
 mod state;
 mod system;
 mod transcription;
 mod types;
-mod youtube;
 
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .manage(state::AppState::default())
         .setup(|app| {
             let handle = app.handle().clone();
@@ -28,7 +29,7 @@ pub fn run() {
             commands::install_cuda_engine,
             commands::install_accelerator,
             commands::delete_model,
-            commands::inspect_youtube,
+            commands::inspect_media,
             commands::start_transcription,
             commands::cancel_job,
             commands::list_history,

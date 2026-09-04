@@ -4,6 +4,8 @@ import { HistoryPage } from "./components/history/HistoryPage";
 import { SettingsPage } from "./components/settings/SettingsPage";
 import { TranscribePage } from "./components/transcribe/TranscribePage";
 import { useWhisperTube } from "./hooks/useWhisperTube";
+import { friendlyError } from "./lib/format";
+import { openExternalUrl } from "./services/tauri";
 
 export default function App() {
   const app = useWhisperTube();
@@ -80,9 +82,8 @@ export default function App() {
       )}
       {app.tab === "settings" && (
         <SettingsPage
-          browser={app.browser}
+          cookiesPath={app.cookiesPath}
           browsers={app.browsers}
-          browserProfile={app.browserProfile}
           system={app.system}
           models={app.models}
           busy={app.busy}
@@ -93,8 +94,9 @@ export default function App() {
           installingAccelerator={app.installingAccelerator}
           acceleratorDownloadPercent={app.acceleratorDownloadPercent}
           networkSpeedBytesPerSecond={app.networkSpeedBytesPerSecond}
-          onBrowserChange={app.setBrowser}
-          onBrowserProfileChange={app.setBrowserProfile}
+          onSelectCookiesFile={app.selectCookiesFile}
+          onClearCookiesFile={app.clearCookiesFile}
+          onOpenUrl={(url) => openExternalUrl(url).catch((cause) => app.setError(friendlyError(cause)))}
           onDownloadModel={app.downloadModel}
           onCancelModel={app.cancelJob}
           onRemoveModel={app.removeModel}

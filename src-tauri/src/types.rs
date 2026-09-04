@@ -67,6 +67,7 @@ pub struct VideoMetadata {
     pub thumbnail: Option<String>,
     pub webpage_url: String,
     pub availability: Option<String>,
+    pub source: String,
 }
 
 #[derive(Serialize, Clone)]
@@ -161,6 +162,8 @@ pub struct TranscriptRequest {
     pub browser: String,
     #[serde(default)]
     pub browser_profile: Option<String>,
+    #[serde(default)]
+    pub cookies_path: Option<String>,
     pub backend: String,
     pub language: String,
     pub model_id: String,

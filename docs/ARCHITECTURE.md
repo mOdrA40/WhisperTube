@@ -11,7 +11,7 @@ React UI
 Tauri IPC
   ▼
 Rust orchestration
-  ├─ validates YouTube URL and selected browser/profile
+  ├─ validates supported video URL and local cookies file
   ├─ owns process lifecycle / cancellation
   ├─ owns model paths and checksum validation
   ├─ owns SQLite history
@@ -31,8 +31,8 @@ memegang state dan side effect, `services/tauri.ts` menjadi adapter IPC,
 
 Backend memakai boundary serupa: `commands.rs` hanya adapter command Tauri,
 `types.rs` menyimpan DTO IPC, `state.rs` menyimpan state job runtime,
-`paths.rs` menangani lokasi storage/runtime, `browsers.rs` menemukan browser/profile
-tanpa membaca cookies saat discovery, sedangkan `models.rs`, `youtube.rs`,
+`paths.rs` menangani lokasi storage/runtime, `browsers.rs` menangani kompatibilitas argumen cookie
+tanpa membaca cookies saat discovery dan memilih file-cookie args, sedangkan `models.rs`, `sources.rs`,
 `transcription.rs`, dan `history.rs` menangani domain masing-masing. `lib.rs`
 hanya melakukan bootstrap aplikasi dan registrasi command.
 
@@ -80,7 +80,7 @@ jobs/
 whispertube.db
 ```
 
-Downloaded YouTube audio and converted WAV are removed by default after a successful job.
+Downloaded source audio and converted WAV are removed by default after a successful job.
 History deletion validates the job directory under `app-local-data/jobs` and removes
 the complete job folder, including transcript exports, before deleting its SQLite row.
 

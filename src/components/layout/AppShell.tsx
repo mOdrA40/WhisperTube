@@ -4,7 +4,7 @@ import {
   History,
   LockKeyhole,
   Settings2,
-  Youtube,
+  Video,
   Zap,
 } from "lucide-react";
 import type { AppTab, SystemStatus } from "../../types";
@@ -54,7 +54,7 @@ export function AppShell({
         <nav className="nav-container">
           <NavItem
             active={tab === "transcribe"}
-            icon={<Youtube size={18} />}
+            icon={<Video size={18} />}
             onClick={() => onTabChange("transcribe")}
           >
             {t("nav.transcribe")}

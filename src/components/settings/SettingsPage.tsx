@@ -1,13 +1,17 @@
-import { CircleStop, Cpu, Download, LockKeyhole, LoaderCircle, MonitorCog, RotateCcw, Trash2 } from "lucide-react";
+import { Check, CircleStop, Copy, Cpu, Download, ExternalLink, FileKey, LockKeyhole, LoaderCircle, MonitorCog, RotateCcw, Trash2 } from "lucide-react";
+import { useEffect, useState } from "react";
 import { formatBytes, formatMemory } from "../../lib/format";
 import { getAcceleratorCopy, getModelCopy, uiLanguageOptions, useI18n } from "../../i18n";
-import type { AcceleratorInfo, BackendChoice, BrowserChoice, BrowserInfo, ModelDownloadPayload, ModelInfo, SystemStatus } from "../../types";
+import type { AcceleratorInfo, BackendChoice, BrowserInfo, ModelDownloadPayload, ModelInfo, SystemStatus } from "../../types";
 import { CustomSelect, type SelectOption } from "../common/CustomSelect";
 
+const COOKIES_EXTENSION_URL = "https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc";
+const FIREFOX_COOKIES_EXTENSION_URL = "https://addons.mozilla.org/en-US/firefox/addon/get-cookies-txt-locally/";
+const CHROMIUM_BROWSER_IDS = new Set(["chrome", "brave", "edge", "chromium", "opera", "vivaldi", "whale"]);
+
 type SettingsPageProps = {
-  browser: BrowserChoice;
+  cookiesPath: string;
   browsers: BrowserInfo[];
-  browserProfile: string;
   system: SystemStatus | null;
   models: ModelInfo[];
   busy: boolean;
@@ -18,8 +22,9 @@ type SettingsPageProps = {
   installingAccelerator: Exclude<BackendChoice, "auto" | "cpu" | "cuda"> | null;
   acceleratorDownloadPercent: number;
   networkSpeedBytesPerSecond: number | null;
-  onBrowserChange: (browser: BrowserChoice) => void;
-  onBrowserProfileChange: (profile: string) => void;
+  onSelectCookiesFile: () => void;
+  onClearCookiesFile: () => void;
+  onOpenUrl: (url: string) => void;
   onDownloadModel: (id: string) => void;
   onCancelModel: () => void;
   onRemoveModel: (id: string) => void;
@@ -31,9 +36,8 @@ type SettingsPageProps = {
 };
 
 export function SettingsPage({
-  browser,
+  cookiesPath,
   browsers,
-  browserProfile,
   system,
   models,
   busy,
@@ -44,8 +48,9 @@ export function SettingsPage({
   installingAccelerator,
   acceleratorDownloadPercent,
   networkSpeedBytesPerSecond,
-  onBrowserChange,
-  onBrowserProfileChange,
+  onSelectCookiesFile,
+  onClearCookiesFile,
+  onOpenUrl,
   onDownloadModel,
   onCancelModel,
   onRemoveModel,
@@ -56,22 +61,39 @@ export function SettingsPage({
   onCancelAccelerator,
 }: SettingsPageProps) {
   const { language: uiLanguage, setLanguage: setUiLanguage, t } = useI18n();
+  const [cookiesDialogOpen, setCookiesDialogOpen] = useState(false);
+  const [copiedUrl, setCopiedUrl] = useState<string | null>(null);
+  const [copyFailedUrl, setCopyFailedUrl] = useState<string | null>(null);
   const modelDownloadActive = Object.keys(downloadingModel).length > 0;
-  const browserOptions: SelectOption[] = [
-    { value: "none", label: t("settings.publicOnly") },
-    ...browsers.map((item) => ({ value: item.id, label: item.label })),
-  ];
   const interfaceLanguageOptions: SelectOption[] = uiLanguageOptions.map((option) => ({
     value: option.value,
     label: option.label,
   }));
+  const chromiumDetected = browsers.some((browser) => CHROMIUM_BROWSER_IDS.has(browser.id));
+  const firefoxDetected = browsers.some((browser) => browser.id === "firefox");
+  const showChromiumLink = chromiumDetected || !firefoxDetected;
+  const showFirefoxLink = firefoxDetected || !chromiumDetected;
 
-  const activeBrowser = browsers.find((item) => item.id === browser);
-    const profileOptions: SelectOption[] =
-    activeBrowser?.profiles.map((profile) => ({
-      value: profile.id,
-      label: `${profile.label}${profile.isDefault ? ` (${t("settings.default")})` : ""}`,
-    })) ?? [];
+  async function copyLink(url: string) {
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopyFailedUrl(null);
+      setCopiedUrl(url);
+      window.setTimeout(() => setCopiedUrl((current) => (current === url ? null : current)), 1600);
+    } catch {
+      setCopiedUrl(null);
+      setCopyFailedUrl(url);
+    }
+  }
+
+  useEffect(() => {
+    if (!cookiesDialogOpen) return;
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setCookiesDialogOpen(false);
+    };
+    document.addEventListener("keydown", handleEscape);
+    return () => document.removeEventListener("keydown", handleEscape);
+  }, [cookiesDialogOpen]);
 
   return (
     <div className="settings-grid">
@@ -83,44 +105,38 @@ export function SettingsPage({
           </div>
           <LockKeyhole size={20} />
         </div>
-        <p className="settings-intro">
-          {t("settings.accessIntro")}
-        </p>
-
-        <label className="field-label">{t("settings.browserSession")}</label>
-        <CustomSelect
-          value={browser}
-          options={browserOptions}
-          onChange={(val) => onBrowserChange(val as BrowserChoice)}
-          disabled={busy}
-        />
-        <p className="settings-note">{t("settings.browserDetectNote")}</p>
-
-        {browser !== "none" && activeBrowser && (
-          <>
-            <label className="field-label">{t("settings.browserProfile")}</label>
-            <CustomSelect
-              value={browserProfile}
-              options={profileOptions}
-              onChange={onBrowserProfileChange}
+        <label className="field-label">{t("settings.cookiesFile")}</label>
+        {cookiesPath ? (
+          <div className="info-box">
+            <FileKey size={16} />
+            <span title={cookiesPath}>
+              {t("settings.cookiesFileSelected", {
+                file: cookiesPath.split(/[\\/]/).pop() ?? cookiesPath,
+              })}
+            </span>
+            <button
+              type="button"
+              className="icon-button danger"
+              onClick={onClearCookiesFile}
               disabled={busy}
-            />
-            <p className="settings-note">
-              {t("settings.profileNote")}
-            </p>
-          </>
+              title={t("settings.clearCookiesFile")}
+              aria-label={t("settings.clearCookiesFile")}
+            >
+              <Trash2 size={15} />
+            </button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            className="secondary-button full"
+            onClick={() => setCookiesDialogOpen(true)}
+            disabled={busy}
+          >
+            <FileKey size={16} />
+            <span>{t("settings.chooseCookiesFile")}</span>
+          </button>
         )}
-
-        {browser === "none" && browsers.length === 0 && (
-          <p className="settings-note">
-            {t("settings.noBrowsers")}
-          </p>
-        )}
-
-        <div className="info-box">
-          <LockKeyhole size={16} />
-          <span>{t("settings.cookies")}</span>
-        </div>
+        <p className="settings-note">{t("settings.cookiesFileNote")}</p>
 
         <label className="field-label">{t("settings.interfaceLanguage")}</label>
         <CustomSelect
@@ -131,6 +147,81 @@ export function SettingsPage({
         />
         <p className="settings-note">{t("settings.interfaceLanguageNote")}</p>
       </section>
+
+      {cookiesDialogOpen && (
+        <div className="modal-backdrop" role="presentation">
+          <div
+            className="cookies-guide-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="cookies-guide-title"
+          >
+            <div className="cookies-guide-icon" aria-hidden="true">
+              <FileKey size={22} />
+            </div>
+            <div className="cookies-guide-content">
+              <h3 id="cookies-guide-title">{t("settings.cookiesGuideTitle")}</h3>
+              <p>{t("settings.cookiesGuideBody")}</p>
+              <p className="cookies-guide-extension">{t("settings.cookiesGuideExtension")}</p>
+              <div className="cookies-guide-links">
+                {showChromiumLink && (
+                  <CookieExtensionLink
+                    label={t("settings.cookiesGuideChromiumFamily")}
+                    url={COOKIES_EXTENSION_URL}
+                    copied={copiedUrl === COOKIES_EXTENSION_URL}
+                    copyFailed={copyFailedUrl === COOKIES_EXTENSION_URL}
+                    onOpen={onOpenUrl}
+                    onCopy={copyLink}
+                    openLabel={t("settings.openLink")}
+                    copyLabel={t("settings.copyLink")}
+                    copiedLabel={t("settings.linkCopied")}
+                    copyFailedLabel={t("settings.copyLinkFailed")}
+                  />
+                )}
+                {showFirefoxLink && (
+                  <CookieExtensionLink
+                    label={t("settings.cookiesGuideFirefoxFamily")}
+                    url={FIREFOX_COOKIES_EXTENSION_URL}
+                    copied={copiedUrl === FIREFOX_COOKIES_EXTENSION_URL}
+                    copyFailed={copyFailedUrl === FIREFOX_COOKIES_EXTENSION_URL}
+                    onOpen={onOpenUrl}
+                    onCopy={copyLink}
+                    openLabel={t("settings.openLink")}
+                    copyLabel={t("settings.copyLink")}
+                    copiedLabel={t("settings.linkCopied")}
+                    copyFailedLabel={t("settings.copyLinkFailed")}
+                  />
+                )}
+              </div>
+              <ol className="cookies-guide-steps">
+                <li>{t("settings.cookiesGuideStep1")}</li>
+                <li>{t("settings.cookiesGuideStep2")}</li>
+                <li>{t("settings.cookiesGuideStep3")}</li>
+              </ol>
+              <div className="cookies-guide-actions">
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={() => setCookiesDialogOpen(false)}
+                >
+                  {t("settings.cookiesGuideCancel")}
+                </button>
+                <button
+                  type="button"
+                  className="primary-button"
+                  onClick={() => {
+                    setCookiesDialogOpen(false);
+                    onSelectCookiesFile();
+                  }}
+                >
+                  <FileKey size={15} />
+                  {t("settings.cookiesGuideContinue")}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       <section className="card settings-card">
         <div className="card-title-row">
@@ -347,6 +438,55 @@ export function SettingsPage({
           <RotateCcw size={16} /> {t("settings.recheck")}
         </button>
       </section>
+    </div>
+  );
+}
+
+function CookieExtensionLink({
+  label,
+  url,
+  copied,
+  copyFailed,
+  onOpen,
+  onCopy,
+  openLabel,
+  copyLabel,
+  copiedLabel,
+  copyFailedLabel,
+}: {
+  label: string;
+  url: string;
+  copied: boolean;
+  copyFailed: boolean;
+  onOpen: (url: string) => void;
+  onCopy: (url: string) => void;
+  openLabel: string;
+  copyLabel: string;
+  copiedLabel: string;
+  copyFailedLabel: string;
+}) {
+  return (
+    <div className="cookies-guide-link-row">
+      <div className="cookies-guide-link-copy">
+        <strong>{label}</strong>
+        <a
+          href={url}
+          onClick={(event) => {
+            event.preventDefault();
+            onOpen(url);
+          }}
+        >
+          {url}
+        </a>
+      </div>
+      <div className="cookies-guide-link-actions">
+        <button type="button" className="secondary-button compact" onClick={() => onOpen(url)}>
+          <ExternalLink size={14} /> {openLabel}
+        </button>
+        <button type="button" className="secondary-button compact" onClick={() => onCopy(url)}>
+          {copied ? <Check size={14} /> : <Copy size={14} />} {copied ? copiedLabel : copyFailed ? copyFailedLabel : copyLabel}
+        </button>
+      </div>
     </div>
   );
 }

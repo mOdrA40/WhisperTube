@@ -15,12 +15,12 @@ use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
 
 use crate::{
-    browsers::browser_args,
+    browsers::cookie_args,
     history, models,
     paths::{engine_path, jobs_dir, model_path, tool_path},
+    sources::{js_runtime_args, validate_media_url},
     system::{detect_gpu, detect_nvidia, UsageMonitor},
     types::{ProgressPayload, Segment, TranscriptRequest, TranscriptResult},
-    youtube::validate_youtube_url,
 };
 
 fn emit_progress(
@@ -105,6 +105,18 @@ fn run_download(
     let yt_dlp = tool_path(app, "yt-dlp")?;
     let template = job_dir.join("source.%(ext)s");
     let mut command = Command::new(yt_dlp);
+    let cookie_args = cookie_args(
+        &request.browser,
+        request.browser_profile.as_deref(),
+        request.cookies_path.as_deref(),
+    )
+    .map_err(|error| {
+        if request.cookies_path.is_some() {
+            format!("media_source_cookie_file:{error}")
+        } else {
+            error
+        }
+    })?;
     command
         .args([
             "--ignore-config",
@@ -119,10 +131,8 @@ fn run_download(
             "-o",
         ])
         .arg(&template)
-        .args(browser_args(
-            &request.browser,
-            request.browser_profile.as_deref(),
-        )?)
+        .args(js_runtime_args())
+        .args(cookie_args)
         .arg(&request.url)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -480,7 +490,7 @@ pub fn pipeline(
     request: TranscriptRequest,
 ) -> Result<TranscriptResult, String> {
     cancelled.store(false, Ordering::SeqCst);
-    validate_youtube_url(&request.url)?;
+    validate_media_url(&request.url)?;
     let yt_dlp = tool_path(&app, "yt-dlp")?;
     let ffmpeg = tool_path(&app, "ffmpeg")?;
     if !yt_dlp.exists() || !ffmpeg.exists() {

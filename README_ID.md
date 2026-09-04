@@ -1,6 +1,6 @@
 # WhisperTube 0.1
 
-WhisperTube adalah aplikasi desktop local-first untuk mengubah video YouTube menjadi transkrip menggunakan `yt-dlp`, FFmpeg, dan whisper.cpp. Audio serta proses transkripsi tetap berada di perangkat pengguna.
+WhisperTube adalah aplikasi desktop local-first untuk mengubah video dari platform yang didukung menjadi transkrip menggunakan `yt-dlp`, FFmpeg, dan whisper.cpp. Audio serta proses transkripsi tetap berada di perangkat pengguna.
 
 Dokumentasi utama: [README.md](README.md) (English). Dokumentasi Mandarin: [README_CN.md](README_CN.md).
 
@@ -12,16 +12,18 @@ Dokumentasi utama: [README.md](README.md) (English). Dokumentasi Mandarin: [READ
 - NVIDIA CUDA bersifat opsional dan diunduh terpisah supaya setup dasar tetap kecil.
 - Aplikasi mendeteksi OS, arsitektur, GPU, browser, dan profil sebelum menawarkan komponen opsional.
 
+Platform yang dicakup antara lain YouTube, TikTok, X/Twitter, Facebook, Instagram, Reddit, Twitch, Vimeo, Dailymotion, Pinterest, LinkedIn, Tumblr, Bilibili, dan VK. Dukungan mengikuti extractor yt-dlp yang terpasang dan dapat berubah saat platform memperbarui sistemnya.
+
 ## Fitur
 
-- Tempel URL YouTube dan periksa metadata sebelum download.
-- Video publik dan Member-only melalui `yt-dlp --cookies-from-browser` dengan profil browser lokal yang terdeteksi.
+- Tempel URL video yang didukung dan periksa metadata sebelum download.
+- Video publik dan video yang memerlukan login melalui import `cookies.txt` format Netscape.
 - Tidak meminta email atau password Google dan tidak menyalin cookies ke database aplikasi.
 - Browser yang kompatibel dideteksi otomatis: Chrome, Edge, Firefox, Brave, Chromium, Opera, Vivaldi, Whale, serta Safari di macOS. Settings hanya menampilkan browser/profil yang ada di perangkat.
 - Download `bestaudio/best`, normalisasi FFmpeg ke WAV PCM signed 16-bit mono 16 kHz, lalu inferensi lokal whisper.cpp.
 - Model: Fast (`base`, ~142 MB), Balanced (`large-v3-turbo-q5_0`, ~547 MB), dan Accurate (`large-v3-q5_0`, ~1,1 GB).
 - Verifikasi checksum model, progress, cancel, timestamp, export TXT/SRT/VTT, dan history SQLite lokal.
-- Progress model dan download YouTube menampilkan byte yang sudah dipindahkan; download model dapat dibatalkan.
+- Progress model dan download video menampilkan byte yang sudah dipindahkan; download model dapat dibatalkan.
 - Saat transkripsi, penggunaan CPU/GPU ditampilkan jika tersedia di platform, dan speed jaringan tampil saat download.
 - Workspace dapat dibersihkan dari URL, preview, dan transkrip; history bisa dihapus permanen satuan, beberapa, atau semua item yang tampil.
 - Audio sementara dihapus setelah proses kecuali opsi `Simpan audio hasil proses` dinyalakan.
@@ -53,7 +55,7 @@ CUDA tidak dibundel dalam setup dasar. Aplikasi mengunduhnya ke app storage user
 
 ## Alur transkripsi
 
-1. Tempel link YouTube.
+1. Tempel link video yang didukung.
 2. Klik **Periksa video**.
 3. Pastikan metadata tampil.
 4. Download dan pilih model.
@@ -62,15 +64,17 @@ CUDA tidak dibundel dalam setup dasar. Aplikasi mengunduhnya ke app storage user
 7. Klik **Mulai transkripsi**.
 
 ```text
-YouTube → yt-dlp → FFmpeg WAV 16 kHz mono → whisper.cpp
+Video source → yt-dlp → FFmpeg WAV 16 kHz mono → whisper.cpp
        → segments/timestamp → JSON + TXT + SRT + VTT + history
 ```
 
-## Video Member-only
+## Video yang memerlukan login
 
-Login YouTube di browser yang didukung. Di WhisperTube buka **Pengaturan → Akses YouTube**, lalu pilih browser dan profil yang memiliki membership. Kembali ke halaman Transkripsi dan klik **Periksa video**.
+Login ke platform terkait di browser yang didukung. Di WhisperTube buka **Pengaturan → Akses sumber**, lalu pilih browser dan profil yang memiliki akses. Kembali ke halaman Transkripsi dan klik **Periksa video**.
 
-`yt-dlp` hanya membaca sesi browser pilihan saat job berjalan. Dukungan video authenticated tetap dapat berubah ketika YouTube mengubah extractor, login flow, atau PO Token.
+`yt-dlp` hanya membaca sesi browser pilihan saat job berjalan. Dukungan video yang memerlukan login dapat berubah ketika platform mengubah extractor, login flow, atau sistem anti-bot.
+
+Di Windows, enkripsi browser berbasis Chromium dapat membuat yt-dlp gagal membuka profile Brave/Chrome/Edge. Jika terjadi, gunakan **Pengaturan → File cookies manual** dengan export `cookies.txt` format Netscape. File hanya digunakan oleh proses WhisperTube lokal.
 
 ## Build installer
 
@@ -99,7 +103,7 @@ Model, job, export, dan `whispertube.db` disimpan di app-local-data sesuai OS.
 
 - CUDA yang dipin saat ini khusus Windows x64 dengan driver NVIDIA terdeteksi.
 - Metal/Vulkan memerlukan asset release GitHub publik yang cocok.
-- Authenticated YouTube bergantung pada kompatibilitas versi yt-dlp dan perubahan keamanan browser/YouTube.
+- Video yang memerlukan login bergantung pada kompatibilitas versi yt-dlp serta perubahan keamanan browser/platform.
 - Belum ada playlist/batch job, speaker diarization, word-level subtitle editing, atau auto-update runtime.
 - Jalur installer macOS/Linux belum sekeras jalur Windows.
 

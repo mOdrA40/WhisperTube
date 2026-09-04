@@ -3,13 +3,12 @@ use std::sync::{atomic::Ordering, Arc};
 use tauri::{AppHandle, State};
 
 use crate::{
-    accelerators, browsers, history, models,
+    accelerators, browsers, history, models, sources,
     state::AppState,
     system, transcription,
     types::{
         HistoryItem, ModelInfo, SystemStatus, TranscriptRequest, TranscriptResult, VideoMetadata,
     },
-    youtube,
 };
 
 fn begin_runtime_install(
@@ -144,14 +143,15 @@ pub fn delete_model(app: AppHandle, model_id: String) -> Result<(), String> {
     models::delete_model(&app, &model_id)
 }
 
-#[tauri::command]
-pub async fn inspect_youtube(
+#[tauri::command(rename_all = "camelCase")]
+pub async fn inspect_media(
     app: AppHandle,
     url: String,
     browser: String,
     profile: Option<String>,
+    cookies_path: Option<String>,
 ) -> Result<VideoMetadata, String> {
-    youtube::inspect_youtube(app, url, browser, profile).await
+    sources::inspect_media(app, url, browser, profile, cookies_path).await
 }
 
 #[tauri::command(rename_all = "camelCase")]

@@ -1,6 +1,6 @@
 # WhisperTube 0.1
 
-WhisperTube is a local-first desktop app that turns YouTube videos into transcripts using `yt-dlp`, FFmpeg, and whisper.cpp. Audio and transcript processing stay on the user's device.
+WhisperTube is a local-first desktop app that turns videos from supported platforms into transcripts using `yt-dlp`, FFmpeg, and whisper.cpp. Audio and transcript processing stay on the user's device.
 
 Other languages: [Bahasa Indonesia](README_ID.md) · [中文（普通话）](README_CN.md)
 
@@ -12,11 +12,13 @@ Other languages: [Bahasa Indonesia](README_ID.md) · [中文（普通话）](REA
 - NVIDIA CUDA is optional and installed separately so the base setup stays small.
 - The app detects the current operating system, architecture, GPU, and installed browsers before offering optional components.
 
+Supported source families include YouTube, TikTok, X/Twitter, Facebook, Instagram, Reddit, Twitch, Vimeo, Dailymotion, Pinterest, LinkedIn, Tumblr, Bilibili, and VK. Support is based on the current yt-dlp extractor and can change as each platform changes.
+
 ## Features
 
-- Paste a YouTube URL and inspect metadata before downloading.
+- Paste a supported video URL and inspect metadata before downloading.
 - Public videos.
-- Member-only/authenticated videos through `yt-dlp --cookies-from-browser` using a detected local browser profile. The app never asks for a Google password.
+- Login-protected videos through an imported Netscape `cookies.txt` file. The app never asks for site passwords.
 - Browser discovery for Chrome, Edge, Firefox, Brave, Chromium, Opera, Vivaldi, Whale, and Safari on macOS. Settings only shows browsers and profiles detected on the current device.
 - Download `bestaudio/best`; the original download is not converted to MP3 first.
 - FFmpeg normalization to signed 16-bit PCM WAV, mono, 16 kHz.
@@ -31,7 +33,7 @@ Other languages: [Bahasa Indonesia](README_ID.md) · [中文（普通话）](REA
 - Windows x64 NVIDIA CUDA acceleration, installed on demand from the pinned official whisper.cpp release.
 - Metal and Vulkan accelerator packs only appear when the platform, architecture, and compatible GPU detection match.
 - Progress reporting, cancellation, timestamped transcripts, TXT/SRT/VTT export, and local SQLite history.
-- Model and YouTube download progress show transferred bytes, with cancellable model downloads.
+- Model and source-video download progress show transferred bytes, with cancellable model downloads.
 - Transcription progress shows CPU/GPU utilization when the platform exposes those metrics, plus download network speed.
 - Clear the current URL, preview, and transcript from the workspace; permanently delete one, multiple, or all visible history items.
 - Temporary audio and WAV files are removed after processing unless `Keep processed audio` is enabled.
@@ -131,7 +133,7 @@ The CUDA package is large, so it is deliberately excluded from the base setup. T
 
 ### 8. First transcription
 
-1. Paste a YouTube link.
+1. Paste a supported video link.
 2. Select **Check video**.
 3. Confirm that the metadata preview appears.
 4. Download and select a model.
@@ -142,7 +144,7 @@ The CUDA package is large, so it is deliberately excluded from the base setup. T
 The internal pipeline is:
 
 ```text
-YouTube
+Supported video source
   ↓ yt-dlp bestaudio
 original audio stream
   ↓ FFmpeg
@@ -153,11 +155,13 @@ segments + timestamps
 JSON + TXT + SRT + VTT + SQLite history
 ```
 
-## Member-only YouTube videos
+## Login-protected videos
 
-Log in to YouTube in a supported browser first. In WhisperTube, open **Settings → YouTube access** and choose the detected browser and profile containing the membership. Then return to Transcribe and select **Check video**.
+Log in to the relevant platform in a supported browser first. In WhisperTube, open **Settings → Source access** and choose the detected browser and profile containing the required access. Then return to Transcribe and select **Check video**.
 
-WhisperTube does not request Google credentials and does not copy cookies into its database. `yt-dlp` reads the selected browser session only while the process runs. YouTube extractor, authentication, and PO Token changes can still affect authenticated downloads; keeping `yt-dlp` current is the first line of defense.
+WhisperTube does not request site credentials and does not copy cookies into its database. `yt-dlp` reads the imported local cookies file only while the process runs. Extractor, authentication, anti-bot, and platform changes can still affect protected downloads; keeping `yt-dlp` current is the first line of defense.
+
+On Windows, Chromium-based browser encryption can prevent yt-dlp from decrypting a Brave/Chrome/Edge profile. In that case, use **Settings → Manual cookies file** with a local Netscape-format export. The file is used only by the local WhisperTube process.
 
 ## Build a Windows installer
 
@@ -211,7 +215,7 @@ Tauri selects the platform-specific app-local-data directory. WhisperTube stores
 
 ## Security decisions
 
-- YouTube URLs are restricted to official YouTube hosts before downloader execution.
+- Source URLs are restricted to an explicit allowlist of supported video hosts before downloader execution.
 - The frontend has no arbitrary shell execution capability.
 - External processes are launched by Rust with argument arrays, not concatenated shell commands.
 - Known model and accelerator downloads are verified with checksums before activation.
@@ -224,7 +228,7 @@ Tauri selects the platform-specific app-local-data directory. WhisperTube stores
 1. The pinned CUDA bootstrap currently targets Windows x64 with a detected NVIDIA driver.
 2. Metal and Vulkan packs require matching public GitHub Release assets and are not bundled into the base source setup.
 3. Browser support depends on yt-dlp's current cookie extraction support and the browser's OS security behavior.
-4. Member-only downloads can break when YouTube changes authentication or PO Token requirements.
+4. Login-protected downloads can break when a platform changes authentication, anti-bot, or extractor requirements.
 5. There are no playlist/batch jobs, speaker diarization, word-level subtitle editing, or runtime auto-updates yet.
 6. macOS/Linux bootstrap and installer QA are not as production-ready as the Windows path in v0.1.
 

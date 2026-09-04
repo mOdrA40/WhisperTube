@@ -8,11 +8,12 @@ import {
   getSystemStatus,
   installAccelerator,
   installCudaEngine,
-  inspectYoutube,
+  inspectMedia,
   listBrowsers,
   listHistory,
   listModels,
   loadHistory,
+  pickCookiesFile,
   startTranscription,
   subscribeToModelDownload,
   subscribeToAcceleratorDownload,
@@ -25,7 +26,6 @@ import type {
   AppTab,
   BackendChoice,
   BrowserInfo,
-  BrowserChoice,
   HistoryItem,
   ModelInfo,
   ModelDownloadPayload,
@@ -47,12 +47,36 @@ const initialProgress: ProgressPayload = {
   gpuUsagePercent: null,
 };
 
+const COOKIES_PATH_STORAGE_KEY = "whispertube.cookiesPath";
+
+function readStoredCookiesPath() {
+  if (typeof window === "undefined") return "";
+  try {
+    const path = window.localStorage.getItem(COOKIES_PATH_STORAGE_KEY) ?? "";
+    if (path.toLowerCase().endsWith("browser-session.cookies.txt")) {
+      window.localStorage.removeItem(COOKIES_PATH_STORAGE_KEY);
+      return "";
+    }
+    return path;
+  } catch {
+    return "";
+  }
+}
+
+function persistCookiesPath(path: string) {
+  try {
+    if (path) window.localStorage.setItem(COOKIES_PATH_STORAGE_KEY, path);
+    else window.localStorage.removeItem(COOKIES_PATH_STORAGE_KEY);
+  } catch {
+    // The file path still works for the current session if storage is unavailable.
+  }
+}
+
 export function useWhisperTube() {
   const { t } = useI18n();
   const [tab, setTab] = useState<AppTab>("transcribe");
   const [url, setUrl] = useState("");
-  const [browser, setBrowser] = useState<BrowserChoice>("none");
-  const [browserProfile, setBrowserProfile] = useState("");
+  const [cookiesPath, setCookiesPath] = useState(readStoredCookiesPath);
   const [backend, setBackend] = useState<BackendChoice>("auto");
   const [language, setLanguage] = useState("auto");
   const [modelId, setModelId] = useState("large-v3-turbo-q5_0");
@@ -87,8 +111,8 @@ export function useWhisperTube() {
       listHistory(),
       listBrowsers(),
     ]);
-    setBrowsers(nextBrowsers);
     setSystem(nextSystem);
+    setBrowsers(nextBrowsers);
     if (!autoConfigured.current) {
       setModelId(nextSystem.recommendedModelId);
       setBackend(nextSystem.recommendedBackend);
@@ -128,13 +152,6 @@ export function useWhisperTube() {
     };
   }, [refreshSystem]);
 
-  useEffect(() => {
-    if (browser !== "none" && !browsers.some((item) => item.id === browser)) {
-      setBrowser("none");
-      setBrowserProfile("");
-    }
-  }, [browser, browsers]);
-
   function handleUrlChange(nextUrl: string) {
     setUrl(nextUrl);
     setMetadata(null);
@@ -152,10 +169,22 @@ export function useWhisperTube() {
     setError(null);
   }
 
-  function handleBrowserChange(nextBrowser: BrowserChoice) {
-    setBrowser(nextBrowser);
-    const firstProfile = browsers.find((item) => item.id === nextBrowser)?.profiles[0];
-    setBrowserProfile(firstProfile?.id ?? "");
+  async function handleSelectCookiesFile() {
+    try {
+      const path = await pickCookiesFile();
+      if (!path) return;
+      setCookiesPath(path);
+      persistCookiesPath(path);
+      setError(null);
+    } catch (cause) {
+      setError(friendlyError(cause));
+    }
+  }
+
+  function handleClearCookiesFile() {
+    setCookiesPath("");
+    persistCookiesPath("");
+    setError(null);
   }
 
   const filteredSegments = useMemo(() => {
@@ -215,10 +244,42 @@ export function useWhisperTube() {
     setError(null);
     setResult(null);
     try {
-      setMetadata(await inspectYoutube(url.trim(), browser, browserProfile));
+      setMetadata(await inspectMedia(url.trim(), "none", "", cookiesPath));
     } catch (cause) {
       setMetadata(null);
-      setError(friendlyError(cause));
+      const message = friendlyError(cause);
+      const normalizedMessage = message.toLowerCase();
+      setError(
+        normalizedMessage.startsWith("media_tiktok_transient:")
+          ? t("error.tiktokMetadataRetry")
+          : normalizedMessage.startsWith("media_source_transient:")
+            ? t("error.sourceTemporary")
+            : normalizedMessage.startsWith("media_source_rate_limited:")
+              ? t("error.sourceRateLimited")
+            : normalizedMessage.startsWith("media_source_membership_required:")
+              ? t("error.sourceMembershipRequired")
+              : normalizedMessage.startsWith("media_source_browser_decryption:")
+                ? t("error.sourceBrowserEncryption")
+              : normalizedMessage.startsWith("media_source_cookie_file:")
+                ? t("error.sourceCookiesFile")
+              : normalizedMessage.startsWith("media_source_js_runtime:")
+                ? t("error.sourceJsRuntime")
+              : normalizedMessage.startsWith("media_source_access_required:")
+                ? t("error.sourceAccessRequired")
+                : normalizedMessage.startsWith("media_source_unavailable:")
+                  ? t("error.sourceUnavailable")
+                  : normalizedMessage.startsWith("media_source_runtime:")
+                    ? t("error.sourceRuntime")
+                    : normalizedMessage.startsWith("media_source_metadata:")
+                      ? t("error.sourceMetadata")
+                      : normalizedMessage.startsWith("media_source_browser:")
+                        ? t("error.sourceBrowser")
+                        : normalizedMessage.startsWith("media_source_input:")
+                          ? normalizedMessage.includes("domain video")
+                            ? t("error.sourceUnsupported")
+                            : t("error.sourceInputInvalid")
+                          : message,
+      );
     } finally {
       setInspecting(false);
     }
@@ -349,8 +410,9 @@ export function useWhisperTube() {
         title: metadata.title,
         channel: metadata.channel,
         duration: metadata.duration,
-        browser,
-        browserProfile,
+        browser: "none",
+        browserProfile: "",
+        cookiesPath,
         backend,
         language,
         modelId,
@@ -360,7 +422,14 @@ export function useWhisperTube() {
       await refreshSystem();
     } catch (cause) {
       const message = friendlyError(cause);
-      if (!message.toLowerCase().includes("dibatalkan")) setError(message);
+      const normalizedMessage = message.toLowerCase();
+      if (!normalizedMessage.includes("dibatalkan")) {
+        setError(
+          normalizedMessage.startsWith("media_source_cookie_file:")
+            ? t("error.sourceCookiesFile")
+            : message,
+        );
+      }
     } finally {
       setBusy(false);
     }
@@ -428,11 +497,10 @@ export function useWhisperTube() {
     url,
     setUrl: handleUrlChange,
     clearTranscription,
-    browser,
-    setBrowser: handleBrowserChange,
-    browserProfile,
-    setBrowserProfile,
+    cookiesPath,
     browsers,
+    selectCookiesFile: handleSelectCookiesFile,
+    clearCookiesFile: handleClearCookiesFile,
     backend,
     setBackend,
     language,

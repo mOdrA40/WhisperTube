@@ -5,7 +5,7 @@ import {
   LoaderCircle,
   Search,
   X,
-  Youtube,
+  Video,
 } from "lucide-react";
 import type { VideoMetadata } from "../../types";
 import { formatDuration } from "../../lib/format";
@@ -41,7 +41,7 @@ export function SourceCard({
       <div className="card source-hero-card">
         <div className="hero-content">
           <div className="hero-badge">
-            <Youtube size={14} className="hero-badge-icon" />
+            <Video size={14} className="hero-badge-icon" />
             <span className="hero-badge-text">{t("source.badge")}</span>
           </div>
 
@@ -53,7 +53,7 @@ export function SourceCard({
           <div className="url-input-container">
             <div className="url-input-box">
               <div className="url-input-icon">
-                <Youtube size={19} className="yt-red-icon" />
+                <Video size={19} className="yt-red-icon" />
               </div>
               <input
                 type="text"
@@ -129,7 +129,7 @@ function VideoPreviewCard({ metadata }: { metadata: VideoMetadata }) {
           </div>
         ) : (
           <div className="preview-thumb-placeholder">
-            <Youtube size={36} className="yt-placeholder-icon" />
+            <Video size={36} className="yt-placeholder-icon" />
           </div>
         )}
       </div>
@@ -140,6 +140,9 @@ function VideoPreviewCard({ metadata }: { metadata: VideoMetadata }) {
             <Check size={13} />
             <span>{t("source.videoReady")}</span>
           </span>
+          {metadata.source && (
+            <span className="status-badge-availability">{metadata.source}</span>
+          )}
           {metadata.availability && (
             <span className="status-badge-availability">{metadata.availability}</span>
           )}

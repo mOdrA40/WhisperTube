@@ -9,6 +9,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
+    time::Instant,
 };
 use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
@@ -17,20 +18,23 @@ use crate::{
     browsers::browser_args,
     history, models,
     paths::{engine_path, jobs_dir, model_path, tool_path},
-    system::{detect_gpu, detect_nvidia},
+    system::{detect_gpu, detect_nvidia, UsageMonitor},
     types::{ProgressPayload, Segment, TranscriptRequest, TranscriptResult},
     youtube::validate_youtube_url,
 };
 
 fn emit_progress(
     app: &AppHandle,
+    usage: &UsageMonitor,
     stage: &str,
     percent: f64,
     message: impl Into<String>,
     backend: Option<&str>,
     downloaded_bytes: Option<u64>,
     total_bytes: Option<u64>,
+    network_bytes_per_second: Option<u64>,
 ) {
+    let usage_snapshot = usage.snapshot();
     let _ = app.emit(
         "job-progress",
         ProgressPayload {
@@ -40,6 +44,9 @@ fn emit_progress(
             backend: backend.map(str::to_string),
             downloaded_bytes,
             total_bytes,
+            network_bytes_per_second,
+            cpu_usage_percent: usage_snapshot.cpu_usage_percent,
+            gpu_usage_percent: usage_snapshot.gpu_usage_percent,
         },
     );
 }
@@ -60,8 +67,36 @@ fn process_failed(cancelled: &Arc<AtomicBool>, stderr: String, stage: &str) -> S
     }
 }
 
+fn normalize_utf8_bytes(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+fn normalize_output_utf8(path: &Path) -> Result<(), String> {
+    let bytes = fs::read(path).map_err(|e| format!("Gagal membaca output Whisper: {e}"))?;
+    let normalized = normalize_utf8_bytes(&bytes);
+    if normalized.as_bytes() != bytes.as_slice() {
+        fs::write(path, normalized.as_bytes())
+            .map_err(|e| format!("Gagal menormalkan output Whisper: {e}"))?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod output_tests {
+    use super::normalize_utf8_bytes;
+
+    #[test]
+    fn replaces_invalid_utf8_without_panicking() {
+        assert_eq!(
+            normalize_utf8_bytes(b"text: \xAE misalnya"),
+            "text: � misalnya"
+        );
+    }
+}
+
 fn run_download(
     app: &AppHandle,
+    usage: &UsageMonitor,
     request: &TranscriptRequest,
     job_dir: &Path,
     active_pid: &Arc<Mutex<Option<u32>>>,
@@ -103,6 +138,7 @@ fn run_download(
         .ok_or("Tidak bisa membaca progress yt-dlp")?;
     let progress_re =
         Regex::new(r"WT_PROGRESS=\s*([0-9.]+)%\|([0-9]+|NA)\|([0-9]+|NA)\|([0-9]+|NA)").unwrap();
+    let download_started_at = Instant::now();
     for line in BufReader::new(stdout).lines().map_while(Result::ok) {
         if let Some(caps) = progress_re.captures(&line) {
             let downloaded_bytes = caps.get(2).and_then(|value| value.as_str().parse().ok());
@@ -110,15 +146,21 @@ fn run_download(
                 .get(3)
                 .and_then(|value| value.as_str().parse().ok())
                 .or_else(|| caps.get(4).and_then(|value| value.as_str().parse().ok()));
+            let network_bytes_per_second = downloaded_bytes.and_then(|downloaded| {
+                let elapsed = download_started_at.elapsed().as_secs_f64();
+                (elapsed > 0.0).then(|| (downloaded as f64 / elapsed) as u64)
+            });
             if let Ok(percent) = caps[1].parse::<f64>() {
                 emit_progress(
                     app,
+                    usage,
                     "downloading",
                     percent,
                     "Mengunduh best available audio dari YouTube…",
                     None,
                     downloaded_bytes,
                     total_bytes,
+                    network_bytes_per_second,
                 );
             }
         }
@@ -162,6 +204,7 @@ fn run_download(
 
 fn run_ffmpeg(
     app: &AppHandle,
+    usage: &UsageMonitor,
     input: &Path,
     output: &Path,
     duration: f64,
@@ -203,9 +246,11 @@ fn run_ffmpeg(
                 };
                 emit_progress(
                     app,
+                    usage,
                     "converting",
                     percent,
                     "Konversi ke PCM 16 kHz mono…",
+                    None,
                     None,
                     None,
                     None,
@@ -303,6 +348,7 @@ fn choose_backend(app: &AppHandle, requested: &str) -> Result<(String, PathBuf),
 
 fn run_whisper(
     app: &AppHandle,
+    usage: &UsageMonitor,
     wav: &Path,
     output_prefix: &Path,
     model: &Path,
@@ -356,6 +402,7 @@ fn run_whisper(
             if let Ok(percent) = caps[1].parse::<f64>() {
                 emit_progress(
                     app,
+                    usage,
                     "transcribing",
                     percent,
                     format!(
@@ -363,6 +410,7 @@ fn run_whisper(
                         resolved_backend.to_uppercase()
                     ),
                     Some(&resolved_backend),
+                    None,
                     None,
                     None,
                 );
@@ -445,17 +493,27 @@ pub fn pipeline(
     let jobs_dir = jobs_dir(&app)?;
     let job_dir = jobs_dir.join(Uuid::new_v4().to_string());
     fs::create_dir_all(&job_dir).map_err(|e| format!("Gagal membuat job directory: {e}"))?;
+    let usage_monitor = UsageMonitor::start();
 
     emit_progress(
         &app,
+        &usage_monitor,
         "downloading",
         0.0,
         "Menyiapkan download…",
         None,
         None,
         None,
+        None,
     );
-    let source = run_download(&app, &request, &job_dir, &active_pid, &cancelled)?;
+    let source = run_download(
+        &app,
+        &usage_monitor,
+        &request,
+        &job_dir,
+        &active_pid,
+        &cancelled,
+    )?;
     if cancelled.load(Ordering::SeqCst) {
         return Err("Job dibatalkan.".into());
     }
@@ -463,15 +521,18 @@ pub fn pipeline(
     let wav = job_dir.join("audio.wav");
     emit_progress(
         &app,
+        &usage_monitor,
         "converting",
         0.0,
         "Menormalisasi audio untuk Whisper…",
         None,
         None,
         None,
+        None,
     );
     run_ffmpeg(
         &app,
+        &usage_monitor,
         &source,
         &wav,
         request.duration,
@@ -485,15 +546,18 @@ pub fn pipeline(
     let output_prefix = job_dir.join("transcript");
     emit_progress(
         &app,
+        &usage_monitor,
         "transcribing",
         0.0,
         "Memuat model Whisper…",
         None,
         None,
         None,
+        None,
     );
     let resolved_backend = run_whisper(
         &app,
+        &usage_monitor,
         &wav,
         &output_prefix,
         &model,
@@ -507,12 +571,18 @@ pub fn pipeline(
         return Err("Job dibatalkan.".into());
     }
 
+    for extension in ["json", "txt", "srt", "vtt"] {
+        normalize_output_utf8(&output_prefix.with_extension(extension))?;
+    }
+
     emit_progress(
         &app,
+        &usage_monitor,
         "finalizing",
         92.0,
         "Merapikan transcript dan menyimpan history…",
         Some(&resolved_backend),
+        None,
         None,
         None,
     );
@@ -555,10 +625,12 @@ pub fn pipeline(
     }
     emit_progress(
         &app,
+        &usage_monitor,
         "done",
         100.0,
         "Transkripsi selesai.",
         Some(&resolved_backend),
+        None,
         None,
         None,
     );

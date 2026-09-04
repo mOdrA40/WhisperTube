@@ -11,7 +11,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tauri::{AppHandle, Emitter};
 use tokio::io::AsyncWriteExt;
@@ -144,7 +144,13 @@ fn verify_sha1(path: &Path, expected: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn emit_model_progress(app: &AppHandle, id: &str, downloaded_bytes: u64, total_bytes: u64) {
+fn emit_model_progress(
+    app: &AppHandle,
+    id: &str,
+    downloaded_bytes: u64,
+    total_bytes: u64,
+    bytes_per_second: Option<u64>,
+) {
     let percent = if total_bytes > 0 {
         downloaded_bytes as f64 / total_bytes as f64 * 100.0
     } else {
@@ -157,6 +163,7 @@ fn emit_model_progress(app: &AppHandle, id: &str, downloaded_bytes: u64, total_b
             downloaded_bytes,
             total_bytes,
             percent: percent.clamp(0.0, 100.0),
+            bytes_per_second,
         },
     );
 }
@@ -198,7 +205,8 @@ pub async fn download_model(
         .await
         .map_err(|e| format!("Gagal membuat file model: {e}"))?;
     let mut downloaded = 0u64;
-    emit_model_progress(&app, spec.id, 0, total);
+    let download_started_at = Instant::now();
+    emit_model_progress(&app, spec.id, 0, total, None);
     loop {
         if cancelled.load(Ordering::SeqCst) {
             let _ = tokio::fs::remove_file(&temp).await;
@@ -219,7 +227,9 @@ pub async fn download_model(
             .await
             .map_err(|e| format!("Gagal menulis model: {e}"))?;
         downloaded += chunk.len() as u64;
-        emit_model_progress(&app, spec.id, downloaded, total);
+        let elapsed = download_started_at.elapsed().as_secs_f64();
+        let bytes_per_second = (elapsed > 0.0).then(|| (downloaded as f64 / elapsed) as u64);
+        emit_model_progress(&app, spec.id, downloaded, total, bytes_per_second);
     }
     file.flush()
         .await
@@ -237,15 +247,24 @@ pub async fn download_model(
     tokio::fs::rename(&temp, &dest)
         .await
         .map_err(|e| format!("Gagal memasang model: {e}"))?;
-    emit_model_progress(&app, spec.id, total, total);
+    emit_model_progress(&app, spec.id, total, total, None);
     Ok(())
 }
 
-fn emit_cuda_progress(app: &AppHandle, percent: f64) {
+fn emit_cuda_progress(
+    app: &AppHandle,
+    percent: f64,
+    downloaded_bytes: u64,
+    total_bytes: u64,
+    bytes_per_second: Option<u64>,
+) {
     let _ = app.emit(
         "cuda-download",
         CudaDownloadPayload {
+            downloaded_bytes,
+            total_bytes,
             percent: percent.clamp(0.0, 100.0),
+            bytes_per_second,
         },
     );
 }
@@ -342,7 +361,7 @@ async fn download_cuda_package(
     if cancelled.load(Ordering::SeqCst) {
         return Err("Download CUDA dibatalkan.".into());
     }
-    emit_cuda_progress(app, 0.0);
+    emit_cuda_progress(app, 0.0, 0, 0, None);
     let client = AsyncClient::builder()
         .user_agent("WhisperTube/0.1")
         .connect_timeout(Duration::from_secs(30))
@@ -367,6 +386,7 @@ async fn download_cuda_package(
         .await
         .map_err(|e| format!("Gagal membuat file download CUDA: {e}"))?;
     let mut downloaded = 0u64;
+    let download_started_at = Instant::now();
     loop {
         if cancelled.load(Ordering::SeqCst) {
             return Err("Download CUDA dibatalkan.".into());
@@ -385,9 +405,14 @@ async fn download_cuda_package(
             .await
             .map_err(|e| format!("Gagal menyimpan CUDA package: {e}"))?;
         downloaded += chunk.len() as u64;
-        if total > 0 {
-            emit_cuda_progress(app, downloaded as f64 / total as f64 * 85.0);
-        }
+        let elapsed = download_started_at.elapsed().as_secs_f64();
+        let bytes_per_second = (elapsed > 0.0).then(|| (downloaded as f64 / elapsed) as u64);
+        let percent = if total > 0 {
+            downloaded as f64 / total as f64 * 85.0
+        } else {
+            0.0
+        };
+        emit_cuda_progress(app, percent, downloaded, total, bytes_per_second);
     }
     file.flush()
         .await
@@ -407,7 +432,7 @@ fn finalize_cuda_engine_blocking(
     if cancelled.load(Ordering::SeqCst) {
         return Err("Download CUDA dibatalkan.".into());
     }
-    emit_cuda_progress(app, 88.0);
+    emit_cuda_progress(app, 88.0, 0, 0, None);
     extract_zip_safely(zip_path, extract_path)?;
     let cli = find_file(extract_path, "whisper-cli.exe")?
         .ok_or_else(|| "whisper-cli.exe tidak ditemukan dalam CUDA package.".to_string())?;
@@ -419,7 +444,7 @@ fn finalize_cuda_engine_blocking(
     if !staging_cli.exists() {
         return Err("CUDA engine gagal dipasang ke staging.".into());
     }
-    emit_cuda_progress(app, 94.0);
+    emit_cuda_progress(app, 94.0, 0, 0, None);
     let test = Command::new(&staging_cli)
         .arg("--version")
         .output()
@@ -442,7 +467,7 @@ fn finalize_cuda_engine_blocking(
     }
     fs::rename(staging_path, destination)
         .map_err(|e| format!("Gagal mengaktifkan CUDA engine: {e}"))?;
-    emit_cuda_progress(app, 100.0);
+    emit_cuda_progress(app, 100.0, 0, 0, None);
     Ok(())
 }
 

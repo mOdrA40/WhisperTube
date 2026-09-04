@@ -37,6 +37,7 @@ type TranscribePageProps = {
   cudaDownloadPercent: number;
   installingAccelerator: Exclude<BackendChoice, "auto" | "cpu" | "cuda"> | null;
   acceleratorDownloadPercent: number;
+  networkSpeedBytesPerSecond: number | null;
   vramWarning: string | null;
   acceleratorWarning: string | null;
   result: TranscriptResult | null;
@@ -86,6 +87,7 @@ export function TranscribePage({
   cudaDownloadPercent,
   installingAccelerator,
   acceleratorDownloadPercent,
+  networkSpeedBytesPerSecond,
   vramWarning,
   acceleratorWarning,
   result,
@@ -126,7 +128,7 @@ export function TranscribePage({
           onClear={onClear}
           onOpenSettings={() => onTabChange("settings")}
         />
-        {busy && <ProgressCard progress={progress} selectedModel={selectedModel} backend={backend} onCancel={onCancel} />}
+        {busy && <ProgressCard progress={progress} selectedModel={selectedModel} backend={backend} networkSpeedBytesPerSecond={networkSpeedBytesPerSecond} onCancel={onCancel} />}
         {result && !busy && (
           <TranscriptCard
             result={result}
@@ -158,6 +160,7 @@ export function TranscribePage({
           cudaDownloadPercent={cudaDownloadPercent}
           installingAccelerator={installingAccelerator}
           acceleratorDownloadPercent={acceleratorDownloadPercent}
+          networkSpeedBytesPerSecond={networkSpeedBytesPerSecond}
           vramWarning={vramWarning}
           acceleratorWarning={acceleratorWarning}
           onModelChange={onModelChange}

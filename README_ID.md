@@ -22,6 +22,7 @@ Dokumentasi utama: [README.md](README.md) (English). Dokumentasi Mandarin: [READ
 - Model: Fast (`base`, ~142 MB), Balanced (`large-v3-turbo-q5_0`, ~547 MB), dan Accurate (`large-v3-q5_0`, ~1,1 GB).
 - Verifikasi checksum model, progress, cancel, timestamp, export TXT/SRT/VTT, dan history SQLite lokal.
 - Progress model dan download YouTube menampilkan byte yang sudah dipindahkan; download model dapat dibatalkan.
+- Saat transkripsi, penggunaan CPU/GPU ditampilkan jika tersedia di platform, dan speed jaringan tampil saat download.
 - Workspace dapat dibersihkan dari URL, preview, dan transkrip; history bisa dihapus permanen satuan, beberapa, atau semua item yang tampil.
 - Audio sementara dihapus setelah proses kecuali opsi `Simpan audio hasil proses` dinyalakan.
 

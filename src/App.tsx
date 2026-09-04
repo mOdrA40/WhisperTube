@@ -41,6 +41,7 @@ export default function App() {
           cudaDownloadPercent={app.cudaDownloadPercent}
           installingAccelerator={app.installingAccelerator}
           acceleratorDownloadPercent={app.acceleratorDownloadPercent}
+          networkSpeedBytesPerSecond={app.networkSpeedBytesPerSecond}
           vramWarning={app.vramWarning}
           acceleratorWarning={app.acceleratorWarning}
           result={app.result}
@@ -74,7 +75,6 @@ export default function App() {
           onRefresh={app.refreshSystem}
           onLoad={app.loadHistory}
           onDelete={app.deleteHistory}
-          onError={app.setError}
           onTabChange={app.setTab}
         />
       )}
@@ -92,6 +92,7 @@ export default function App() {
           cudaDownloadPercent={app.cudaDownloadPercent}
           installingAccelerator={app.installingAccelerator}
           acceleratorDownloadPercent={app.acceleratorDownloadPercent}
+          networkSpeedBytesPerSecond={app.networkSpeedBytesPerSecond}
           onBrowserChange={app.setBrowser}
           onBrowserProfileChange={app.setBrowserProfile}
           onDownloadModel={app.downloadModel}

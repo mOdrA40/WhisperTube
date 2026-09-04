@@ -42,6 +42,9 @@ const initialProgress: ProgressPayload = {
   backend: null,
   downloadedBytes: null,
   totalBytes: null,
+  networkBytesPerSecond: null,
+  cpuUsagePercent: null,
+  gpuUsagePercent: null,
 };
 
 export function useWhisperTube() {
@@ -71,6 +74,7 @@ export function useWhisperTube() {
   const [cudaDownloadPercent, setCudaDownloadPercent] = useState(0);
   const [installingAccelerator, setInstallingAccelerator] = useState<Exclude<BackendChoice, "auto" | "cpu" | "cuda"> | null>(null);
   const [acceleratorDownloadPercent, setAcceleratorDownloadPercent] = useState(0);
+  const [networkSpeedBytesPerSecond, setNetworkSpeedBytesPerSecond] = useState<number | null>(null);
   const autoConfigured = useRef(false);
 
   const selectedModel = models.find((model) => model.id === modelId);
@@ -97,15 +101,23 @@ export function useWhisperTube() {
   useEffect(() => {
     refreshSystem().catch((cause) => setError(friendlyError(cause)));
 
-    const unlistenProgress = subscribeToProgress(setProgress);
+    const unlistenProgress = subscribeToProgress((payload) => {
+      setProgress(payload);
+      setNetworkSpeedBytesPerSecond(
+        payload.stage === "downloading" ? payload.networkBytesPerSecond : null,
+      );
+    });
     const unlistenModel = subscribeToModelDownload((payload) => {
       setDownloadingModel((previous) => ({ ...previous, [payload.id]: payload }));
+      setNetworkSpeedBytesPerSecond(payload.bytesPerSecond);
     });
-    const unlistenCuda = subscribeToCudaDownload(({ percent }) => {
-      setCudaDownloadPercent(percent);
+    const unlistenCuda = subscribeToCudaDownload((payload) => {
+      setCudaDownloadPercent(payload.percent);
+      setNetworkSpeedBytesPerSecond(payload.bytesPerSecond);
     });
-    const unlistenAccelerator = subscribeToAcceleratorDownload(({ percent }) => {
-      setAcceleratorDownloadPercent(percent);
+    const unlistenAccelerator = subscribeToAcceleratorDownload((payload) => {
+      setAcceleratorDownloadPercent(payload.percent);
+      setNetworkSpeedBytesPerSecond(payload.bytesPerSecond);
     });
 
     return () => {
@@ -135,6 +147,7 @@ export function useWhisperTube() {
     setResult(null);
     setSearchQuery("");
     setCopied(false);
+    setNetworkSpeedBytesPerSecond(null);
     setProgress(initialProgress);
     setError(null);
   }
@@ -215,7 +228,7 @@ export function useWhisperTube() {
     setError(null);
     setDownloadingModel((previous) => ({
       ...previous,
-      [id]: { id, downloadedBytes: 0, totalBytes: 0, percent: 0 },
+      [id]: { id, downloadedBytes: 0, totalBytes: 0, percent: 0, bytesPerSecond: null },
     }));
     try {
       await downloadModel(id);
@@ -224,6 +237,7 @@ export function useWhisperTube() {
       const message = friendlyError(cause);
       if (!message.toLowerCase().includes("dibatalkan")) setError(message);
     } finally {
+      setNetworkSpeedBytesPerSecond(null);
       setDownloadingModel((previous) => {
         const next = { ...previous };
         delete next[id];
@@ -254,6 +268,7 @@ export function useWhisperTube() {
     setError(null);
     setInstallingCuda(true);
     setCudaDownloadPercent(0);
+    setNetworkSpeedBytesPerSecond(null);
     try {
       await installCudaEngine();
       await refreshSystem();
@@ -262,6 +277,7 @@ export function useWhisperTube() {
       if (!message.toLowerCase().includes("dibatalkan")) setError(message);
     } finally {
       setInstallingCuda(false);
+      setNetworkSpeedBytesPerSecond(null);
     }
   }
 
@@ -273,6 +289,7 @@ export function useWhisperTube() {
     setError(null);
     setInstallingAccelerator(backendToInstall);
     setAcceleratorDownloadPercent(0);
+    setNetworkSpeedBytesPerSecond(null);
     try {
       await installAccelerator(backendToInstall);
       await refreshSystem();
@@ -281,6 +298,7 @@ export function useWhisperTube() {
       if (!message.toLowerCase().includes("dibatalkan")) setError(message);
     } finally {
       setInstallingAccelerator(null);
+      setNetworkSpeedBytesPerSecond(null);
     }
   }
 
@@ -313,6 +331,7 @@ export function useWhisperTube() {
     setBusy(true);
     setError(null);
     setResult(null);
+    setNetworkSpeedBytesPerSecond(null);
     setProgress({
       stage: "downloading",
       percent: 0,
@@ -320,6 +339,9 @@ export function useWhisperTube() {
       backend: null,
       downloadedBytes: 0,
       totalBytes: null,
+      networkBytesPerSecond: null,
+      cpuUsagePercent: null,
+      gpuUsagePercent: null,
     });
     try {
       setResult(await startTranscription({
@@ -450,6 +472,7 @@ export function useWhisperTube() {
     installAccelerator: handleInstallAccelerator,
     installingAccelerator,
     acceleratorDownloadPercent,
+    networkSpeedBytesPerSecond,
     startTranscription: handleStartTranscription,
     cancelJob: handleCancelJob,
     loadHistory: handleLoadHistory,

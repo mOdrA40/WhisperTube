@@ -17,6 +17,7 @@ type SettingsPageProps = {
   cudaDownloadPercent: number;
   installingAccelerator: Exclude<BackendChoice, "auto" | "cpu" | "cuda"> | null;
   acceleratorDownloadPercent: number;
+  networkSpeedBytesPerSecond: number | null;
   onBrowserChange: (browser: BrowserChoice) => void;
   onBrowserProfileChange: (profile: string) => void;
   onDownloadModel: (id: string) => void;
@@ -42,6 +43,7 @@ export function SettingsPage({
   cudaDownloadPercent,
   installingAccelerator,
   acceleratorDownloadPercent,
+  networkSpeedBytesPerSecond,
   onBrowserChange,
   onBrowserProfileChange,
   onDownloadModel,
@@ -187,7 +189,12 @@ export function SettingsPage({
             >
               {installingCuda ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}
               {installingCuda
-                ? t("settings.installingCuda", { percent: Math.round(cudaDownloadPercent) })
+                ? (
+                  <span className="download-progress-copy">
+                    <span>{t("settings.installingCuda", { percent: Math.round(cudaDownloadPercent) })}</span>
+                    {networkSpeedBytesPerSecond !== null && <small>{formatBytes(networkSpeedBytesPerSecond)}/s</small>}
+                  </span>
+                )
                 : system.cudaEngine
                   ? t("settings.cudaInstalled")
                   : t("settings.installCuda")}
@@ -224,7 +231,12 @@ export function SettingsPage({
                 disabled={installingAccelerator !== null || installingCuda || modelDownloadActive || busy}
               >
                 {installingAccelerator === accelerator.backend
-                  ? t("settings.acceleratorInstalling", { percent: Math.round(acceleratorDownloadPercent) })
+                  ? (
+                    <span className="download-progress-copy">
+                      <span>{t("settings.acceleratorInstalling", { percent: Math.round(acceleratorDownloadPercent) })}</span>
+                      {networkSpeedBytesPerSecond !== null && <small>{formatBytes(networkSpeedBytesPerSecond)}/s</small>}
+                    </span>
+                  )
                   : t("settings.acceleratorInstall")}
               </button>
             )}
@@ -266,6 +278,7 @@ export function SettingsPage({
                     {formatBytes(downloadingModel[model.id].downloadedBytes, t("progress.unknownSize"))} / {downloadingModel[model.id].totalBytes > 0
                       ? formatBytes(downloadingModel[model.id].totalBytes)
                       : t("progress.unknownSize")}
+                    {networkSpeedBytesPerSecond !== null && ` • ${formatBytes(networkSpeedBytesPerSecond)}/s`}
                   </small>
                   <button
                     type="button"

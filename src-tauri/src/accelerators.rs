@@ -10,7 +10,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tauri::{AppHandle, Emitter};
 use tokio::io::AsyncWriteExt;
@@ -93,12 +93,22 @@ pub fn catalog(app: &AppHandle, gpu_detected: bool) -> Result<Vec<AcceleratorInf
         .collect())
 }
 
-fn emit_progress(app: &AppHandle, backend: &str, percent: f64) {
+fn emit_progress(
+    app: &AppHandle,
+    backend: &str,
+    percent: f64,
+    downloaded_bytes: u64,
+    total_bytes: u64,
+    bytes_per_second: Option<u64>,
+) {
     let _ = app.emit(
         "accelerator-download",
         AcceleratorDownloadPayload {
             backend: backend.into(),
+            downloaded_bytes,
+            total_bytes,
             percent: percent.clamp(0.0, 100.0),
+            bytes_per_second,
         },
     );
 }
@@ -199,6 +209,7 @@ async fn download_archive(
         .await
         .map_err(|e| format!("Gagal membuat file accelerator: {e}"))?;
     let mut downloaded = 0u64;
+    let download_started_at = Instant::now();
     loop {
         if cancelled.load(Ordering::SeqCst) {
             return Err("Download accelerator dibatalkan.".into());
@@ -217,9 +228,14 @@ async fn download_archive(
             .await
             .map_err(|e| format!("Gagal menyimpan accelerator: {e}"))?;
         downloaded += chunk.len() as u64;
-        if total > 0 {
-            emit_progress(app, backend, downloaded as f64 / total as f64 * 85.0);
-        }
+        let elapsed = download_started_at.elapsed().as_secs_f64();
+        let bytes_per_second = (elapsed > 0.0).then(|| (downloaded as f64 / elapsed) as u64);
+        let percent = if total > 0 {
+            downloaded as f64 / total as f64 * 85.0
+        } else {
+            0.0
+        };
+        emit_progress(app, backend, percent, downloaded, total, bytes_per_second);
     }
     file.flush()
         .await
@@ -337,7 +353,7 @@ fn finalize_blocking(
     if cancelled.load(Ordering::SeqCst) {
         return Err("Download accelerator dibatalkan.".into());
     }
-    emit_progress(app, spec.backend, 88.0);
+    emit_progress(app, spec.backend, 88.0, 0, 0, None);
     extract_zip_safely(archive_path, extract_path)?;
     let cli = find_file(extract_path, executable_name())?.ok_or_else(|| {
         format!(
@@ -355,7 +371,7 @@ fn finalize_blocking(
     if !staging_cli.exists() {
         return Err("Accelerator gagal dipasang ke staging.".into());
     }
-    emit_progress(app, spec.backend, 94.0);
+    emit_progress(app, spec.backend, 94.0, 0, 0, None);
     let test = std::process::Command::new(&staging_cli)
         .arg("--version")
         .output()
@@ -378,7 +394,7 @@ fn finalize_blocking(
     }
     fs::rename(staging_path, destination)
         .map_err(|e| format!("Gagal mengaktifkan accelerator: {e}"))?;
-    emit_progress(app, spec.backend, 100.0);
+    emit_progress(app, spec.backend, 100.0, 0, 0, None);
     Ok(())
 }
 

@@ -78,6 +78,9 @@ pub struct ProgressPayload {
     pub backend: Option<String>,
     pub downloaded_bytes: Option<u64>,
     pub total_bytes: Option<u64>,
+    pub network_bytes_per_second: Option<u64>,
+    pub cpu_usage_percent: Option<f64>,
+    pub gpu_usage_percent: Option<f64>,
 }
 
 #[derive(Serialize, Clone)]
@@ -87,19 +90,26 @@ pub struct ModelDownloadPayload {
     pub downloaded_bytes: u64,
     pub total_bytes: u64,
     pub percent: f64,
+    pub bytes_per_second: Option<u64>,
 }
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct CudaDownloadPayload {
+    pub downloaded_bytes: u64,
+    pub total_bytes: u64,
     pub percent: f64,
+    pub bytes_per_second: Option<u64>,
 }
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AcceleratorDownloadPayload {
     pub backend: String,
+    pub downloaded_bytes: u64,
+    pub total_bytes: u64,
     pub percent: f64,
+    pub bytes_per_second: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]

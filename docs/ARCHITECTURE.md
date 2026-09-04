@@ -56,6 +56,11 @@ DONE
 
 Any external stage can terminate in `FAILED` or `CANCELLED`.
 
+`job-progress` carries stage progress, transferred bytes, network speed, and
+best-effort CPU/GPU utilization samples. GPU utilization is shown when the
+platform exposes a supported metric; unavailable metrics are reported as such
+instead of being guessed.
+
 ## Storage
 
 App-local-data:

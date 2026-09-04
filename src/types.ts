@@ -76,6 +76,9 @@ export type ProgressPayload = {
   backend: string | null;
   downloadedBytes: number | null;
   totalBytes: number | null;
+  networkBytesPerSecond: number | null;
+  cpuUsagePercent: number | null;
+  gpuUsagePercent: number | null;
 };
 
 export type ModelDownloadPayload = {
@@ -83,15 +86,22 @@ export type ModelDownloadPayload = {
   downloadedBytes: number;
   totalBytes: number;
   percent: number;
+  bytesPerSecond: number | null;
 };
 
 export type CudaDownloadPayload = {
+  downloadedBytes: number;
+  totalBytes: number;
   percent: number;
+  bytesPerSecond: number | null;
 };
 
 export type AcceleratorDownloadPayload = {
   backend: Exclude<BackendChoice, "auto" | "cpu" | "cuda">;
+  downloadedBytes: number;
+  totalBytes: number;
   percent: number;
+  bytesPerSecond: number | null;
 };
 
 export type Segment = {

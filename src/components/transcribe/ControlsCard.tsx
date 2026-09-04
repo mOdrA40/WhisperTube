@@ -1,5 +1,6 @@
 import {
   AlertCircle,
+  AudioWaveform,
   Check,
   CircleStop,
   Cpu,
@@ -31,6 +32,7 @@ type ControlsCardProps = {
   cudaDownloadPercent: number;
   installingAccelerator: Exclude<BackendChoice, "auto" | "cpu" | "cuda"> | null;
   acceleratorDownloadPercent: number;
+  networkSpeedBytesPerSecond: number | null;
   vramWarning: string | null;
   acceleratorWarning: string | null;
   onInstallCuda: () => void;
@@ -63,6 +65,7 @@ export function ControlsCard({
   cudaDownloadPercent,
   installingAccelerator,
   acceleratorDownloadPercent,
+  networkSpeedBytesPerSecond,
   vramWarning,
   acceleratorWarning,
   onInstallCuda,
@@ -170,6 +173,7 @@ export function ControlsCard({
                   {formatBytes(selectedDownload.downloadedBytes, t("progress.unknownSize"))} / {selectedDownload.totalBytes > 0
                     ? formatBytes(selectedDownload.totalBytes)
                     : t("progress.unknownSize")}
+                  {networkSpeedBytesPerSecond !== null && ` • ${formatBytes(networkSpeedBytesPerSecond)}/s`}
                 </small>
               </span>
             )
@@ -196,7 +200,12 @@ export function ControlsCard({
           >
             {installingCuda ? <LoaderCircle className="spin" size={17} /> : <Download size={17} />}
             {installingCuda
-              ? t("controls.installingCuda", { percent: Math.round(cudaDownloadPercent) })
+              ? (
+                <span className="download-progress-copy">
+                  <span>{t("controls.installingCuda", { percent: Math.round(cudaDownloadPercent) })}</span>
+                  {networkSpeedBytesPerSecond !== null && <small>{formatBytes(networkSpeedBytesPerSecond)}/s</small>}
+                </span>
+              )
               : t("controls.installCuda")}
           </button>
           {installingCuda && (
@@ -227,10 +236,15 @@ export function ControlsCard({
             >
               {installingAccelerator === accelerator.backend ? <LoaderCircle className="spin" size={17} /> : <Download size={17} />}
               {installingAccelerator === accelerator.backend
-                ? t("controls.installingAccelerator", {
-                    accelerator: getAcceleratorCopy(accelerator, t).label,
-                    percent: Math.round(acceleratorDownloadPercent),
-                  })
+                ? (
+                  <span className="download-progress-copy">
+                    <span>{t("controls.installingAccelerator", {
+                      accelerator: getAcceleratorCopy(accelerator, t).label,
+                      percent: Math.round(acceleratorDownloadPercent),
+                    })}</span>
+                    {networkSpeedBytesPerSecond !== null && <small>{formatBytes(networkSpeedBytesPerSecond)}/s</small>}
+                  </span>
+                )
                 : t("controls.installAccelerator", {
                     accelerator: getAcceleratorCopy(accelerator, t).label,
                   })}
@@ -290,7 +304,7 @@ export function ControlsCard({
       )}
 
       <button type="button" className="start-button" disabled={!canStart} onClick={onStart}>
-        <Sparkles size={18} /> {t("controls.transcribe")}
+        <AudioWaveform size={18} /> {t("controls.transcribe")}
       </button>
 
       {!runtimeReady && (

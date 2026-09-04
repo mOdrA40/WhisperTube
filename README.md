@@ -32,6 +32,7 @@ Other languages: [Bahasa Indonesia](README_ID.md) · [中文（普通话）](REA
 - Metal and Vulkan accelerator packs only appear when the platform, architecture, and compatible GPU detection match.
 - Progress reporting, cancellation, timestamped transcripts, TXT/SRT/VTT export, and local SQLite history.
 - Model and YouTube download progress show transferred bytes, with cancellable model downloads.
+- Transcription progress shows CPU/GPU utilization when the platform exposes those metrics, plus download network speed.
 - Clear the current URL, preview, and transcript from the workspace; permanently delete one, multiple, or all visible history items.
 - Temporary audio and WAV files are removed after processing unless `Keep processed audio` is enabled.
 

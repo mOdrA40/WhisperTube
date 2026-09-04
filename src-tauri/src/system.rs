@@ -1,4 +1,11 @@
-use std::process::Command;
+use std::{
+    process::{Command, Output, Stdio},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    time::{Duration, Instant},
+};
 
 #[cfg(target_os = "linux")]
 use std::fs;
@@ -15,6 +22,54 @@ pub struct GpuInfo {
     pub name: String,
     pub total_memory_mb: Option<u64>,
     pub free_memory_mb: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct UsageSnapshot {
+    pub cpu_usage_percent: Option<f64>,
+    pub gpu_usage_percent: Option<f64>,
+}
+
+pub struct UsageMonitor {
+    snapshot: Arc<Mutex<UsageSnapshot>>,
+    stop: Arc<AtomicBool>,
+}
+
+impl UsageMonitor {
+    pub fn start() -> Self {
+        let snapshot = Arc::new(Mutex::new(UsageSnapshot::default()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_snapshot = Arc::clone(&snapshot);
+        let thread_stop = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            while !thread_stop.load(Ordering::SeqCst) {
+                let current = sample_usage_uncached();
+                if let Ok(mut cached) = thread_snapshot.lock() {
+                    *cached = current;
+                }
+                for _ in 0..20 {
+                    if thread_stop.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+        });
+        Self { snapshot, stop }
+    }
+
+    pub fn snapshot(&self) -> UsageSnapshot {
+        self.snapshot
+            .lock()
+            .map(|value| value.clone())
+            .unwrap_or_default()
+    }
+}
+
+impl Drop for UsageMonitor {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+    }
 }
 
 impl GpuInfo {
@@ -156,7 +211,7 @@ fn detect_generic_gpu() -> Option<GpuInfo> {
             free_memory_mb: None,
         });
     }
-    let output = Command::new("lspci").output().ok()?;
+    let output = command_output_with_timeout(Command::new("lspci"), Duration::from_secs(2))?;
     String::from_utf8_lossy(&output.stdout)
         .lines()
         .find(|line| {
@@ -180,6 +235,131 @@ fn detect_generic_gpu() -> Option<GpuInfo> {
 
 pub fn detect_gpu() -> Option<GpuInfo> {
     detect_nvidia().or_else(detect_generic_gpu)
+}
+
+fn command_output_with_timeout(mut command: Command, timeout: Duration) -> Option<Output> {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return child.wait_with_output().ok().filter(|_| status.success()),
+            Ok(None) if started.elapsed() >= timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
+fn parse_percent(output: &[u8]) -> Option<f64> {
+    String::from_utf8_lossy(output)
+        .lines()
+        .find_map(|line| line.trim().trim_end_matches('%').parse::<f64>().ok())
+        .map(|value| value.clamp(0.0, 100.0))
+}
+
+#[cfg(target_os = "windows")]
+fn sample_cpu_usage() -> Option<f64> {
+    let mut command = Command::new("powershell.exe");
+    command.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average | Select-Object -ExpandProperty Average",
+    ]);
+    let output = command_output_with_timeout(command, Duration::from_secs(2))?;
+    parse_percent(&output.stdout)
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn sample_cpu_usage() -> Option<f64> {
+    let mut command = Command::new("ps");
+    command.args(["-A", "-o", "%cpu="]);
+    let output = command_output_with_timeout(command, Duration::from_secs(2))?;
+    let total: f64 = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse::<f64>().ok())
+        .sum();
+    let cores = std::thread::available_parallelism()
+        .map(|value| value.get() as f64)
+        .unwrap_or(1.0);
+    Some((total / cores).clamp(0.0, 100.0))
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+fn sample_cpu_usage() -> Option<f64> {
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn sample_gpu_usage() -> Option<f64> {
+    let mut candidates = vec!["nvidia-smi".to_string()];
+    candidates.push(r"C:\Windows\System32\nvidia-smi.exe".into());
+    candidates.push(r"C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe".into());
+    for program in candidates {
+        let mut command = Command::new(program);
+        command.args([
+            "--query-gpu=utilization.gpu",
+            "--format=csv,noheader,nounits",
+        ]);
+        if let Some(value) = command_output_with_timeout(command, Duration::from_secs(2))
+            .and_then(|output| parse_percent(&output.stdout))
+        {
+            return Some(value);
+        }
+    }
+
+    let mut command = Command::new("powershell.exe");
+    command.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "$samples = (Get-Counter '\\GPU Engine(*)\\Utilization Percentage' -ErrorAction Stop).CounterSamples | Where-Object { $_.InstanceName -match 'engtype_(3D|Compute|Copy|VideoDecode|VideoEncode)' }; if ($samples.Count -eq 0) { exit 2 }; ($samples | Measure-Object -Property CookedValue -Maximum).Maximum",
+    ]);
+    let output = command_output_with_timeout(command, Duration::from_secs(2))?;
+    parse_percent(&output.stdout)
+}
+
+#[cfg(target_os = "linux")]
+fn sample_gpu_usage() -> Option<f64> {
+    let root = fs::read_dir("/sys/class/drm").ok()?;
+    root.flatten()
+        .filter(|entry| {
+            let name = entry.file_name().to_string_lossy().to_string();
+            name.starts_with("card") && !name.contains('-')
+        })
+        .find_map(|entry| {
+            fs::read_to_string(entry.path().join("device/gpu_busy_percent"))
+                .ok()
+                .and_then(|value| value.trim().parse::<f64>().ok())
+                .map(|value| value.clamp(0.0, 100.0))
+        })
+}
+
+#[cfg(any(
+    target_os = "macos",
+    not(any(target_os = "windows", target_os = "linux"))
+))]
+fn sample_gpu_usage() -> Option<f64> {
+    None
+}
+
+fn sample_usage_uncached() -> UsageSnapshot {
+    UsageSnapshot {
+        cpu_usage_percent: sample_cpu_usage(),
+        gpu_usage_percent: sample_gpu_usage(),
+    }
 }
 
 pub fn system_status(app: &AppHandle) -> Result<SystemStatus, String> {

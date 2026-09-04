@@ -22,6 +22,7 @@ WhisperTube 是一款 local-first 桌面应用，使用 `yt-dlp`、FFmpeg 和 wh
 - 模型：Fast（`base`，约 142 MB）、Balanced（`large-v3-turbo-q5_0`，约 547 MB）、Accurate（`large-v3-q5_0`，约 1.1 GB）。
 - 模型 checksum 校验、进度显示、取消、时间戳、TXT/SRT/VTT 导出和本地 SQLite 历史记录。
 - 模型和 YouTube 下载会显示已传输的字节数，模型下载可以取消。
+- 转录期间会在平台支持时显示 CPU/GPU 使用率，下载时会显示网络速度。
 - 可以清除当前 URL、预览和转录文本，也可以永久删除单条、多条或当前列表中的全部历史记录。
 - 除非打开保留处理后音频的选项，否则处理结束后会删除临时音频和 WAV 文件。
 

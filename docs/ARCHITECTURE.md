@@ -76,6 +76,8 @@ whispertube.db
 ```
 
 Downloaded YouTube audio and converted WAV are removed by default after a successful job.
+History deletion validates the job directory under `app-local-data/jobs` and removes
+the complete job folder, including transcript exports, before deleting its SQLite row.
 
 ## Runtime packs
 
@@ -112,7 +114,9 @@ about 2 GB, Balanced 4 GB, and Accurate 7 GB of free VRAM. These are
 preflight safety thresholds; actual available memory can change when other
 GPU applications are running. CUDA is offered only on supported Windows x64
 NVIDIA builds. Metal/Vulkan catalog entries are filtered by target platform,
-architecture, and detected GPU before they reach the UI or installer.
+architecture, and detected GPU before they reach the UI or installer. Vulkan is
+kept as an explicit alternative even when CUDA is available, so NVIDIA users
+can compare backends or use Vulkan when needed.
 
 The repository also contains `.github/workflows/build-accelerator-packs.yml`.
 It builds Metal packs for macOS Intel/Apple Silicon and Vulkan packs for Linux

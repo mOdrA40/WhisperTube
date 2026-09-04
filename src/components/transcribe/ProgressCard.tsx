@@ -1,5 +1,6 @@
 import { CircleStop, LoaderCircle } from "lucide-react";
 import { getProgressMessage, getProgressStageLabel, useI18n } from "../../i18n";
+import { formatBytes } from "../../lib/format";
 import type { BackendChoice, ModelInfo, ProgressPayload } from "../../types";
 
 type ProgressCardProps = {
@@ -23,6 +24,13 @@ export function ProgressCard({ progress, selectedModel, backend, onCancel }: Pro
           </span>
           <h3>{getProgressStageLabel(progress.stage, t)}</h3>
           <p>{getProgressMessage(progress, backend, t)}</p>
+          {progress.stage === "downloading" && progress.downloadedBytes !== null && (
+            <span className="progress-bytes">
+              {formatBytes(progress.downloadedBytes, t("progress.unknownSize"))} / {progress.totalBytes !== null
+                ? formatBytes(progress.totalBytes)
+                : t("progress.unknownSize")}
+            </span>
+          )}
         </div>
         <strong>{Math.round(progress.percent)}%</strong>
       </div>

@@ -31,6 +31,8 @@ Other languages: [Bahasa Indonesia](README_ID.md) · [中文（普通话）](REA
 - Windows x64 NVIDIA CUDA acceleration, installed on demand from the pinned official whisper.cpp release.
 - Metal and Vulkan accelerator packs only appear when the platform, architecture, and compatible GPU detection match.
 - Progress reporting, cancellation, timestamped transcripts, TXT/SRT/VTT export, and local SQLite history.
+- Model and YouTube download progress show transferred bytes, with cancellable model downloads.
+- Clear the current URL, preview, and transcript from the workspace; permanently delete one, multiple, or all visible history items.
 - Temporary audio and WAV files are removed after processing unless `Keep processed audio` is enabled.
 
 ## Windows development setup
@@ -121,7 +123,7 @@ Open **Settings → Hardware**. WhisperTube only offers an accelerator that matc
 
 - Windows x64 + detected NVIDIA GPU: CUDA may be installed from the official pinned whisper.cpp release.
 - macOS: the matching Apple Metal pack can be offered.
-- Windows/Linux x64 with a detected GPU: the matching Vulkan pack can be offered.
+- Windows/Linux x64 with a detected GPU: the matching Vulkan pack can be offered as an alternative accelerator.
 - A CPU-only or unsupported device does not receive an irrelevant accelerator download button.
 
 The CUDA package is large, so it is deliberately excluded from the base setup. The app downloads it into user app storage and verifies its SHA-256 before activation.

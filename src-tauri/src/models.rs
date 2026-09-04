@@ -1,10 +1,10 @@
-use reqwest::{blocking::Client as BlockingClient, Client as AsyncClient};
+use reqwest::Client as AsyncClient;
 use sha1::{Digest, Sha1};
 use sha2::Sha256;
 use std::{
     fs,
     fs::File,
-    io::{self, Read, Write},
+    io::{self, Read},
     path::{Path, PathBuf},
     process::Command,
     sync::{
@@ -25,7 +25,7 @@ use crate::{
 
 const CUDA_ENGINE_VERSION: &str = "v1.9.1";
 const CUDA_ENGINE_BUILD: &str = "12.4.0";
-const CUDA_ENGINE_SHA256: &str = "8142f151bf3e634aa6cd03cbe94f71496465578d195917884f612cd0159f2ef7";
+const CUDA_ENGINE_SHA256: &str = "106a2030eff8998e4ef320fe72e263a78449e9040386ee27c41ea80b001b601b";
 
 fn cuda_engine_url() -> String {
     format!(
@@ -144,79 +144,101 @@ fn verify_sha1(path: &Path, expected: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub async fn download_model(app: AppHandle, model_id: String) -> Result<(), String> {
+fn emit_model_progress(app: &AppHandle, id: &str, downloaded_bytes: u64, total_bytes: u64) {
+    let percent = if total_bytes > 0 {
+        downloaded_bytes as f64 / total_bytes as f64 * 100.0
+    } else {
+        0.0
+    };
+    let _ = app.emit(
+        "model-download",
+        ModelDownloadPayload {
+            id: id.into(),
+            downloaded_bytes,
+            total_bytes,
+            percent: percent.clamp(0.0, 100.0),
+        },
+    );
+}
+
+pub async fn download_model(
+    app: AppHandle,
+    model_id: String,
+    cancelled: Arc<AtomicBool>,
+) -> Result<(), String> {
     let spec = model_spec(&model_id)?;
     let dest = model_path(&app, &model_id)?;
-    let app_for_task = app.clone();
-    tokio::task::spawn_blocking(move || {
-        if dest.exists() {
-            return Ok(());
+    if dest.exists() {
+        return Ok(());
+    }
+    let temp = dest.with_extension("bin.download");
+    let url = format!(
+        "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-{}.bin?download=true",
+        spec.id
+    );
+    let client = AsyncClient::builder()
+        .user_agent("WhisperTube/0.1")
+        .connect_timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("Gagal membuat HTTP client: {e}"))?;
+    let mut response = tokio::time::timeout(Duration::from_secs(30), client.get(url).send())
+        .await
+        .map_err(|_| "Timeout saat menunggu response model.".to_string())?
+        .map_err(|e| format!("Gagal mengunduh model: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "Server model mengembalikan HTTP {}",
+            response.status()
+        ));
+    }
+    let total = response
+        .content_length()
+        .unwrap_or(spec.size_mb * 1024 * 1024);
+    let mut file = tokio::fs::File::create(&temp)
+        .await
+        .map_err(|e| format!("Gagal membuat file model: {e}"))?;
+    let mut downloaded = 0u64;
+    emit_model_progress(&app, spec.id, 0, total);
+    loop {
+        if cancelled.load(Ordering::SeqCst) {
+            let _ = tokio::fs::remove_file(&temp).await;
+            return Err("Download model dibatalkan.".into());
         }
-        let temp = dest.with_extension("bin.download");
-        let url = format!(
-            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-{}.bin?download=true",
-            spec.id
-        );
-        let client = BlockingClient::builder()
-            .user_agent("WhisperTube/0.1")
-            .build()
-            .map_err(|e| format!("Gagal membuat HTTP client: {e}"))?;
-        let mut response = client
-            .get(url)
-            .send()
-            .map_err(|e| format!("Gagal mengunduh model: {e}"))?;
-        if !response.status().is_success() {
-            return Err(format!(
-                "Server model mengembalikan HTTP {}",
-                response.status()
-            ));
+        let chunk = tokio::time::timeout(Duration::from_secs(30), response.chunk())
+            .await
+            .map_err(|_| "Timeout saat membaca data model selama 30 detik.".to_string())?
+            .map_err(|e| format!("Download model terputus: {e}"))?;
+        let Some(chunk) = chunk else {
+            break;
+        };
+        if cancelled.load(Ordering::SeqCst) {
+            let _ = tokio::fs::remove_file(&temp).await;
+            return Err("Download model dibatalkan.".into());
         }
-        let total = response
-            .content_length()
-            .unwrap_or(spec.size_mb * 1024 * 1024);
-        let mut file = File::create(&temp).map_err(|e| format!("Gagal membuat file model: {e}"))?;
-        let mut downloaded = 0u64;
-        let mut buffer = [0u8; 1024 * 256];
-        loop {
-            let read = response
-                .read(&mut buffer)
-                .map_err(|e| format!("Download model terputus: {e}"))?;
-            if read == 0 {
-                break;
-            }
-            file.write_all(&buffer[..read])
-                .map_err(|e| format!("Gagal menulis model: {e}"))?;
-            downloaded += read as u64;
-            let percent = if total > 0 {
-                downloaded as f64 / total as f64 * 100.0
-            } else {
-                0.0
-            };
-            let _ = app_for_task.emit(
-                "model-download",
-                ModelDownloadPayload {
-                    id: spec.id.into(),
-                    percent: percent.clamp(0.0, 100.0),
-                },
-            );
-        }
-        drop(file);
-        if let Err(error) = verify_sha1(&temp, spec.sha1) {
-            let _ = fs::remove_file(&temp);
-            return Err(error);
-        }
-        fs::rename(&temp, &dest).map_err(|e| format!("Gagal memasang model: {e}"))?;
-        let _ = app_for_task.emit(
-            "model-download",
-            ModelDownloadPayload {
-                id: spec.id.into(),
-                percent: 100.0,
-            },
-        );
-        Ok(())
-    })
-    .await
-    .map_err(|e| format!("Download task gagal: {e}"))?
+        file.write_all(&chunk)
+            .await
+            .map_err(|e| format!("Gagal menulis model: {e}"))?;
+        downloaded += chunk.len() as u64;
+        emit_model_progress(&app, spec.id, downloaded, total);
+    }
+    file.flush()
+        .await
+        .map_err(|e| format!("Gagal menyelesaikan file model: {e}"))?;
+    drop(file);
+    let temp_for_verify = temp.clone();
+    let expected_sha1 = spec.sha1;
+    tokio::task::spawn_blocking(move || verify_sha1(&temp_for_verify, expected_sha1))
+        .await
+        .map_err(|e| format!("Verifikasi model gagal: {e}"))??;
+    if cancelled.load(Ordering::SeqCst) {
+        let _ = tokio::fs::remove_file(&temp).await;
+        return Err("Download model dibatalkan.".into());
+    }
+    tokio::fs::rename(&temp, &dest)
+        .await
+        .map_err(|e| format!("Gagal memasang model: {e}"))?;
+    emit_model_progress(&app, spec.id, total, total);
+    Ok(())
 }
 
 fn emit_cuda_progress(app: &AppHandle, percent: f64) {

@@ -65,6 +65,10 @@ export function loadHistory(id: number) {
   return invoke<TranscriptResult>("load_history", { id });
 }
 
+export function deleteHistory(ids: number[]) {
+  return invoke("delete_history", { ids });
+}
+
 export function subscribeToProgress(onProgress: (payload: ProgressPayload) => void) {
   return listen<ProgressPayload>("job-progress", (event) => onProgress(event.payload));
 }

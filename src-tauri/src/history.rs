@@ -1,6 +1,7 @@
 use chrono::Utc;
 use rusqlite::{params, Connection};
 use std::{
+    ffi::OsStr,
     fs,
     path::{Path, PathBuf},
 };
@@ -106,6 +107,74 @@ pub fn load_history(app: &AppHandle, id: i64) -> Result<TranscriptResult, String
     let bytes = fs::read(&result_path)
         .map_err(|e| format!("File transcript history tidak ditemukan: {e}"))?;
     serde_json::from_slice(&bytes).map_err(|e| format!("File history rusak: {e}"))
+}
+
+fn job_dir_for_result(app: &AppHandle, result_path: &str) -> Result<Option<PathBuf>, String> {
+    let jobs_root = crate::paths::jobs_dir(app)?;
+    let canonical_jobs_root = fs::canonicalize(&jobs_root)
+        .map_err(|e| format!("Gagal memvalidasi history storage: {e}"))?;
+    let result_path = PathBuf::from(result_path);
+    if result_path.file_name() != Some(OsStr::new("result.json")) {
+        return Err("Path history tidak valid.".into());
+    }
+    let job_dir = result_path
+        .parent()
+        .ok_or_else(|| "Folder job history tidak valid.".to_string())?;
+    let canonical_job_dir = match fs::canonicalize(job_dir) {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("Gagal memvalidasi folder job history: {error}")),
+    };
+    if canonical_job_dir.parent() != Some(canonical_jobs_root.as_path()) {
+        return Err("Folder history berada di luar storage WhisperTube.".into());
+    }
+    Ok(Some(canonical_job_dir))
+}
+
+pub fn delete_history(app: &AppHandle, ids: &[i64]) -> Result<(), String> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    if ids.len() > 100 || ids.iter().any(|id| *id <= 0) {
+        return Err("Daftar history yang akan dihapus tidak valid.".into());
+    }
+
+    let db_path = init_db(app)?;
+    let conn =
+        Connection::open(db_path).map_err(|e| format!("Gagal membuka history database: {e}"))?;
+    let mut job_dirs = Vec::new();
+    for id in ids {
+        let result_path: String = conn
+            .query_row(
+                "SELECT result_path FROM history WHERE id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("History {id} tidak ditemukan: {e}"))?;
+        if let Some(job_dir) = job_dir_for_result(app, &result_path)? {
+            if !job_dirs.contains(&job_dir) {
+                job_dirs.push(job_dir);
+            }
+        }
+    }
+
+    for job_dir in &job_dirs {
+        fs::remove_dir_all(job_dir)
+            .map_err(|e| format!("Gagal menghapus file history secara permanen: {e}"))?;
+    }
+
+    let transaction = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("Gagal memulai penghapusan history: {e}"))?;
+    for id in ids {
+        transaction
+            .execute("DELETE FROM history WHERE id = ?1", [id])
+            .map_err(|e| format!("Gagal menghapus history {id}: {e}"))?;
+    }
+    transaction
+        .commit()
+        .map_err(|e| format!("Gagal menyelesaikan penghapusan history: {e}"))?;
+    Ok(())
 }
 
 pub fn copy_export(app: &AppHandle, source: &str, target: &str) -> Result<(), String> {

@@ -28,6 +28,8 @@ fn emit_progress(
     percent: f64,
     message: impl Into<String>,
     backend: Option<&str>,
+    downloaded_bytes: Option<u64>,
+    total_bytes: Option<u64>,
 ) {
     let _ = app.emit(
         "job-progress",
@@ -36,6 +38,8 @@ fn emit_progress(
             percent: percent.clamp(0.0, 100.0),
             message: message.into(),
             backend: backend.map(str::to_string),
+            downloaded_bytes,
+            total_bytes,
         },
     );
 }
@@ -74,7 +78,7 @@ fn run_download(
             "--quiet",
             "--progress",
             "--progress-template",
-            "download:WT_PROGRESS=%(progress._percent_str)s",
+            "download:WT_PROGRESS=%(progress._percent_str)s|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s",
             "-f",
             "bestaudio/best",
             "-o",
@@ -97,9 +101,15 @@ fn run_download(
         .stdout
         .take()
         .ok_or("Tidak bisa membaca progress yt-dlp")?;
-    let percent_re = Regex::new(r"WT_PROGRESS=\s*([0-9.]+)%").unwrap();
+    let progress_re =
+        Regex::new(r"WT_PROGRESS=\s*([0-9.]+)%\|([0-9]+|NA)\|([0-9]+|NA)\|([0-9]+|NA)").unwrap();
     for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-        if let Some(caps) = percent_re.captures(&line) {
+        if let Some(caps) = progress_re.captures(&line) {
+            let downloaded_bytes = caps.get(2).and_then(|value| value.as_str().parse().ok());
+            let total_bytes = caps
+                .get(3)
+                .and_then(|value| value.as_str().parse().ok())
+                .or_else(|| caps.get(4).and_then(|value| value.as_str().parse().ok()));
             if let Ok(percent) = caps[1].parse::<f64>() {
                 emit_progress(
                     app,
@@ -107,6 +117,8 @@ fn run_download(
                     percent,
                     "Mengunduh best available audio dari YouTube…",
                     None,
+                    downloaded_bytes,
+                    total_bytes,
                 );
             }
         }
@@ -194,6 +206,8 @@ fn run_ffmpeg(
                     "converting",
                     percent,
                     "Konversi ke PCM 16 kHz mono…",
+                    None,
+                    None,
                     None,
                 );
             }
@@ -349,6 +363,8 @@ fn run_whisper(
                         resolved_backend.to_uppercase()
                     ),
                     Some(&resolved_backend),
+                    None,
+                    None,
                 );
             }
         }
@@ -430,7 +446,15 @@ pub fn pipeline(
     let job_dir = jobs_dir.join(Uuid::new_v4().to_string());
     fs::create_dir_all(&job_dir).map_err(|e| format!("Gagal membuat job directory: {e}"))?;
 
-    emit_progress(&app, "downloading", 0.0, "Menyiapkan download…", None);
+    emit_progress(
+        &app,
+        "downloading",
+        0.0,
+        "Menyiapkan download…",
+        None,
+        None,
+        None,
+    );
     let source = run_download(&app, &request, &job_dir, &active_pid, &cancelled)?;
     if cancelled.load(Ordering::SeqCst) {
         return Err("Job dibatalkan.".into());
@@ -442,6 +466,8 @@ pub fn pipeline(
         "converting",
         0.0,
         "Menormalisasi audio untuk Whisper…",
+        None,
+        None,
         None,
     );
     run_ffmpeg(
@@ -457,7 +483,15 @@ pub fn pipeline(
     }
 
     let output_prefix = job_dir.join("transcript");
-    emit_progress(&app, "transcribing", 0.0, "Memuat model Whisper…", None);
+    emit_progress(
+        &app,
+        "transcribing",
+        0.0,
+        "Memuat model Whisper…",
+        None,
+        None,
+        None,
+    );
     let resolved_backend = run_whisper(
         &app,
         &wav,
@@ -479,6 +513,8 @@ pub fn pipeline(
         92.0,
         "Merapikan transcript dan menyimpan history…",
         Some(&resolved_backend),
+        None,
+        None,
     );
     let json_path = output_prefix.with_extension("json");
     let txt_path = output_prefix.with_extension("txt");
@@ -523,6 +559,8 @@ pub fn pipeline(
         100.0,
         "Transkripsi selesai.",
         Some(&resolved_backend),
+        None,
+        None,
     );
     Ok(result)
 }

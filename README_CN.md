@@ -21,6 +21,8 @@ WhisperTube 是一款 local-first 桌面应用，使用 `yt-dlp`、FFmpeg 和 wh
 - 下载 `bestaudio/best`，使用 FFmpeg 转换为 16-bit PCM WAV、单声道、16 kHz，再通过本地 whisper.cpp 推理。
 - 模型：Fast（`base`，约 142 MB）、Balanced（`large-v3-turbo-q5_0`，约 547 MB）、Accurate（`large-v3-q5_0`，约 1.1 GB）。
 - 模型 checksum 校验、进度显示、取消、时间戳、TXT/SRT/VTT 导出和本地 SQLite 历史记录。
+- 模型和 YouTube 下载会显示已传输的字节数，模型下载可以取消。
+- 可以清除当前 URL、预览和转录文本，也可以永久删除单条、多条或当前列表中的全部历史记录。
 - 除非打开保留处理后音频的选项，否则处理结束后会删除临时音频和 WAV 文件。
 
 ## Windows 开发设置
@@ -43,7 +45,7 @@ cd D:\Projects\WhisperTube
 
 - Windows x64 + 检测到 NVIDIA：可从固定版本的官方 whisper.cpp release 安装 CUDA。
 - macOS：可提供匹配的 Apple Metal pack。
-- Windows/Linux x64 + 检测到 GPU：可提供匹配的 Vulkan pack。
+- Windows/Linux x64 + 检测到 GPU：可提供匹配的 Vulkan pack 作为替代加速器。
 - 只有 CPU 或不受支持的设备不会看到无关的 accelerator 下载按钮。
 
 CUDA 不包含在基础安装中。应用会将其下载到用户 app storage，并在启用前验证 SHA-256。

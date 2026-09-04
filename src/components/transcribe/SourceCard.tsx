@@ -4,6 +4,7 @@ import {
   Clock3,
   LoaderCircle,
   Search,
+  X,
   Youtube,
 } from "lucide-react";
 import type { VideoMetadata } from "../../types";
@@ -15,8 +16,10 @@ type SourceCardProps = {
   busy: boolean;
   inspecting: boolean;
   metadata: VideoMetadata | null;
+  hasResult: boolean;
   onUrlChange: (url: string) => void;
   onInspect: () => void;
+  onClear: () => void;
   onOpenSettings: () => void;
 };
 
@@ -25,8 +28,10 @@ export function SourceCard({
   busy,
   inspecting,
   metadata,
+  hasResult,
   onUrlChange,
   onInspect,
+  onClear,
   onOpenSettings,
 }: SourceCardProps) {
   const { t } = useI18n();
@@ -59,6 +64,18 @@ export function SourceCard({
                 disabled={busy || inspecting}
                 className="url-text-input"
               />
+              {(url.trim() || metadata || hasResult) && (
+                <button
+                  type="button"
+                  className="clear-input-button"
+                  onClick={onClear}
+                  disabled={busy || inspecting}
+                  title={t("source.clear")}
+                  aria-label={t("source.clear")}
+                >
+                  <X size={16} />
+                </button>
+              )}
             </div>
 
             <button

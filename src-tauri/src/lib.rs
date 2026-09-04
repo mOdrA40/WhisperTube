@@ -33,6 +33,7 @@ pub fn run() {
             commands::cancel_job,
             commands::list_history,
             commands::load_history,
+            commands::delete_history,
             commands::copy_export
         ])
         .run(tauri::generate_context!())

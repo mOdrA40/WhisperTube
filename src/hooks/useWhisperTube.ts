@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   cancelJob as cancelJobRequest,
+  deleteHistory as deleteHistoryRequest,
   deleteModel,
   downloadModel,
   exportTranscriptFile,
@@ -27,13 +28,21 @@ import type {
   BrowserChoice,
   HistoryItem,
   ModelInfo,
+  ModelDownloadPayload,
   ProgressPayload,
   SystemStatus,
   TranscriptResult,
   VideoMetadata,
 } from "../types";
 
-const initialProgress: ProgressPayload = { stage: "idle", percent: 0, message: "", backend: null };
+const initialProgress: ProgressPayload = {
+  stage: "idle",
+  percent: 0,
+  message: "",
+  backend: null,
+  downloadedBytes: null,
+  totalBytes: null,
+};
 
 export function useWhisperTube() {
   const { t } = useI18n();
@@ -56,7 +65,7 @@ export function useWhisperTube() {
   const [busy, setBusy] = useState(false);
   const [inspecting, setInspecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [downloadingModel, setDownloadingModel] = useState<Record<string, number>>({});
+  const [downloadingModel, setDownloadingModel] = useState<Record<string, ModelDownloadPayload>>({});
   const [copied, setCopied] = useState(false);
   const [installingCuda, setInstallingCuda] = useState(false);
   const [cudaDownloadPercent, setCudaDownloadPercent] = useState(0);
@@ -89,8 +98,8 @@ export function useWhisperTube() {
     refreshSystem().catch((cause) => setError(friendlyError(cause)));
 
     const unlistenProgress = subscribeToProgress(setProgress);
-    const unlistenModel = subscribeToModelDownload(({ id, percent }) => {
-      setDownloadingModel((previous) => ({ ...previous, [id]: percent }));
+    const unlistenModel = subscribeToModelDownload((payload) => {
+      setDownloadingModel((previous) => ({ ...previous, [payload.id]: payload }));
     });
     const unlistenCuda = subscribeToCudaDownload(({ percent }) => {
       setCudaDownloadPercent(percent);
@@ -119,6 +128,17 @@ export function useWhisperTube() {
     setMetadata(null);
   }
 
+  function clearTranscription() {
+    if (busy || inspecting) return;
+    setUrl("");
+    setMetadata(null);
+    setResult(null);
+    setSearchQuery("");
+    setCopied(false);
+    setProgress(initialProgress);
+    setError(null);
+  }
+
   function handleBrowserChange(nextBrowser: BrowserChoice) {
     setBrowser(nextBrowser);
     const firstProfile = browsers.find((item) => item.id === nextBrowser)?.profiles[0];
@@ -133,6 +153,7 @@ export function useWhisperTube() {
   }, [result, searchQuery]);
 
   const autoAcceleratorInstalled = Boolean(system?.accelerators.some((accelerator) => accelerator.installed));
+  const modelDownloadActive = Object.keys(downloadingModel).length > 0;
   const cudaInstallRequired = Boolean(system?.cudaSupported && system.nvidia && backend === "auto" && !system.cudaEngine && !autoAcceleratorInstalled);
   const vramWarning = useMemo(() => {
     if (!selectedModel || backend === "cpu" || backend === "metal" || backend === "vulkan" || !system) return null;
@@ -170,7 +191,7 @@ export function useWhisperTube() {
     }
     return null;
   }, [backend, system, t]);
-  const canStart = Boolean(metadata && selectedModel?.installed && runtimeReady && !installingCuda && !installingAccelerator && !cudaInstallRequired && !vramWarning && !acceleratorWarning);
+  const canStart = Boolean(metadata && selectedModel?.installed && runtimeReady && !installingCuda && !installingAccelerator && !modelDownloadActive && !cudaInstallRequired && !vramWarning && !acceleratorWarning);
 
   async function inspectVideo() {
     if (!url.trim()) {
@@ -192,12 +213,16 @@ export function useWhisperTube() {
 
   async function handleDownloadModel(id: string) {
     setError(null);
-    setDownloadingModel((previous) => ({ ...previous, [id]: 0 }));
+    setDownloadingModel((previous) => ({
+      ...previous,
+      [id]: { id, downloadedBytes: 0, totalBytes: 0, percent: 0 },
+    }));
     try {
       await downloadModel(id);
       await refreshSystem();
     } catch (cause) {
-      setError(friendlyError(cause));
+      const message = friendlyError(cause);
+      if (!message.toLowerCase().includes("dibatalkan")) setError(message);
     } finally {
       setDownloadingModel((previous) => {
         const next = { ...previous };
@@ -288,7 +313,14 @@ export function useWhisperTube() {
     setBusy(true);
     setError(null);
     setResult(null);
-    setProgress({ stage: "downloading", percent: 0, message: "", backend: null });
+    setProgress({
+      stage: "downloading",
+      percent: 0,
+      message: "",
+      backend: null,
+      downloadedBytes: 0,
+      totalBytes: null,
+    });
     try {
       setResult(await startTranscription({
         url: metadata.webpageUrl,
@@ -331,6 +363,23 @@ export function useWhisperTube() {
     }
   }
 
+  async function handleDeleteHistory(ids: number[]) {
+    if (ids.length === 0) return;
+    setError(null);
+    try {
+      await deleteHistoryRequest(ids);
+      if (result && ids.includes(result.historyId)) {
+        setResult(null);
+        setSearchQuery("");
+        setCopied(false);
+      }
+      await refreshSystem();
+    } catch (cause) {
+      setError(friendlyError(cause));
+      throw cause;
+    }
+  }
+
   async function handleExport(kind: "txt" | "srt" | "vtt") {
     if (!result) return;
     try {
@@ -356,6 +405,7 @@ export function useWhisperTube() {
     setTab,
     url,
     setUrl: handleUrlChange,
+    clearTranscription,
     browser,
     setBrowser: handleBrowserChange,
     browserProfile,
@@ -403,6 +453,7 @@ export function useWhisperTube() {
     startTranscription: handleStartTranscription,
     cancelJob: handleCancelJob,
     loadHistory: handleLoadHistory,
+    deleteHistory: handleDeleteHistory,
     exportFile: handleExport,
     copyTranscript,
   };

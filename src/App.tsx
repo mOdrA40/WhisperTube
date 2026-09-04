@@ -24,6 +24,7 @@ export default function App() {
           busy={app.busy}
           inspecting={app.inspecting}
           metadata={app.metadata}
+          hasResult={Boolean(app.result)}
           progress={app.progress}
           selectedModel={app.selectedModel}
           backend={app.backend}
@@ -49,12 +50,14 @@ export default function App() {
           onTabChange={app.setTab}
           onUrlChange={app.setUrl}
           onInspect={app.inspectVideo}
+          onClear={app.clearTranscription}
           onCancel={app.cancelJob}
           onModelChange={app.setModelId}
           onBackendChange={app.setBackend}
           onLanguageChange={app.setLanguage}
           onKeepAudioChange={app.setKeepAudio}
           onDownloadModel={app.downloadModel}
+          onCancelModel={app.cancelJob}
           onInstallCuda={app.installCuda}
           onCancelCuda={app.cancelJob}
           onInstallAccelerator={app.installAccelerator}
@@ -70,6 +73,8 @@ export default function App() {
           history={app.history}
           onRefresh={app.refreshSystem}
           onLoad={app.loadHistory}
+          onDelete={app.deleteHistory}
+          onError={app.setError}
           onTabChange={app.setTab}
         />
       )}
@@ -90,6 +95,7 @@ export default function App() {
           onBrowserChange={app.setBrowser}
           onBrowserProfileChange={app.setBrowserProfile}
           onDownloadModel={app.downloadModel}
+          onCancelModel={app.cancelJob}
           onRemoveModel={app.removeModel}
           onRefresh={app.refreshSystem}
           onInstallCuda={app.installCuda}

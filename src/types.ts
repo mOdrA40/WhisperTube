@@ -74,10 +74,14 @@ export type ProgressPayload = {
   percent: number;
   message: string;
   backend: string | null;
+  downloadedBytes: number | null;
+  totalBytes: number | null;
 };
 
 export type ModelDownloadPayload = {
   id: string;
+  downloadedBytes: number;
+  totalBytes: number;
   percent: number;
 };
 

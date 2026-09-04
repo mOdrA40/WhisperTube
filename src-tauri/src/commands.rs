@@ -23,6 +23,13 @@ fn begin_runtime_install(
     if let Some(current) = active.as_deref() {
         return Err(format!("Installer runtime {current} sedang berjalan."));
     }
+    let model_active = state
+        .model_downloading
+        .lock()
+        .map_err(|_| "State model terkunci")?;
+    if let Some(model_id) = model_active.as_deref() {
+        return Err(format!("Download model {model_id} sedang berjalan."));
+    }
     *active = Some(operation.to_string());
     state.runtime_cancelled.store(false, Ordering::SeqCst);
     Ok(state.runtime_cancelled.clone())
@@ -31,6 +38,37 @@ fn begin_runtime_install(
 fn end_runtime_install(state: &AppState, operation: &str) {
     if let Ok(mut active) = state.runtime_installing.lock() {
         if active.as_deref() == Some(operation) {
+            *active = None;
+        }
+    }
+}
+
+fn begin_model_download(
+    state: &AppState,
+    model_id: &str,
+) -> Result<Arc<std::sync::atomic::AtomicBool>, String> {
+    let runtime_active = state
+        .runtime_installing
+        .lock()
+        .map_err(|_| "State runtime terkunci")?;
+    if let Some(operation) = runtime_active.as_deref() {
+        return Err(format!("Installer runtime {operation} sedang berjalan."));
+    }
+    let mut active = state
+        .model_downloading
+        .lock()
+        .map_err(|_| "State model terkunci")?;
+    if let Some(current) = active.as_deref() {
+        return Err(format!("Download model {current} sedang berjalan."));
+    }
+    *active = Some(model_id.to_string());
+    state.model_cancelled.store(false, Ordering::SeqCst);
+    Ok(state.model_cancelled.clone())
+}
+
+fn end_model_download(state: &AppState, model_id: &str) {
+    if let Ok(mut active) = state.model_downloading.lock() {
+        if active.as_deref() == Some(model_id) {
             *active = None;
         }
     }
@@ -52,8 +90,23 @@ pub fn list_models(app: AppHandle) -> Result<Vec<ModelInfo>, String> {
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub async fn download_model(app: AppHandle, model_id: String) -> Result<(), String> {
-    models::download_model(app, model_id).await
+pub async fn download_model(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    model_id: String,
+) -> Result<(), String> {
+    if state
+        .active_pid
+        .lock()
+        .map(|guard| guard.is_some())
+        .unwrap_or(false)
+    {
+        return Err("Masih ada job transkripsi yang sedang berjalan.".into());
+    }
+    let cancelled = begin_model_download(&state, &model_id)?;
+    let result = models::download_model(app, model_id.clone(), cancelled).await;
+    end_model_download(&state, &model_id);
+    result
 }
 
 #[tauri::command]
@@ -109,6 +162,17 @@ pub async fn start_transcription(
 ) -> Result<TranscriptResult, String> {
     let active_pid = state.active_pid.clone();
     let cancelled = state.cancelled.clone();
+    if state
+        .model_downloading
+        .lock()
+        .map(|guard| guard.is_some())
+        .unwrap_or(false)
+    {
+        return Err(
+            "Download model masih berjalan. Tunggu sampai selesai atau batalkan terlebih dahulu."
+                .into(),
+        );
+    }
     if active_pid
         .lock()
         .map(|guard| guard.is_some())
@@ -126,6 +190,7 @@ pub async fn start_transcription(
 #[tauri::command]
 pub fn cancel_job(state: State<'_, AppState>) -> Result<(), String> {
     state.cancelled.store(true, Ordering::SeqCst);
+    state.model_cancelled.store(true, Ordering::SeqCst);
     state.runtime_cancelled.store(true, Ordering::SeqCst);
     let guard = state
         .active_pid
@@ -162,6 +227,11 @@ pub fn list_history(app: AppHandle) -> Result<Vec<HistoryItem>, String> {
 #[tauri::command]
 pub fn load_history(app: AppHandle, id: i64) -> Result<TranscriptResult, String> {
     history::load_history(&app, id)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn delete_history(app: AppHandle, ids: Vec<i64>) -> Result<(), String> {
+    history::delete_history(&app, &ids)
 }
 
 #[tauri::command]

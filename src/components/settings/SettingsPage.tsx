@@ -1,7 +1,7 @@
 import { CircleStop, Cpu, Download, LockKeyhole, LoaderCircle, MonitorCog, RotateCcw, Trash2 } from "lucide-react";
-import { formatMemory } from "../../lib/format";
+import { formatBytes, formatMemory } from "../../lib/format";
 import { getAcceleratorCopy, getModelCopy, uiLanguageOptions, useI18n } from "../../i18n";
-import type { AcceleratorInfo, BackendChoice, BrowserChoice, BrowserInfo, ModelInfo, SystemStatus } from "../../types";
+import type { AcceleratorInfo, BackendChoice, BrowserChoice, BrowserInfo, ModelDownloadPayload, ModelInfo, SystemStatus } from "../../types";
 import { CustomSelect, type SelectOption } from "../common/CustomSelect";
 
 type SettingsPageProps = {
@@ -11,7 +11,7 @@ type SettingsPageProps = {
   system: SystemStatus | null;
   models: ModelInfo[];
   busy: boolean;
-  downloadingModel: Record<string, number>;
+  downloadingModel: Record<string, ModelDownloadPayload>;
   accelerators: AcceleratorInfo[];
   installingCuda: boolean;
   cudaDownloadPercent: number;
@@ -20,6 +20,7 @@ type SettingsPageProps = {
   onBrowserChange: (browser: BrowserChoice) => void;
   onBrowserProfileChange: (profile: string) => void;
   onDownloadModel: (id: string) => void;
+  onCancelModel: () => void;
   onRemoveModel: (id: string) => void;
   onRefresh: () => void;
   onInstallCuda: () => void;
@@ -44,6 +45,7 @@ export function SettingsPage({
   onBrowserChange,
   onBrowserProfileChange,
   onDownloadModel,
+  onCancelModel,
   onRemoveModel,
   onRefresh,
   onInstallCuda,
@@ -52,6 +54,7 @@ export function SettingsPage({
   onCancelAccelerator,
 }: SettingsPageProps) {
   const { language: uiLanguage, setLanguage: setUiLanguage, t } = useI18n();
+  const modelDownloadActive = Object.keys(downloadingModel).length > 0;
   const browserOptions: SelectOption[] = [
     { value: "none", label: t("settings.publicOnly") },
     ...browsers.map((item) => ({ value: item.id, label: item.label })),
@@ -180,7 +183,7 @@ export function SettingsPage({
               type="button"
               className="secondary-button full"
               onClick={onInstallCuda}
-              disabled={installingCuda || installingAccelerator !== null || system.cudaEngine || busy}
+              disabled={installingCuda || installingAccelerator !== null || modelDownloadActive || system.cudaEngine || busy}
             >
               {installingCuda ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}
               {installingCuda
@@ -218,7 +221,7 @@ export function SettingsPage({
                     accelerator.backend as Exclude<BackendChoice, "auto" | "cpu" | "cuda">
                   )
                 }
-                disabled={installingAccelerator !== null || installingCuda || busy}
+                disabled={installingAccelerator !== null || installingCuda || modelDownloadActive || busy}
               >
                 {installingAccelerator === accelerator.backend
                   ? t("settings.acceleratorInstalling", { percent: Math.round(acceleratorDownloadPercent) })
@@ -252,7 +255,29 @@ export function SettingsPage({
                   {getModelCopy(model, t).description} • {model.sizeMb} MB • {t("controls.cudaRequirement", { memory: formatMemory(model.vramRequiredMb, t("hardware.notDetected")) })}
                 </span>
               </div>
-              {model.installed ? (
+              {downloadingModel[model.id] ? (
+                <div className="model-download-status">
+                  <span>
+                    {t("controls.downloadingModel", {
+                      percent: Math.round(downloadingModel[model.id].percent),
+                    })}
+                  </span>
+                  <small>
+                    {formatBytes(downloadingModel[model.id].downloadedBytes, t("progress.unknownSize"))} / {downloadingModel[model.id].totalBytes > 0
+                      ? formatBytes(downloadingModel[model.id].totalBytes)
+                      : t("progress.unknownSize")}
+                  </small>
+                  <button
+                    type="button"
+                    className="icon-button danger"
+                    onClick={onCancelModel}
+                    title={t("controls.cancelModel")}
+                    aria-label={t("controls.cancelModel")}
+                  >
+                    <CircleStop size={17} />
+                  </button>
+                </div>
+              ) : model.installed ? (
                 <button
                   type="button"
                   className="icon-button danger"
@@ -267,16 +292,9 @@ export function SettingsPage({
                   type="button"
                   className="secondary-button compact"
                   onClick={() => onDownloadModel(model.id)}
-                  disabled={downloadingModel[model.id] !== undefined}
+                  disabled={modelDownloadActive || busy}
                 >
-                  {downloadingModel[model.id] !== undefined ? (
-                    <LoaderCircle className="spin" size={15} />
-                  ) : (
-                    <Download size={15} />
-                  )}
-                  {downloadingModel[model.id] !== undefined
-                    ? `${Math.round(downloadingModel[model.id])}%`
-                    : t("settings.download")}
+                  <Download size={15} /> {t("settings.download")}
                 </button>
               )}
             </div>

@@ -6,6 +6,7 @@ import type {
   AppTab,
   AcceleratorInfo,
   BackendChoice,
+  ModelDownloadPayload,
   ModelInfo,
   ProgressPayload,
   Segment,
@@ -19,6 +20,7 @@ type TranscribePageProps = {
   busy: boolean;
   inspecting: boolean;
   metadata: VideoMetadata | null;
+  hasResult: boolean;
   progress: ProgressPayload;
   selectedModel: ModelInfo | undefined;
   canStart: boolean;
@@ -29,7 +31,7 @@ type TranscribePageProps = {
   language: string;
   keepAudio: boolean;
   runtimeReady: boolean;
-  downloadingModel: Record<string, number>;
+  downloadingModel: Record<string, ModelDownloadPayload>;
   accelerators: AcceleratorInfo[];
   installingCuda: boolean;
   cudaDownloadPercent: number;
@@ -44,12 +46,14 @@ type TranscribePageProps = {
   onTabChange: (tab: AppTab) => void;
   onUrlChange: (url: string) => void;
   onInspect: () => void;
+  onClear: () => void;
   onCancel: () => void;
   onModelChange: (id: string) => void;
   onBackendChange: (backend: BackendChoice) => void;
   onLanguageChange: (language: string) => void;
   onKeepAudioChange: (keepAudio: boolean) => void;
   onDownloadModel: (id: string) => void;
+  onCancelModel: () => void;
   onInstallCuda: () => void;
   onCancelCuda: () => void;
   onInstallAccelerator: (backend: Exclude<BackendChoice, "auto" | "cpu" | "cuda">) => void;
@@ -65,6 +69,7 @@ export function TranscribePage({
   busy,
   inspecting,
   metadata,
+  hasResult,
   progress,
   selectedModel,
   canStart,
@@ -90,12 +95,14 @@ export function TranscribePage({
   onTabChange,
   onUrlChange,
   onInspect,
+  onClear,
   onCancel,
   onModelChange,
   onBackendChange,
   onLanguageChange,
   onKeepAudioChange,
   onDownloadModel,
+  onCancelModel,
   onInstallCuda,
   onCancelCuda,
   onInstallAccelerator,
@@ -113,8 +120,10 @@ export function TranscribePage({
           busy={busy}
           inspecting={inspecting}
           metadata={metadata}
+          hasResult={hasResult}
           onUrlChange={onUrlChange}
           onInspect={onInspect}
+          onClear={onClear}
           onOpenSettings={() => onTabChange("settings")}
         />
         {busy && <ProgressCard progress={progress} selectedModel={selectedModel} backend={backend} onCancel={onCancel} />}
@@ -156,6 +165,7 @@ export function TranscribePage({
           onLanguageChange={onLanguageChange}
           onKeepAudioChange={onKeepAudioChange}
           onDownloadModel={onDownloadModel}
+          onCancelModel={onCancelModel}
           onInstallCuda={onInstallCuda}
           onCancelCuda={onCancelCuda}
           onInstallAccelerator={onInstallAccelerator}

@@ -21,6 +21,8 @@ Dokumentasi utama: [README.md](README.md) (English). Dokumentasi Mandarin: [READ
 - Download `bestaudio/best`, normalisasi FFmpeg ke WAV PCM signed 16-bit mono 16 kHz, lalu inferensi lokal whisper.cpp.
 - Model: Fast (`base`, ~142 MB), Balanced (`large-v3-turbo-q5_0`, ~547 MB), dan Accurate (`large-v3-q5_0`, ~1,1 GB).
 - Verifikasi checksum model, progress, cancel, timestamp, export TXT/SRT/VTT, dan history SQLite lokal.
+- Progress model dan download YouTube menampilkan byte yang sudah dipindahkan; download model dapat dibatalkan.
+- Workspace dapat dibersihkan dari URL, preview, dan transkrip; history bisa dihapus permanen satuan, beberapa, atau semua item yang tampil.
 - Audio sementara dihapus setelah proses kecuali opsi `Simpan audio hasil proses` dinyalakan.
 
 ## Setup Windows
@@ -43,7 +45,7 @@ Buka **Settings → Hardware**. Aplikasi hanya menampilkan accelerator yang coco
 
 - Windows x64 + NVIDIA terdeteksi: CUDA dari release whisper.cpp resmi yang dipin.
 - macOS: pack Apple Metal yang sesuai.
-- Windows/Linux x64 + GPU terdeteksi: pack Vulkan yang sesuai.
+- Windows/Linux x64 + GPU terdeteksi: pack Vulkan yang sesuai dapat ditawarkan sebagai accelerator alternatif.
 - Perangkat CPU-only tidak mendapat tombol download accelerator yang tidak relevan.
 
 CUDA tidak dibundel dalam setup dasar. Aplikasi mengunduhnya ke app storage user dan memvalidasi SHA-256 sebelum digunakan.

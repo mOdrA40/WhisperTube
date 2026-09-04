@@ -76,12 +76,16 @@ pub struct ProgressPayload {
     pub percent: f64,
     pub message: String,
     pub backend: Option<String>,
+    pub downloaded_bytes: Option<u64>,
+    pub total_bytes: Option<u64>,
 }
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelDownloadPayload {
     pub id: String,
+    pub downloaded_bytes: u64,
+    pub total_bytes: u64,
     pub percent: f64,
 }
 

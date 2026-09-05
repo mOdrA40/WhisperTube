@@ -24,6 +24,22 @@ use crate::{
 const RELEASE_REPOSITORY: &str = "mOdrA40/WhisperTube";
 const RELEASE_TAG: &str = "accelerators-v0.1.0";
 
+// These values are filled by scripts/sync-accelerator-hashes.ps1 after the
+// matching public GitHub Release has been built and reviewed. Keeping the
+// hashes in the application source prevents a release-side change from being
+// silently accepted by a shipped build.
+#[allow(dead_code)]
+const METAL_MACOS_ARM64_SHA256: Option<&str> = None;
+
+#[allow(dead_code)]
+const METAL_MACOS_X64_SHA256: Option<&str> = None;
+
+#[allow(dead_code)]
+const VULKAN_WINDOWS_X64_SHA256: Option<&str> = None;
+
+#[allow(dead_code)]
+const VULKAN_LINUX_X64_SHA256: Option<&str> = None;
+
 struct PackSpec {
     backend: &'static str,
     label: &'static str,
@@ -46,8 +62,11 @@ fn pack_specs() -> Vec<PackSpec> {
             backend: "metal",
             label: "Apple Metal",
             asset_name,
-            // Fill this from the final published asset before enabling downloads.
-            trusted_sha256: None,
+            trusted_sha256: if cfg!(target_arch = "aarch64") {
+                METAL_MACOS_ARM64_SHA256
+            } else {
+                METAL_MACOS_X64_SHA256
+            },
             description: "Accelerator GPU Apple Metal untuk macOS",
         }];
     }
@@ -63,8 +82,11 @@ fn pack_specs() -> Vec<PackSpec> {
             backend: "vulkan",
             label: "Vulkan",
             asset_name,
-            // Fill this from the final published asset before enabling downloads.
-            trusted_sha256: None,
+            trusted_sha256: if cfg!(target_os = "windows") {
+                VULKAN_WINDOWS_X64_SHA256
+            } else {
+                VULKAN_LINUX_X64_SHA256
+            },
             description: "Accelerator GPU lintas vendor Vulkan",
         }];
     }

@@ -157,6 +157,13 @@ sidecar and GitHub digest are only secondary consistency checks.
 ROCm and OpenVINO remain separate targets because they require specialized
 toolchains or hardware runners.
 
+The hash synchronization helper is `scripts/sync-accelerator-hashes.ps1`. It
+first reads the four public release assets without changing source; its
+`-Apply` mode writes the checked hashes into the target-specific catalog
+constants. A release build must be produced after that change, and the
+published assets must remain immutable for the lifetime of that application
+build.
+
 ## Next production milestones
 
 1. Sign runtime/model manifests and release assets.

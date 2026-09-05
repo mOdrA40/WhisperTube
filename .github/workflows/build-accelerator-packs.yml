@@ -81,6 +81,7 @@ jobs:
             echo "whisper-cli tidak ditemukan setelah build" >&2
             exit 1
           fi
+          "$cli" --version
           mkdir -p "$stage"
           cp -R "$(dirname "$cli")"/* "$stage"/
           echo "$stage" > "$RUNNER_TEMP/stage-path"

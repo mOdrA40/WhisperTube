@@ -88,6 +88,15 @@ WhisperTube 只在本地将该文件传递给 yt-dlp，不会上传或写入历�
 
 `.github/workflows/build-accelerator-packs.yml` 使用固定版本的官方 whisper.cpp source 构建 Metal/Vulkan pack。开发和 CI 阶段 repository 可以保持 private，但发布 EXE 前 accelerator release 必须公开，因为应用不会内置 GitHub token。
 
+公开 release 完成后，先读取并同步四个 pack 的 checksum，再重新构建应用：
+
+```powershell
+.\scripts\sync-accelerator-hashes.ps1
+.\scripts\sync-accelerator-hashes.ps1 -Apply
+```
+
+第一条命令只读取并显示 hash；`-Apply` 会将 hash 写入应用目录，使 Metal/Vulkan 下载按钮生效。请检查 diff，并且不要在构建 EXE 后替换 release asset。
+
 ## 项目结构和本地数据
 
 - `src/components/`：UI 组件。

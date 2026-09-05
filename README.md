@@ -185,6 +185,15 @@ src-tauri\target\release\bundle\
 
 The repository can remain private during development and CI. Before shipping an EXE, the accelerator release must be public because the app does not embed a GitHub token. CUDA Windows downloads continue to use the pinned upstream whisper.cpp release.
 
+After the accelerator release is public, maintainers must copy its verified hashes into the application build:
+
+```powershell
+.\scripts\sync-accelerator-hashes.ps1
+.\scripts\sync-accelerator-hashes.ps1 -Apply
+```
+
+Review the source diff, run the release checks, and rebuild the application. The first command is read-only; `-Apply` enables downloads for the four matching platform packs. Do not replace release assets after the application has been built.
+
 ## Project structure
 
 ```text

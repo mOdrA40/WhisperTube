@@ -88,6 +88,15 @@ Installer berada di sekitar `src-tauri\target\release\bundle\`. `npm run tauri:b
 
 Workflow `.github/workflows/build-accelerator-packs.yml` membuat pack Metal/Vulkan dari source resmi whisper.cpp. Repository boleh private saat development/CI, tetapi release accelerator harus public sebelum EXE dibagikan karena aplikasi tidak membawa GitHub token.
 
+Setelah release public selesai, sinkronkan checksum ke source lalu build ulang aplikasi:
+
+```powershell
+.\scripts\sync-accelerator-hashes.ps1
+.\scripts\sync-accelerator-hashes.ps1 -Apply
+```
+
+Perintah pertama hanya membaca dan menampilkan hash. Opsi `-Apply` menulis hash ke katalog aplikasi agar tombol download Metal/Vulkan aktif. Review diff dan jangan mengganti asset release setelah EXE dibangun.
+
 ## Struktur dan data lokal
 
 - `src/components/`: komponen UI.

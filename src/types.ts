@@ -124,6 +124,7 @@ export type TranscriptResult = {
   txtPath: string;
   srtPath: string;
   vttPath: string;
+  audioPath: string | null;
 };
 
 export type HistoryItem = {

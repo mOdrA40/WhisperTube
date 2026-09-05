@@ -68,6 +68,7 @@ export default function App() {
           onStart={app.startTranscription}
           onCopy={app.copyTranscript}
           onExport={app.exportFile}
+          onRevealAudio={app.revealAudio}
           onSearchChange={app.setSearchQuery}
         />
       )}

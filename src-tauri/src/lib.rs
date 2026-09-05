@@ -4,6 +4,7 @@ mod commands;
 mod history;
 mod models;
 mod paths;
+mod process;
 mod sources;
 mod state;
 mod system;
@@ -18,6 +19,9 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle().clone();
             history::init_db(&handle).map_err(std::io::Error::other)?;
+            if let Err(error) = history::cleanup_job_storage(&handle) {
+                eprintln!("WhisperTube startup cleanup warning: {error}");
+            }
             paths::models_dir(&handle).map_err(std::io::Error::other)?;
             Ok(())
         })
@@ -35,7 +39,8 @@ pub fn run() {
             commands::list_history,
             commands::load_history,
             commands::delete_history,
-            commands::copy_export
+            commands::copy_export,
+            commands::reveal_audio
         ])
         .run(tauri::generate_context!())
         .expect("error while running WhisperTube");

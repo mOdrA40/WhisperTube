@@ -1,5 +1,5 @@
 import { Check, CircleStop, Copy, Cpu, Download, ExternalLink, FileKey, Globe2, LockKeyhole, LoaderCircle, MonitorCog, RotateCcw, Trash2 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { formatBytes, formatMemory } from "../../lib/format";
 import { getAcceleratorCopy, getModelCopy, uiLanguageOptions, useI18n } from "../../i18n";
 import type { AcceleratorInfo, BackendChoice, BrowserInfo, ModelDownloadPayload, ModelInfo, SystemStatus } from "../../types";
@@ -68,6 +68,10 @@ export function SettingsPage({
   const [cookiesDialogOpen, setCookiesDialogOpen] = useState(false);
   const [copiedUrl, setCopiedUrl] = useState<string | null>(null);
   const [copyFailedUrl, setCopyFailedUrl] = useState<string | null>(null);
+  const cookiesDialogRef = useRef<HTMLDivElement>(null);
+  const cookiesTriggerRef = useRef<HTMLButtonElement>(null);
+  const cookiesContinueRef = useRef<HTMLButtonElement>(null);
+  const cookiesDialogWasOpen = useRef(false);
   const modelDownloadActive = Object.keys(downloadingModel).length > 0;
   const interfaceLanguageOptions: SelectOption[] = uiLanguageOptions.map((option) => ({
     value: option.value,
@@ -93,11 +97,37 @@ export function SettingsPage({
 
   useEffect(() => {
     if (!cookiesDialogOpen) return;
-    const handleEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setCookiesDialogOpen(false);
+    cookiesDialogWasOpen.current = true;
+    cookiesContinueRef.current?.focus();
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setCookiesDialogOpen(false);
+        return;
+      }
+      if (event.key !== "Tab" || !cookiesDialogRef.current) return;
+      const focusable = [...cookiesDialogRef.current.querySelectorAll<HTMLElement>(
+        "button, a[href], input, select, textarea, [tabindex]:not([tabindex='-1'])",
+      )].filter((element) => !element.hasAttribute("disabled"));
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
     };
-    document.addEventListener("keydown", handleEscape);
-    return () => document.removeEventListener("keydown", handleEscape);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [cookiesDialogOpen]);
+
+  useEffect(() => {
+    if (!cookiesDialogOpen && cookiesDialogWasOpen.current) {
+      cookiesDialogWasOpen.current = false;
+      cookiesTriggerRef.current?.focus();
+    }
   }, [cookiesDialogOpen]);
 
   return (
@@ -131,10 +161,11 @@ export function SettingsPage({
             </button>
           </div>
         ) : (
-          <button
-            type="button"
-            className="secondary-button full"
-            onClick={() => setCookiesDialogOpen(true)}
+            <button
+              type="button"
+              className="secondary-button full"
+              ref={cookiesTriggerRef}
+              onClick={() => setCookiesDialogOpen(true)}
             disabled={busy}
           >
             <FileKey size={16} />
@@ -178,6 +209,7 @@ export function SettingsPage({
         <div className="modal-backdrop" role="presentation">
           <div
             className="cookies-guide-modal"
+            ref={cookiesDialogRef}
             role="dialog"
             aria-modal="true"
             aria-labelledby="cookies-guide-title"
@@ -233,6 +265,7 @@ export function SettingsPage({
                   {t("settings.cookiesGuideCancel")}
                 </button>
                 <button
+                  ref={cookiesContinueRef}
                   type="button"
                   className="primary-button"
                   onClick={() => {
@@ -336,7 +369,7 @@ export function SettingsPage({
             <span>
               {copy.label}: {accelerator.installed ? t("settings.acceleratorInstalled") : copy.description}
             </span>
-            {!accelerator.installed && (
+            {!accelerator.installed && accelerator.downloadable && (
               <button
                 type="button"
                 className="secondary-button compact"
@@ -411,7 +444,12 @@ export function SettingsPage({
                 <button
                   type="button"
                   className="icon-button danger"
-                  onClick={() => onRemoveModel(model.id)}
+                  onClick={() => {
+                    if (window.confirm(t("settings.confirmDeleteModel", { model: getModelCopy(model, t).label }))) {
+                      onRemoveModel(model.id);
+                    }
+                  }}
+                  disabled={busy || modelDownloadActive || installingCuda || installingAccelerator !== null}
                   title={t("settings.deleteModel")}
                   aria-label={t("settings.deleteModel")}
                 >

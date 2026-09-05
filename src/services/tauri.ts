@@ -60,6 +60,10 @@ export function openExternalUrl(url: string) {
   return openUrl(url);
 }
 
+export function revealAudioFile(path: string) {
+  return invoke("reveal_audio", { path });
+}
+
 export function downloadModel(modelId: string) {
   return invoke("download_model", { modelId });
 }

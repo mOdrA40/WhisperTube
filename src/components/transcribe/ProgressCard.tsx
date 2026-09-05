@@ -25,7 +25,9 @@ export function ProgressCard({ progress, selectedModel, backend, networkSpeedByt
             <LoaderCircle className="spin" size={15} /> {t("progress.processing")}
           </span>
           <h3>{getProgressStageLabel(progress.stage, t)}</h3>
-          <p>{getProgressMessage(progress, backend, t)}</p>
+          <p aria-live="polite" aria-atomic="true">
+            {getProgressMessage(progress, backend, t)}
+          </p>
           {progress.stage === "downloading" && progress.downloadedBytes !== null && (
             <span className="progress-bytes">
               {formatBytes(progress.downloadedBytes, t("progress.unknownSize"))} / {progress.totalBytes !== null
@@ -56,7 +58,14 @@ export function ProgressCard({ progress, selectedModel, backend, networkSpeedByt
         <strong>{Math.round(progress.percent)}%</strong>
       </div>
 
-      <div className="progress-track">
+      <div
+        className="progress-track"
+        role="progressbar"
+        aria-label={t("progress.processing")}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={percent}
+      >
         <div className="progress-fill" style={{ width: `${percent}%` }} />
       </div>
 

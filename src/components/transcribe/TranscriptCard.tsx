@@ -1,4 +1,4 @@
-import { Check, Copy, FileText, Play, Search } from "lucide-react";
+import { Check, Copy, FileText, FolderOpen, Play, Search } from "lucide-react";
 import type { Segment, TranscriptResult } from "../../types";
 import { getModelLabel, useI18n } from "../../i18n";
 
@@ -9,6 +9,7 @@ type TranscriptCardProps = {
   filteredSegments: Segment[];
   onCopy: () => void;
   onExport: (kind: "txt" | "srt" | "vtt") => void;
+  onRevealAudio: () => void;
   onSearchChange: (query: string) => void;
 };
 
@@ -19,6 +20,7 @@ export function TranscriptCard({
   filteredSegments,
   onCopy,
   onExport,
+  onRevealAudio,
   onSearchChange,
 }: TranscriptCardProps) {
   const { t } = useI18n();
@@ -49,6 +51,11 @@ export function TranscriptCard({
           <button type="button" className="secondary-button" onClick={() => onExport("vtt")}>
             VTT
           </button>
+          {result.audioPath && (
+            <button type="button" className="secondary-button" onClick={onRevealAudio}>
+              <FolderOpen size={16} /> {t("transcript.showAudio")}
+            </button>
+          )}
         </div>
       </div>
 

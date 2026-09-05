@@ -885,6 +885,13 @@ body {
   outline: none;
 }
 
+button:focus-visible,
+input:focus-visible,
+[role="option"]:focus-visible {
+  outline: 2px solid #c084fc;
+  outline-offset: 2px;
+}
+
 .custom-select-trigger:hover:not(:disabled) {
   border-color: rgba(255, 255, 255, 0.22);
   background: rgba(14, 19, 34, 0.95);
@@ -1853,6 +1860,17 @@ body {
 @keyframes spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
   }
 }
 

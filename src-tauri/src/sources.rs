@@ -1,6 +1,6 @@
 use serde_json::Value;
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::{sync::OnceLock, time::Duration};
 use tauri::AppHandle;
 use url::Url;
 
@@ -87,6 +87,7 @@ const SOURCE_COOKIE_FILE_ERROR_PREFIX: &str = "media_source_cookie_file:";
 const SOURCE_JS_RUNTIME_ERROR_PREFIX: &str = "media_source_js_runtime:";
 const SOURCE_RUNTIME_ERROR_PREFIX: &str = "media_source_runtime:";
 const SOURCE_METADATA_ERROR_PREFIX: &str = "media_source_metadata:";
+static NODE_AVAILABLE: OnceLock<bool> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MetadataRetryReason {
@@ -141,19 +142,24 @@ fn source_label_from_metadata(value: &Value, safe_url: &str) -> String {
 }
 
 fn run_output(mut command: Command) -> Result<std::process::Output, String> {
+    crate::process::hide_console(&mut command);
     command
         .output()
         .map_err(|e| format!("Gagal menjalankan process: {e}"))
 }
 
 pub fn js_runtime_args() -> Vec<String> {
-    let node_available = Command::new("node")
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success());
-    if node_available {
+    let node_available = NODE_AVAILABLE.get_or_init(|| {
+        let mut command = Command::new("node");
+        crate::process::hide_console(&mut command);
+        command
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    });
+    if *node_available {
         vec!["--js-runtimes".into(), "node".into()]
     } else {
         Vec::new()

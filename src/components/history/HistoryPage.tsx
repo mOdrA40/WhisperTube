@@ -18,6 +18,9 @@ export function HistoryPage({ history, onRefresh, onLoad, onDelete, onTabChange 
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [pendingDeleteIds, setPendingDeleteIds] = useState<number[] | null>(null);
   const cancelDeleteButtonRef = useRef<HTMLButtonElement>(null);
+  const deleteDialogRef = useRef<HTMLDivElement>(null);
+  const deleteTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const deleteDialogWasOpen = useRef(false);
   const allSelected = history.length > 0 && selectedIds.size === history.length;
 
   useEffect(() => {
@@ -40,8 +43,9 @@ export function HistoryPage({ history, onRefresh, onLoad, onDelete, onTabChange 
     setSelectedIds(allSelected ? new Set() : new Set(history.map((item) => item.id)));
   }
 
-  function handleDelete(ids: number[]) {
+  function handleDelete(ids: number[], trigger: HTMLButtonElement) {
     if (ids.length === 0) return;
+    deleteTriggerRef.current = trigger;
     setPendingDeleteIds(ids);
   }
 
@@ -63,12 +67,38 @@ export function HistoryPage({ history, onRefresh, onLoad, onDelete, onTabChange 
 
   useEffect(() => {
     if (!pendingDeleteIds) return;
+    deleteDialogWasOpen.current = true;
     cancelDeleteButtonRef.current?.focus();
-    const handleEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setPendingDeleteIds(null);
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setPendingDeleteIds(null);
+        return;
+      }
+      if (event.key !== "Tab" || !deleteDialogRef.current) return;
+      const focusable = [...deleteDialogRef.current.querySelectorAll<HTMLElement>(
+        "button, a[href], input, select, textarea, [tabindex]:not([tabindex='-1'])",
+      )].filter((element) => !element.hasAttribute("disabled"));
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
     };
-    document.addEventListener("keydown", handleEscape);
-    return () => document.removeEventListener("keydown", handleEscape);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [pendingDeleteIds]);
+
+  useEffect(() => {
+    if (!pendingDeleteIds && deleteDialogWasOpen.current) {
+      deleteDialogWasOpen.current = false;
+      deleteTriggerRef.current?.focus();
+      deleteTriggerRef.current = null;
+    }
   }, [pendingDeleteIds]);
 
   return (
@@ -95,7 +125,11 @@ export function HistoryPage({ history, onRefresh, onLoad, onDelete, onTabChange 
       {selectedIds.size > 0 && (
         <div className="history-selection-bar">
           <span>{t("history.selected", { count: selectedIds.size })}</span>
-          <button type="button" className="danger-ghost" onClick={() => void handleDelete([...selectedIds])}>
+          <button
+            type="button"
+            className="danger-ghost"
+            onClick={(event) => void handleDelete([...selectedIds], event.currentTarget)}
+          >
             <Trash2 size={16} /> {t("history.deleteSelected")}
           </button>
         </div>
@@ -147,7 +181,7 @@ export function HistoryPage({ history, onRefresh, onLoad, onDelete, onTabChange 
               <button
                 type="button"
                 className="icon-button danger history-delete-button"
-                onClick={() => void handleDelete([item.id])}
+                onClick={(event) => void handleDelete([item.id], event.currentTarget)}
                 title={t("history.deleteOne")}
                 aria-label={t("history.deleteOne")}
               >
@@ -162,6 +196,7 @@ export function HistoryPage({ history, onRefresh, onLoad, onDelete, onTabChange 
         <div className="modal-backdrop" role="presentation">
           <div
             className="history-delete-modal"
+            ref={deleteDialogRef}
             role="dialog"
             aria-modal="true"
             aria-labelledby="history-delete-title"

@@ -220,8 +220,9 @@ Tauri selects the platform-specific app-local-data directory. WhisperTube stores
 - External processes are launched by Rust with argument arrays, not concatenated shell commands.
 - Known model and accelerator downloads are verified with checksums before activation.
 - Browser discovery reads local profile metadata; imported cookies and the optional Safari session are read by yt-dlp only for the selected job.
-- Only one transcription job and one runtime installer can run at a time.
+- Only one transcription job and one runtime installer can run at a time; job reservation is independent of child-process PID state.
 - Cancellation terminates the active process tree on Windows with `taskkill /T /F`.
+- Failed jobs clean up their temporary job folders, and runtime bootstrap downloads are pinned and checksum-verified before activation.
 
 ## Known limitations
 

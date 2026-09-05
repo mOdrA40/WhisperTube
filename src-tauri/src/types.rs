@@ -136,6 +136,8 @@ pub struct TranscriptResult {
     pub txt_path: String,
     pub srt_path: String,
     pub vtt_path: String,
+    #[serde(default)]
+    pub audio_path: Option<String>,
 }
 
 #[derive(Serialize)]

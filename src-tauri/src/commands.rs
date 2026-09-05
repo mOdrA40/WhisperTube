@@ -1,10 +1,9 @@
-use std::process::{Command, Stdio};
 use std::sync::{atomic::Ordering, Arc};
 use tauri::{AppHandle, State};
 
 use crate::{
-    accelerators, browsers, history, models, sources,
-    state::AppState,
+    accelerators, browsers, history, models, process, sources,
+    state::{AppState, JobGuard},
     system, transcription,
     types::{
         HistoryItem, ModelInfo, SystemStatus, TranscriptRequest, TranscriptResult, VideoMetadata,
@@ -15,6 +14,12 @@ fn begin_runtime_install(
     state: &AppState,
     operation: &str,
 ) -> Result<Arc<std::sync::atomic::AtomicBool>, String> {
+    if JobGuard::is_active(state)? {
+        return Err(
+            "Transkripsi sedang berjalan. Tunggu sampai selesai atau batalkan terlebih dahulu."
+                .into(),
+        );
+    }
     let mut active = state
         .runtime_installing
         .lock()
@@ -46,6 +51,12 @@ fn begin_model_download(
     state: &AppState,
     model_id: &str,
 ) -> Result<Arc<std::sync::atomic::AtomicBool>, String> {
+    if JobGuard::is_active(state)? {
+        return Err(
+            "Transkripsi sedang berjalan. Tunggu sampai selesai atau batalkan terlebih dahulu."
+                .into(),
+        );
+    }
     let runtime_active = state
         .runtime_installing
         .lock()
@@ -94,12 +105,7 @@ pub async fn download_model(
     state: State<'_, AppState>,
     model_id: String,
 ) -> Result<(), String> {
-    if state
-        .active_pid
-        .lock()
-        .map(|guard| guard.is_some())
-        .unwrap_or(false)
-    {
+    if JobGuard::is_active(&state)? {
         return Err("Masih ada job transkripsi yang sedang berjalan.".into());
     }
     let cancelled = begin_model_download(&state, &model_id)?;
@@ -139,7 +145,30 @@ pub async fn install_accelerator(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn delete_model(app: AppHandle, model_id: String) -> Result<(), String> {
+pub fn delete_model(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    model_id: String,
+) -> Result<(), String> {
+    if JobGuard::is_active(&state)? {
+        return Err("Model tidak bisa dihapus saat transkripsi berjalan.".into());
+    }
+    if state
+        .model_downloading
+        .lock()
+        .map_err(|_| "State model terkunci")?
+        .is_some()
+    {
+        return Err("Model tidak bisa dihapus saat download model berjalan.".into());
+    }
+    if state
+        .runtime_installing
+        .lock()
+        .map_err(|_| "State runtime terkunci")?
+        .is_some()
+    {
+        return Err("Model tidak bisa dihapus saat installer runtime berjalan.".into());
+    }
     models::delete_model(&app, &model_id)
 }
 
@@ -160,27 +189,55 @@ pub async fn start_transcription(
     state: State<'_, AppState>,
     request: TranscriptRequest,
 ) -> Result<TranscriptResult, String> {
-    let active_pid = state.active_pid.clone();
-    let cancelled = state.cancelled.clone();
+    if state
+        .runtime_installing
+        .lock()
+        .map_err(|_| "State runtime terkunci")?
+        .is_some()
+    {
+        return Err(
+            "Installer runtime masih berjalan. Tunggu sampai selesai atau batalkan terlebih dahulu."
+                .into(),
+        );
+    }
     if state
         .model_downloading
         .lock()
-        .map(|guard| guard.is_some())
-        .unwrap_or(false)
+        .map_err(|_| "State model terkunci")?
+        .is_some()
     {
         return Err(
             "Download model masih berjalan. Tunggu sampai selesai atau batalkan terlebih dahulu."
                 .into(),
         );
     }
-    if active_pid
+    let job_guard = JobGuard::reserve(&state)?;
+    let active_pid = state.active_pid.clone();
+    let cancelled = state.cancelled.clone();
+    if state
+        .model_downloading
         .lock()
-        .map(|guard| guard.is_some())
-        .unwrap_or(false)
+        .map_err(|_| "State model terkunci")?
+        .is_some()
     {
-        return Err("Masih ada job yang sedang berjalan.".into());
+        return Err(
+            "Download model masih berjalan. Tunggu sampai selesai atau batalkan terlebih dahulu."
+                .into(),
+        );
+    }
+    if state
+        .runtime_installing
+        .lock()
+        .map_err(|_| "State runtime terkunci")?
+        .is_some()
+    {
+        return Err(
+            "Installer runtime masih berjalan. Tunggu sampai selesai atau batalkan terlebih dahulu."
+                .into(),
+        );
     }
     tokio::task::spawn_blocking(move || {
+        job_guard.mark_running()?;
         transcription::pipeline(app, active_pid, cancelled, request)
     })
     .await
@@ -189,6 +246,7 @@ pub async fn start_transcription(
 
 #[tauri::command]
 pub fn cancel_job(state: State<'_, AppState>) -> Result<(), String> {
+    let _ = JobGuard::request_cancel(&state)?;
     state.cancelled.store(true, Ordering::SeqCst);
     state.model_cancelled.store(true, Ordering::SeqCst);
     state.runtime_cancelled.store(true, Ordering::SeqCst);
@@ -199,22 +257,7 @@ pub fn cancel_job(state: State<'_, AppState>) -> Result<(), String> {
     let pid = *guard;
     drop(guard);
     if let Some(pid) = pid {
-        #[cfg(target_os = "windows")]
-        {
-            let _ = Command::new("taskkill")
-                .args(["/PID", &pid.to_string(), "/T", "/F"])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            let _ = Command::new("kill")
-                .args(["-TERM", &pid.to_string()])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
-        }
+        process::terminate_process_tree(pid);
     }
     Ok(())
 }
@@ -237,4 +280,9 @@ pub fn delete_history(app: AppHandle, ids: Vec<i64>) -> Result<(), String> {
 #[tauri::command]
 pub fn copy_export(app: AppHandle, source: String, target: String) -> Result<(), String> {
     history::copy_export(&app, &source, &target)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn reveal_audio(app: AppHandle, path: String) -> Result<(), String> {
+    history::reveal_audio(&app, &path)
 }

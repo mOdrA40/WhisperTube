@@ -62,6 +62,7 @@ type TranscribePageProps = {
   onStart: () => void;
   onCopy: () => void;
   onExport: (kind: "txt" | "srt" | "vtt") => void;
+  onRevealAudio: () => void;
   onSearchChange: (query: string) => void;
 };
 
@@ -112,6 +113,7 @@ export function TranscribePage({
   onStart,
   onCopy,
   onExport,
+  onRevealAudio,
   onSearchChange,
 }: TranscribePageProps) {
   return (
@@ -137,6 +139,7 @@ export function TranscribePage({
             filteredSegments={filteredSegments}
             onCopy={onCopy}
             onExport={onExport}
+            onRevealAudio={onRevealAudio}
             onSearchChange={onSearchChange}
           />
         )}

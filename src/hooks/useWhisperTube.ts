@@ -14,6 +14,7 @@ import {
   listModels,
   loadHistory,
   pickCookiesFile,
+  revealAudioFile,
   startTranscription,
   subscribeToModelDownload,
   subscribeToAcceleratorDownload,
@@ -285,7 +286,7 @@ export function useWhisperTube() {
     }
     return null;
   }, [backend, system, t]);
-  const canStart = Boolean(metadata && selectedModel?.installed && runtimeReady && !installingCuda && !installingAccelerator && !modelDownloadActive && !cudaInstallRequired && !vramWarning && !acceleratorWarning);
+  const canStart = Boolean(!busy && metadata && selectedModel?.installed && runtimeReady && !installingCuda && !installingAccelerator && !modelDownloadActive && !cudaInstallRequired && !vramWarning && !acceleratorWarning);
 
   async function inspectVideo() {
     if (!url.trim()) {
@@ -363,6 +364,7 @@ export function useWhisperTube() {
     setError(null);
     try {
       await deleteModel(id);
+      if (modelId === id) setModelId("base");
       await refreshSystem();
     } catch (cause) {
       setError(friendlyError(cause));
@@ -416,6 +418,7 @@ export function useWhisperTube() {
   }
 
   async function handleStartTranscription() {
+    if (busy) return;
     if (!metadata) {
       setError(t("error.videoCheckFirst"));
       return;
@@ -519,6 +522,7 @@ export function useWhisperTube() {
       await refreshSystem();
     } catch (cause) {
       setError(friendlyError(cause));
+      await refreshSystem().catch((refreshCause) => setError(friendlyError(refreshCause)));
       throw cause;
     }
   }
@@ -527,6 +531,15 @@ export function useWhisperTube() {
     if (!result) return;
     try {
       await exportTranscriptFile(result, kind);
+    } catch (cause) {
+      setError(friendlyError(cause));
+    }
+  }
+
+  async function handleRevealAudio() {
+    if (!result?.audioPath) return;
+    try {
+      await revealAudioFile(result.audioPath);
     } catch (cause) {
       setError(friendlyError(cause));
     }
@@ -600,6 +613,7 @@ export function useWhisperTube() {
     loadHistory: handleLoadHistory,
     deleteHistory: handleDeleteHistory,
     exportFile: handleExport,
+    revealAudio: handleRevealAudio,
     copyTranscript,
   };
 }

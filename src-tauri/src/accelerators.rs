@@ -28,6 +28,7 @@ struct PackSpec {
     backend: &'static str,
     label: &'static str,
     asset_name: &'static str,
+    trusted_sha256: Option<&'static str>,
     description: &'static str,
 }
 
@@ -45,6 +46,8 @@ fn pack_specs() -> Vec<PackSpec> {
             backend: "metal",
             label: "Apple Metal",
             asset_name,
+            // Fill this from the final published asset before enabling downloads.
+            trusted_sha256: None,
             description: "Accelerator GPU Apple Metal untuk macOS",
         }];
     }
@@ -60,6 +63,8 @@ fn pack_specs() -> Vec<PackSpec> {
             backend: "vulkan",
             label: "Vulkan",
             asset_name,
+            // Fill this from the final published asset before enabling downloads.
+            trusted_sha256: None,
             description: "Accelerator GPU lintas vendor Vulkan",
         }];
     }
@@ -87,7 +92,7 @@ pub fn catalog(app: &AppHandle, gpu_detected: bool) -> Result<Vec<AcceleratorInf
             installed: engine_path(app, spec.backend)
                 .map(|path| path.exists())
                 .unwrap_or(false),
-            downloadable: true,
+            downloadable: spec.trusted_sha256.is_some(),
             description: spec.description.into(),
         })
         .collect())
@@ -113,7 +118,10 @@ fn emit_progress(
     );
 }
 
-async fn release_asset(client: &Client, asset_name: &str) -> Result<(String, String), String> {
+async fn release_asset(
+    client: &Client,
+    asset_name: &str,
+) -> Result<(String, String, Option<String>), String> {
     let api_url =
         format!("https://api.github.com/repos/{RELEASE_REPOSITORY}/releases/tags/{RELEASE_TAG}");
     let response = tokio::time::timeout(Duration::from_secs(30), client.get(api_url).send())
@@ -153,6 +161,19 @@ async fn release_asset(client: &Client, asset_name: &str) -> Result<(String, Str
         .and_then(Value::as_str)
         .ok_or_else(|| "URL download accelerator tidak tersedia.".to_string())?
         .to_string();
+    let asset_digest = match asset.get("digest").and_then(Value::as_str) {
+        Some(digest) => {
+            let digest = digest
+                .strip_prefix("sha256:")
+                .ok_or_else(|| "Digest accelerator tidak berformat SHA-256.".to_string())?
+                .to_ascii_lowercase();
+            if digest.len() != 64 || !digest.chars().all(|value| value.is_ascii_hexdigit()) {
+                return Err("Digest accelerator tidak berformat SHA-256.".into());
+            }
+            Some(digest)
+        }
+        None => None,
+    };
     let checksum_url = checksum_asset
         .get("browser_download_url")
         .and_then(Value::as_str)
@@ -183,7 +204,17 @@ async fn release_asset(client: &Client, asset_name: &str) -> Result<(String, Str
     {
         return Err("Checksum accelerator tidak berformat SHA-256.".into());
     }
-    Ok((download_url, checksum))
+    Ok((download_url, checksum, asset_digest))
+}
+
+struct FinalizePaths<'a> {
+    archive: &'a Path,
+    extract: &'a Path,
+    staging: &'a Path,
+    destination: &'a Path,
+    trusted_sha256: &'a str,
+    sidecar_sha256: &'a str,
+    asset_digest: Option<&'a str>,
 }
 
 async fn download_archive(
@@ -243,7 +274,7 @@ async fn download_archive(
     Ok(())
 }
 
-fn verify_sha256(path: &Path, expected: &str) -> Result<(), String> {
+fn verify_sha256(path: &Path, expected: &str) -> Result<String, String> {
     let mut file = File::open(path).map_err(|e| format!("Gagal membuka accelerator: {e}"))?;
     let mut hasher = Sha256::new();
     let mut buffer = [0u8; 1024 * 1024];
@@ -262,7 +293,7 @@ fn verify_sha256(path: &Path, expected: &str) -> Result<(), String> {
             "Checksum accelerator tidak cocok. Expected {expected}, actual {actual}."
         ));
     }
-    Ok(())
+    Ok(actual)
 }
 
 fn extract_zip_safely(archive_path: &Path, destination: &Path) -> Result<(), String> {
@@ -343,19 +374,28 @@ fn finalize_blocking(
     app: &AppHandle,
     spec: &PackSpec,
     cancelled: &AtomicBool,
-    archive_path: &Path,
-    extract_path: &Path,
-    staging_path: &Path,
-    destination: &Path,
-    expected_sha256: &str,
+    paths: FinalizePaths<'_>,
 ) -> Result<(), String> {
-    verify_sha256(archive_path, expected_sha256)?;
+    let actual_sha256 = verify_sha256(paths.archive, paths.trusted_sha256)?;
+    if actual_sha256 != paths.sidecar_sha256 {
+        return Err(format!(
+            "Checksum sidecar accelerator tidak cocok dengan hash tepercaya. Expected {}, actual {}.",
+            paths.trusted_sha256, paths.sidecar_sha256
+        ));
+    }
+    if let Some(asset_digest) = paths.asset_digest {
+        if actual_sha256 != asset_digest {
+            return Err(format!(
+                "Digest GitHub accelerator tidak cocok. Expected {asset_digest}, actual {actual_sha256}."
+            ));
+        }
+    }
     if cancelled.load(Ordering::SeqCst) {
         return Err("Download accelerator dibatalkan.".into());
     }
     emit_progress(app, spec.backend, 88.0, 0, 0, None);
-    extract_zip_safely(archive_path, extract_path)?;
-    let cli = find_file(extract_path, executable_name())?.ok_or_else(|| {
+    extract_zip_safely(paths.archive, paths.extract)?;
+    let cli = find_file(paths.extract, executable_name())?.ok_or_else(|| {
         format!(
             "{} tidak ditemukan dalam accelerator package.",
             executable_name()
@@ -364,15 +404,17 @@ fn finalize_blocking(
     let release_dir = cli
         .parent()
         .ok_or_else(|| "Folder accelerator tidak valid.".to_string())?;
-    copy_tree(release_dir, staging_path)?;
-    let staging_cli = staging_path.join(executable_name());
+    copy_tree(release_dir, paths.staging)?;
+    let staging_cli = paths.staging.join(executable_name());
     #[cfg(unix)]
     mark_executable(&staging_cli)?;
     if !staging_cli.exists() {
         return Err("Accelerator gagal dipasang ke staging.".into());
     }
     emit_progress(app, spec.backend, 94.0, 0, 0, None);
-    let test = std::process::Command::new(&staging_cli)
+    let mut command = std::process::Command::new(&staging_cli);
+    crate::process::hide_console(&mut command);
+    let test = command
         .arg("--version")
         .output()
         .map_err(|e| format!("Accelerator tidak bisa dijalankan: {e}"))?;
@@ -387,12 +429,12 @@ fn finalize_blocking(
     if cancelled.load(Ordering::SeqCst) {
         return Err("Download accelerator dibatalkan.".into());
     }
-    if destination.exists() {
+    if paths.destination.exists() {
         return Err(
             "Accelerator baru saja dipasang oleh proses lain. Klik Re-check components.".into(),
         );
     }
-    fs::rename(staging_path, destination)
+    fs::rename(paths.staging, paths.destination)
         .map_err(|e| format!("Gagal mengaktifkan accelerator: {e}"))?;
     emit_progress(app, spec.backend, 100.0, 0, 0, None);
     Ok(())
@@ -407,6 +449,12 @@ pub async fn install(
         .into_iter()
         .find(|spec| spec.backend == backend)
         .ok_or_else(|| format!("Accelerator {backend} tidak didukung pada platform ini."))?;
+    let trusted_sha256 = spec.trusted_sha256.ok_or_else(|| {
+        format!(
+            "Accelerator {} belum memiliki checksum tepercaya dalam build aplikasi ini.",
+            spec.label
+        )
+    })?;
     let runtime_root = user_runtime_dir(&app)?;
     let destination = runtime_root.join(spec.backend);
     if destination.join(executable_name()).exists() {
@@ -414,7 +462,7 @@ pub async fn install(
     }
     let temp_root =
         std::env::temp_dir().join(format!("whispertube-accelerator-{}", uuid::Uuid::new_v4()));
-    let archive_path = temp_root.join(&spec.asset_name);
+    let archive_path = temp_root.join(spec.asset_name);
     let extract_path = temp_root.join("extract");
     let staging_path = runtime_root.join(format!(
         ".{}-staging-{}",
@@ -429,7 +477,7 @@ pub async fn install(
             .connect_timeout(Duration::from_secs(30))
             .build()
             .map_err(|e| format!("Gagal membuat HTTP client accelerator: {e}"))?;
-        let (url, expected_sha256) = release_asset(&client, spec.asset_name).await?;
+        let (url, expected_sha256, asset_digest) = release_asset(&client, spec.asset_name).await?;
         download_archive(&app, spec.backend, &client, &url, &archive_path, &cancelled).await?;
         let app_for_finalize = app.clone();
         let cancelled_for_finalize = cancelled.clone();
@@ -442,11 +490,15 @@ pub async fn install(
                 &app_for_finalize,
                 &spec,
                 &cancelled_for_finalize,
-                &archive_for_finalize,
-                &extract_for_finalize,
-                &staging_for_finalize,
-                &destination_for_finalize,
-                &expected_sha256,
+                FinalizePaths {
+                    archive: &archive_for_finalize,
+                    extract: &extract_for_finalize,
+                    staging: &staging_for_finalize,
+                    destination: &destination_for_finalize,
+                    trusted_sha256,
+                    sidecar_sha256: &expected_sha256,
+                    asset_digest: asset_digest.as_deref(),
+                },
             )
         })
         .await

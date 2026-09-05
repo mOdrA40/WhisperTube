@@ -4,6 +4,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
+    thread::JoinHandle,
     time::{Duration, Instant},
 };
 
@@ -16,6 +17,8 @@ use crate::{
     paths::{engine_path, runtime_dir, tool_path},
     types::SystemStatus,
 };
+
+const USAGE_SAMPLE_INTERVAL: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug)]
 pub struct GpuInfo {
@@ -33,6 +36,38 @@ pub struct UsageSnapshot {
 pub struct UsageMonitor {
     snapshot: Arc<Mutex<UsageSnapshot>>,
     stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+#[derive(Default)]
+struct CpuSampler {
+    #[cfg(target_os = "windows")]
+    previous: Option<CpuTimes>,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy)]
+struct CpuTimes {
+    idle: u64,
+    total: u64,
+}
+
+#[cfg(target_os = "windows")]
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct FileTime {
+    low: u32,
+    high: u32,
+}
+
+#[cfg(target_os = "windows")]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn GetSystemTimes(
+        idle_time: *mut FileTime,
+        kernel_time: *mut FileTime,
+        user_time: *mut FileTime,
+    ) -> i32;
 }
 
 impl UsageMonitor {
@@ -41,13 +76,15 @@ impl UsageMonitor {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_snapshot = Arc::clone(&snapshot);
         let thread_stop = Arc::clone(&stop);
-        std::thread::spawn(move || {
+        let thread = std::thread::spawn(move || {
+            let mut cpu_sampler = CpuSampler::default();
             while !thread_stop.load(Ordering::SeqCst) {
-                let current = sample_usage_uncached();
+                let current = sample_usage_uncached(&mut cpu_sampler);
                 if let Ok(mut cached) = thread_snapshot.lock() {
                     *cached = current;
                 }
-                for _ in 0..20 {
+                let started = Instant::now();
+                while started.elapsed() < USAGE_SAMPLE_INTERVAL {
                     if thread_stop.load(Ordering::SeqCst) {
                         return;
                     }
@@ -55,7 +92,11 @@ impl UsageMonitor {
                 }
             }
         });
-        Self { snapshot, stop }
+        Self {
+            snapshot,
+            stop,
+            thread: Some(thread),
+        }
     }
 
     pub fn snapshot(&self) -> UsageSnapshot {
@@ -69,6 +110,9 @@ impl UsageMonitor {
 impl Drop for UsageMonitor {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 
@@ -93,7 +137,9 @@ pub fn detect_nvidia() -> Option<GpuInfo> {
     }
 
     let output = candidates.into_iter().find_map(|program| {
-        Command::new(program)
+        let mut command = Command::new(program);
+        crate::process::hide_console(&mut command);
+        command
             .args([
                 "--query-gpu=name,memory.total,memory.free",
                 "--format=csv,noheader,nounits",
@@ -146,7 +192,9 @@ fn clean_gpu_name(value: &str) -> Option<String> {
 
 #[cfg(target_os = "windows")]
 fn detect_generic_gpu() -> Option<GpuInfo> {
-    let output = Command::new("powershell.exe")
+    let mut command = Command::new("powershell.exe");
+    crate::process::hide_console(&mut command);
+    let output = command
         .args([
             "-NoProfile",
             "-NonInteractive",
@@ -167,7 +215,9 @@ fn detect_generic_gpu() -> Option<GpuInfo> {
 
 #[cfg(target_os = "macos")]
 fn detect_generic_gpu() -> Option<GpuInfo> {
-    let name = Command::new("system_profiler")
+    let mut command = Command::new("system_profiler");
+    crate::process::hide_console(&mut command);
+    let name = command
         .args(["SPDisplaysDataType", "-detailLevel", "basic"])
         .output()
         .ok()
@@ -238,6 +288,7 @@ pub fn detect_gpu() -> Option<GpuInfo> {
 }
 
 fn command_output_with_timeout(mut command: Command, timeout: Duration) -> Option<Output> {
+    crate::process::hide_console(&mut command);
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -270,21 +321,41 @@ fn parse_percent(output: &[u8]) -> Option<f64> {
 }
 
 #[cfg(target_os = "windows")]
-fn sample_cpu_usage() -> Option<f64> {
-    let mut command = Command::new("powershell.exe");
-    command.args([
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        "Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average | Select-Object -ExpandProperty Average",
-    ]);
-    let output = command_output_with_timeout(command, Duration::from_secs(2))?;
-    parse_percent(&output.stdout)
+fn file_time_to_u64(value: FileTime) -> u64 {
+    (u64::from(value.high) << 32) | u64::from(value.low)
+}
+
+#[cfg(target_os = "windows")]
+fn read_cpu_times() -> Option<CpuTimes> {
+    let mut idle = FileTime::default();
+    let mut kernel = FileTime::default();
+    let mut user = FileTime::default();
+    let success = unsafe { GetSystemTimes(&mut idle, &mut kernel, &mut user) } != 0;
+    if !success {
+        return None;
+    }
+    Some(CpuTimes {
+        idle: file_time_to_u64(idle),
+        total: file_time_to_u64(kernel).saturating_add(file_time_to_u64(user)),
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn sample_cpu_usage(sampler: &mut CpuSampler) -> Option<f64> {
+    let current = read_cpu_times()?;
+    let previous = sampler.previous.replace(current)?;
+    let total_delta = current.total.saturating_sub(previous.total);
+    let idle_delta = current.idle.saturating_sub(previous.idle).min(total_delta);
+    if total_delta == 0 {
+        return None;
+    }
+    Some(((total_delta - idle_delta) as f64 / total_delta as f64 * 100.0).clamp(0.0, 100.0))
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-fn sample_cpu_usage() -> Option<f64> {
+fn sample_cpu_usage(_sampler: &mut CpuSampler) -> Option<f64> {
     let mut command = Command::new("ps");
+    crate::process::hide_console(&mut command);
     command.args(["-A", "-o", "%cpu="]);
     let output = command_output_with_timeout(command, Duration::from_secs(2))?;
     let total: f64 = String::from_utf8_lossy(&output.stdout)
@@ -298,7 +369,7 @@ fn sample_cpu_usage() -> Option<f64> {
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-fn sample_cpu_usage() -> Option<f64> {
+fn sample_cpu_usage(_sampler: &mut CpuSampler) -> Option<f64> {
     None
 }
 
@@ -309,6 +380,7 @@ fn sample_gpu_usage() -> Option<f64> {
     candidates.push(r"C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe".into());
     for program in candidates {
         let mut command = Command::new(program);
+        crate::process::hide_console(&mut command);
         command.args([
             "--query-gpu=utilization.gpu",
             "--format=csv,noheader,nounits",
@@ -321,6 +393,7 @@ fn sample_gpu_usage() -> Option<f64> {
     }
 
     let mut command = Command::new("powershell.exe");
+    crate::process::hide_console(&mut command);
     command.args([
         "-NoProfile",
         "-NonInteractive",
@@ -355,9 +428,9 @@ fn sample_gpu_usage() -> Option<f64> {
     None
 }
 
-fn sample_usage_uncached() -> UsageSnapshot {
+fn sample_usage_uncached(cpu_sampler: &mut CpuSampler) -> UsageSnapshot {
     UsageSnapshot {
-        cpu_usage_percent: sample_cpu_usage(),
+        cpu_usage_percent: sample_cpu_usage(cpu_sampler),
         gpu_usage_percent: sample_gpu_usage(),
     }
 }

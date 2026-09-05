@@ -2,13 +2,14 @@ use regex::Regex;
 use serde_json::Value;
 use std::{
     fs::{self, File},
-    io::{BufRead, BufReader, Read},
+    io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{ChildStderr, Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
+    thread::JoinHandle,
     time::Instant,
 };
 use tauri::{AppHandle, Emitter};
@@ -18,37 +19,51 @@ use crate::{
     browsers::cookie_args,
     history, models,
     paths::{engine_path, jobs_dir, model_path, tool_path},
+    process,
     sources::{js_runtime_args, validate_media_url},
     system::{detect_gpu, detect_nvidia, UsageMonitor},
     types::{ProgressPayload, Segment, TranscriptRequest, TranscriptResult},
 };
 
-fn emit_progress(
-    app: &AppHandle,
-    usage: &UsageMonitor,
-    stage: &str,
+struct JobContext<'a> {
+    app: &'a AppHandle,
+    usage: &'a UsageMonitor,
+    active_pid: &'a Arc<Mutex<Option<u32>>>,
+    cancelled: &'a Arc<AtomicBool>,
+}
+
+struct ProgressUpdate<'a> {
+    stage: &'a str,
     percent: f64,
-    message: impl Into<String>,
-    backend: Option<&str>,
+    message: String,
+    backend: Option<&'a str>,
     downloaded_bytes: Option<u64>,
     total_bytes: Option<u64>,
     network_bytes_per_second: Option<u64>,
-) {
-    let usage_snapshot = usage.snapshot();
-    let _ = app.emit(
-        "job-progress",
-        ProgressPayload {
-            stage: stage.to_string(),
-            percent: percent.clamp(0.0, 100.0),
-            message: message.into(),
-            backend: backend.map(str::to_string),
-            downloaded_bytes,
-            total_bytes,
-            network_bytes_per_second,
-            cpu_usage_percent: usage_snapshot.cpu_usage_percent,
-            gpu_usage_percent: usage_snapshot.gpu_usage_percent,
-        },
-    );
+}
+
+impl JobContext<'_> {
+    fn emit(&self, update: ProgressUpdate<'_>) {
+        let usage_snapshot = self.usage.snapshot();
+        let _ = self.app.emit(
+            "job-progress",
+            ProgressPayload {
+                stage: update.stage.to_string(),
+                percent: update.percent.clamp(0.0, 100.0),
+                message: update.message,
+                backend: update.backend.map(str::to_string),
+                downloaded_bytes: update.downloaded_bytes,
+                total_bytes: update.total_bytes,
+                network_bytes_per_second: update.network_bytes_per_second,
+                cpu_usage_percent: usage_snapshot.cpu_usage_percent,
+                gpu_usage_percent: usage_snapshot.gpu_usage_percent,
+            },
+        );
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
 }
 
 fn set_active_pid(active_pid: &Arc<Mutex<Option<u32>>>, pid: Option<u32>) {
@@ -81,30 +96,114 @@ fn normalize_output_utf8(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(test)]
-mod output_tests {
-    use super::normalize_utf8_bytes;
+struct JobDirectoryGuard {
+    path: PathBuf,
+    marker: PathBuf,
+    committed: bool,
+}
 
-    #[test]
-    fn replaces_invalid_utf8_without_panicking() {
-        assert_eq!(
-            normalize_utf8_bytes(b"text: \xAE misalnya"),
-            "text: � misalnya"
-        );
+impl JobDirectoryGuard {
+    fn create(path: PathBuf) -> Result<Self, String> {
+        fs::create_dir_all(&path).map_err(|e| format!("Gagal membuat job directory: {e}"))?;
+        let marker = path.join(".in-progress");
+        if let Err(error) = File::create(&marker) {
+            let _ = fs::remove_dir_all(&path);
+            return Err(format!("Gagal membuat marker job: {error}"));
+        }
+        Ok(Self {
+            path,
+            marker,
+            committed: false,
+        })
+    }
+
+    fn commit(mut self) {
+        self.committed = true;
+        let _ = fs::remove_file(&self.marker);
     }
 }
 
+impl Drop for JobDirectoryGuard {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
+fn write_file_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let temporary = path.with_extension("json.tmp");
+    let result = (|| -> Result<(), String> {
+        let mut file = File::create(&temporary)
+            .map_err(|e| format!("Gagal membuat file sementara result: {e}"))?;
+        file.write_all(bytes)
+            .map_err(|e| format!("Gagal menulis result sementara: {e}"))?;
+        file.sync_all()
+            .map_err(|e| format!("Gagal flush result sementara: {e}"))?;
+        drop(file);
+        fs::rename(&temporary, path).map_err(|e| format!("Gagal mengaktifkan result.json: {e}"))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn remove_file_if_present(path: &Path, label: &str) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("Gagal menghapus {label}: {error}")),
+    }
+}
+
+const MAX_CAPTURED_STDERR_BYTES: usize = 64 * 1024;
+
+fn capture_stderr(mut reader: impl Read) -> Result<String, String> {
+    let mut captured = Vec::with_capacity(MAX_CAPTURED_STDERR_BYTES);
+    let mut buffer = [0u8; 8 * 1024];
+    let mut truncated = false;
+    loop {
+        let read = match reader.read(&mut buffer) {
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(format!("Gagal membaca stderr process: {error}")),
+        };
+        if read == 0 {
+            break;
+        }
+        let remaining = MAX_CAPTURED_STDERR_BYTES.saturating_sub(captured.len());
+        let retained = remaining.min(read);
+        captured.extend_from_slice(&buffer[..retained]);
+        truncated |= retained < read;
+    }
+    let mut output = String::from_utf8_lossy(&captured).into_owned();
+    if truncated {
+        output.push_str("\n[stderr dipotong karena terlalu panjang]");
+    }
+    Ok(output)
+}
+
+fn drain_stderr(stderr: ChildStderr) -> JoinHandle<Result<String, String>> {
+    std::thread::spawn(move || capture_stderr(stderr))
+}
+
+fn join_stderr(handle: JoinHandle<Result<String, String>>) -> Result<String, String> {
+    handle
+        .join()
+        .map_err(|_| "Reader stderr process gagal.".to_string())?
+}
+
 fn run_download(
-    app: &AppHandle,
-    usage: &UsageMonitor,
+    context: &JobContext,
     request: &TranscriptRequest,
     job_dir: &Path,
-    active_pid: &Arc<Mutex<Option<u32>>>,
-    cancelled: &Arc<AtomicBool>,
 ) -> Result<PathBuf, String> {
-    let yt_dlp = tool_path(app, "yt-dlp")?;
+    let yt_dlp = tool_path(context.app, "yt-dlp")?;
     let template = job_dir.join("source.%(ext)s");
     let mut command = Command::new(yt_dlp);
+    process::hide_console(&mut command);
     let cookie_args = cookie_args(
         &request.browser,
         request.browser_profile.as_deref(),
@@ -141,53 +240,77 @@ fn run_download(
     let mut child = command
         .spawn()
         .map_err(|e| format!("Gagal menjalankan yt-dlp: {e}"))?;
-    set_active_pid(active_pid, Some(child.id()));
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or("Tidak bisa membaca progress yt-dlp")?;
+    let child_pid = child.id();
+    set_active_pid(context.active_pid, Some(child_pid));
+    if context.is_cancelled() {
+        process::terminate_child(&mut child);
+    }
+    let stderr = match child.stderr.take() {
+        Some(stderr) => stderr,
+        None => {
+            process::terminate_child(&mut child);
+            let _ = child.wait();
+            set_active_pid(context.active_pid, None);
+            return Err("Tidak bisa membaca error yt-dlp.".into());
+        }
+    };
+    let stderr_reader = drain_stderr(stderr);
+    let stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            process::terminate_child(&mut child);
+            let _ = child.wait();
+            set_active_pid(context.active_pid, None);
+            let _ = join_stderr(stderr_reader);
+            return Err("Tidak bisa membaca progress yt-dlp".into());
+        }
+    };
     let progress_re =
         Regex::new(r"WT_PROGRESS=\s*([0-9.]+)%\|([0-9]+|NA)\|([0-9]+|NA)\|([0-9]+|NA)").unwrap();
     let download_started_at = Instant::now();
-    for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-        if let Some(caps) = progress_re.captures(&line) {
-            let downloaded_bytes = caps.get(2).and_then(|value| value.as_str().parse().ok());
-            let total_bytes = caps
-                .get(3)
-                .and_then(|value| value.as_str().parse().ok())
-                .or_else(|| caps.get(4).and_then(|value| value.as_str().parse().ok()));
-            let network_bytes_per_second = downloaded_bytes.and_then(|downloaded| {
-                let elapsed = download_started_at.elapsed().as_secs_f64();
-                (elapsed > 0.0).then(|| (downloaded as f64 / elapsed) as u64)
-            });
-            if let Ok(percent) = caps[1].parse::<f64>() {
-                emit_progress(
-                    app,
-                    usage,
-                    "downloading",
-                    percent,
-                    "Mengunduh best available audio dari YouTube…",
-                    None,
-                    downloaded_bytes,
-                    total_bytes,
-                    network_bytes_per_second,
-                );
+    let stdout_result = (|| -> Result<(), String> {
+        for line in BufReader::new(stdout).lines() {
+            let line = line.map_err(|e| format!("Gagal membaca progress yt-dlp: {e}"))?;
+            if let Some(caps) = progress_re.captures(&line) {
+                let downloaded_bytes = caps.get(2).and_then(|value| value.as_str().parse().ok());
+                let total_bytes = caps
+                    .get(3)
+                    .and_then(|value| value.as_str().parse().ok())
+                    .or_else(|| caps.get(4).and_then(|value| value.as_str().parse().ok()));
+                let network_bytes_per_second = downloaded_bytes.and_then(|downloaded| {
+                    let elapsed = download_started_at.elapsed().as_secs_f64();
+                    (elapsed > 0.0).then(|| (downloaded as f64 / elapsed) as u64)
+                });
+                if let Ok(percent) = caps[1].parse::<f64>() {
+                    context.emit(ProgressUpdate {
+                        stage: "downloading",
+                        percent,
+                        message: "Mengunduh best available audio dari YouTube…".into(),
+                        backend: None,
+                        downloaded_bytes,
+                        total_bytes,
+                        network_bytes_per_second,
+                    });
+                }
+            }
+            if context.is_cancelled() {
+                break;
             }
         }
-        if cancelled.load(Ordering::SeqCst) {
-            break;
-        }
-    }
-    let mut stderr = String::new();
-    if let Some(mut error) = child.stderr.take() {
-        let _ = error.read_to_string(&mut stderr);
+        Ok(())
+    })();
+    if stdout_result.is_err() || context.is_cancelled() {
+        process::terminate_child(&mut child);
     }
     let status = child
         .wait()
-        .map_err(|e| format!("Gagal menunggu yt-dlp: {e}"))?;
-    set_active_pid(active_pid, None);
+        .map_err(|e| format!("Gagal menunggu yt-dlp: {e}"));
+    set_active_pid(context.active_pid, None);
+    let stderr = join_stderr(stderr_reader)?;
+    stdout_result?;
+    let status = status?;
     if !status.success() {
-        return Err(process_failed(cancelled, stderr, "Download"));
+        return Err(process_failed(context.cancelled, stderr, "Download"));
     }
 
     let mut candidates = fs::read_dir(job_dir)
@@ -213,16 +336,15 @@ fn run_download(
 }
 
 fn run_ffmpeg(
-    app: &AppHandle,
-    usage: &UsageMonitor,
+    context: &JobContext,
     input: &Path,
     output: &Path,
     duration: f64,
-    active_pid: &Arc<Mutex<Option<u32>>>,
-    cancelled: &Arc<AtomicBool>,
 ) -> Result<(), String> {
-    let ffmpeg = tool_path(app, "ffmpeg")?;
-    let mut child = Command::new(ffmpeg)
+    let ffmpeg = tool_path(context.app, "ffmpeg")?;
+    let mut command = Command::new(ffmpeg);
+    process::hide_console(&mut command);
+    let mut child = command
         .args([
             "-y",
             "-nostats",
@@ -240,47 +362,71 @@ fn run_ffmpeg(
         .stdin(Stdio::null())
         .spawn()
         .map_err(|e| format!("Gagal menjalankan FFmpeg: {e}"))?;
-    set_active_pid(active_pid, Some(child.id()));
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or("Tidak bisa membaca progress FFmpeg")?;
-    for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-        if let Some(raw) = line.strip_prefix("out_time_us=") {
-            if let Ok(microseconds) = raw.parse::<f64>() {
-                let seconds = microseconds / 1_000_000.0;
-                let percent = if duration > 0.0 {
-                    seconds / duration * 100.0
-                } else {
-                    0.0
-                };
-                emit_progress(
-                    app,
-                    usage,
-                    "converting",
-                    percent,
-                    "Konversi ke PCM 16 kHz mono…",
-                    None,
-                    None,
-                    None,
-                    None,
-                );
+    let child_pid = child.id();
+    set_active_pid(context.active_pid, Some(child_pid));
+    if context.is_cancelled() {
+        process::terminate_child(&mut child);
+    }
+    let stderr = match child.stderr.take() {
+        Some(stderr) => stderr,
+        None => {
+            process::terminate_child(&mut child);
+            let _ = child.wait();
+            set_active_pid(context.active_pid, None);
+            return Err("Tidak bisa membaca error FFmpeg.".into());
+        }
+    };
+    let stderr_reader = drain_stderr(stderr);
+    let stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            process::terminate_child(&mut child);
+            let _ = child.wait();
+            set_active_pid(context.active_pid, None);
+            let _ = join_stderr(stderr_reader);
+            return Err("Tidak bisa membaca progress FFmpeg".into());
+        }
+    };
+    let stdout_result = (|| -> Result<(), String> {
+        for line in BufReader::new(stdout).lines() {
+            let line = line.map_err(|e| format!("Gagal membaca progress FFmpeg: {e}"))?;
+            if let Some(raw) = line.strip_prefix("out_time_us=") {
+                if let Ok(microseconds) = raw.parse::<f64>() {
+                    let seconds = microseconds / 1_000_000.0;
+                    let percent = if duration > 0.0 {
+                        seconds / duration * 100.0
+                    } else {
+                        0.0
+                    };
+                    context.emit(ProgressUpdate {
+                        stage: "converting",
+                        percent,
+                        message: "Konversi ke PCM 16 kHz mono…".into(),
+                        backend: None,
+                        downloaded_bytes: None,
+                        total_bytes: None,
+                        network_bytes_per_second: None,
+                    });
+                }
+            }
+            if context.is_cancelled() {
+                break;
             }
         }
-        if cancelled.load(Ordering::SeqCst) {
-            break;
-        }
-    }
-    let mut stderr = String::new();
-    if let Some(mut error) = child.stderr.take() {
-        let _ = error.read_to_string(&mut stderr);
+        Ok(())
+    })();
+    if stdout_result.is_err() || context.is_cancelled() {
+        process::terminate_child(&mut child);
     }
     let status = child
         .wait()
-        .map_err(|e| format!("Gagal menunggu FFmpeg: {e}"))?;
-    set_active_pid(active_pid, None);
+        .map_err(|e| format!("Gagal menunggu FFmpeg: {e}"));
+    set_active_pid(context.active_pid, None);
+    let stderr = join_stderr(stderr_reader)?;
+    stdout_result?;
+    let status = status?;
     if !status.success() {
-        return Err(process_failed(cancelled, stderr, "FFmpeg"));
+        return Err(process_failed(context.cancelled, stderr, "FFmpeg"));
     }
     Ok(())
 }
@@ -357,18 +503,15 @@ fn choose_backend(app: &AppHandle, requested: &str) -> Result<(String, PathBuf),
 }
 
 fn run_whisper(
-    app: &AppHandle,
-    usage: &UsageMonitor,
+    context: &JobContext,
     wav: &Path,
     output_prefix: &Path,
     model: &Path,
     language: &str,
     backend: &str,
     model_id: &str,
-    active_pid: &Arc<Mutex<Option<u32>>>,
-    cancelled: &Arc<AtomicBool>,
 ) -> Result<String, String> {
-    let (resolved_backend, engine) = choose_backend(app, backend)?;
+    let (resolved_backend, engine) = choose_backend(context.app, backend)?;
     if resolved_backend == "cuda" {
         let gpu = detect_nvidia().ok_or_else(|| {
             "NVIDIA GPU tidak lagi terdeteksi. Pilih CPU atau periksa driver.".to_string()
@@ -380,6 +523,7 @@ fn run_whisper(
         .unwrap_or(4)
         .clamp(1, 12);
     let mut command = Command::new(engine);
+    process::hide_console(&mut command);
     command
         .args(["-m"])
         .arg(model)
@@ -398,44 +542,60 @@ fn run_whisper(
     let mut child = command
         .spawn()
         .map_err(|e| format!("Gagal menjalankan whisper.cpp: {e}"))?;
-    set_active_pid(active_pid, Some(child.id()));
-    let stderr_pipe = child
-        .stderr
-        .take()
-        .ok_or("Tidak bisa membaca progress whisper.cpp")?;
+    let child_pid = child.id();
+    set_active_pid(context.active_pid, Some(child_pid));
+    if context.is_cancelled() {
+        process::terminate_child(&mut child);
+    }
+    let stderr_pipe = match child.stderr.take() {
+        Some(stderr) => stderr,
+        None => {
+            process::terminate_child(&mut child);
+            let _ = child.wait();
+            set_active_pid(context.active_pid, None);
+            return Err("Tidak bisa membaca progress whisper.cpp".into());
+        }
+    };
     let progress_re = Regex::new(r"progress\s*=\s*([0-9]+)%").unwrap();
     let mut stderr_all = String::new();
-    for line in BufReader::new(stderr_pipe).lines().map_while(Result::ok) {
-        stderr_all.push_str(&line);
-        stderr_all.push('\n');
-        if let Some(caps) = progress_re.captures(&line) {
-            if let Ok(percent) = caps[1].parse::<f64>() {
-                emit_progress(
-                    app,
-                    usage,
-                    "transcribing",
-                    percent,
-                    format!(
-                        "Whisper sedang bekerja via {}…",
-                        resolved_backend.to_uppercase()
-                    ),
-                    Some(&resolved_backend),
-                    None,
-                    None,
-                    None,
-                );
+    let stderr_result = (|| -> Result<(), String> {
+        for line in BufReader::new(stderr_pipe).lines() {
+            let line = line.map_err(|e| format!("Gagal membaca progress whisper.cpp: {e}"))?;
+            stderr_all.push_str(&line);
+            stderr_all.push('\n');
+            if let Some(caps) = progress_re.captures(&line) {
+                if let Ok(percent) = caps[1].parse::<f64>() {
+                    context.emit(ProgressUpdate {
+                        stage: "transcribing",
+                        percent,
+                        message: format!(
+                            "Whisper sedang bekerja via {}…",
+                            resolved_backend.to_uppercase()
+                        ),
+                        backend: Some(&resolved_backend),
+                        downloaded_bytes: None,
+                        total_bytes: None,
+                        network_bytes_per_second: None,
+                    });
+                }
+            }
+            if context.is_cancelled() {
+                break;
             }
         }
-        if cancelled.load(Ordering::SeqCst) {
-            break;
-        }
+        Ok(())
+    })();
+    if stderr_result.is_err() || context.is_cancelled() {
+        process::terminate_child(&mut child);
     }
     let status = child
         .wait()
-        .map_err(|e| format!("Gagal menunggu whisper.cpp: {e}"))?;
-    set_active_pid(active_pid, None);
+        .map_err(|e| format!("Gagal menunggu whisper.cpp: {e}"));
+    set_active_pid(context.active_pid, None);
+    stderr_result?;
+    let status = status?;
     if !status.success() {
-        return Err(process_failed(cancelled, stderr_all, "Whisper"));
+        return Err(process_failed(context.cancelled, stderr_all, "Whisper"));
     }
     Ok(resolved_backend)
 }
@@ -489,7 +649,9 @@ pub fn pipeline(
     cancelled: Arc<AtomicBool>,
     request: TranscriptRequest,
 ) -> Result<TranscriptResult, String> {
-    cancelled.store(false, Ordering::SeqCst);
+    if cancelled.load(Ordering::SeqCst) {
+        return Err("Job dibatalkan.".into());
+    }
     validate_media_url(&request.url)?;
     let yt_dlp = tool_path(&app, "yt-dlp")?;
     let ffmpeg = tool_path(&app, "ffmpeg")?;
@@ -502,82 +664,64 @@ pub fn pipeline(
     }
     let jobs_dir = jobs_dir(&app)?;
     let job_dir = jobs_dir.join(Uuid::new_v4().to_string());
-    fs::create_dir_all(&job_dir).map_err(|e| format!("Gagal membuat job directory: {e}"))?;
+    let job_guard = JobDirectoryGuard::create(job_dir.clone())?;
     let usage_monitor = UsageMonitor::start();
+    let context = JobContext {
+        app: &app,
+        usage: &usage_monitor,
+        active_pid: &active_pid,
+        cancelled: &cancelled,
+    };
 
-    emit_progress(
-        &app,
-        &usage_monitor,
-        "downloading",
-        0.0,
-        "Menyiapkan download…",
-        None,
-        None,
-        None,
-        None,
-    );
-    let source = run_download(
-        &app,
-        &usage_monitor,
-        &request,
-        &job_dir,
-        &active_pid,
-        &cancelled,
-    )?;
-    if cancelled.load(Ordering::SeqCst) {
+    context.emit(ProgressUpdate {
+        stage: "downloading",
+        percent: 0.0,
+        message: "Menyiapkan download…".into(),
+        backend: None,
+        downloaded_bytes: None,
+        total_bytes: None,
+        network_bytes_per_second: None,
+    });
+    let source = run_download(&context, &request, &job_dir)?;
+    if context.is_cancelled() {
         return Err("Job dibatalkan.".into());
     }
 
     let wav = job_dir.join("audio.wav");
-    emit_progress(
-        &app,
-        &usage_monitor,
-        "converting",
-        0.0,
-        "Menormalisasi audio untuk Whisper…",
-        None,
-        None,
-        None,
-        None,
-    );
-    run_ffmpeg(
-        &app,
-        &usage_monitor,
-        &source,
-        &wav,
-        request.duration,
-        &active_pid,
-        &cancelled,
-    )?;
-    if cancelled.load(Ordering::SeqCst) {
+    context.emit(ProgressUpdate {
+        stage: "converting",
+        percent: 0.0,
+        message: "Menormalisasi audio untuk Whisper…".into(),
+        backend: None,
+        downloaded_bytes: None,
+        total_bytes: None,
+        network_bytes_per_second: None,
+    });
+    run_ffmpeg(&context, &source, &wav, request.duration)?;
+    if context.is_cancelled() {
         return Err("Job dibatalkan.".into());
     }
 
     let output_prefix = job_dir.join("transcript");
-    emit_progress(
-        &app,
-        &usage_monitor,
-        "transcribing",
-        0.0,
-        "Memuat model Whisper…",
-        None,
-        None,
-        None,
-        None,
-    );
+    context.emit(ProgressUpdate {
+        stage: "transcribing",
+        percent: 0.0,
+        message: "Memuat model Whisper…".into(),
+        backend: None,
+        downloaded_bytes: None,
+        total_bytes: None,
+        network_bytes_per_second: None,
+    });
     let resolved_backend = run_whisper(
-        &app,
-        &usage_monitor,
+        &context,
         &wav,
         &output_prefix,
         &model,
         &request.language,
         &request.backend,
         &request.model_id,
-        &active_pid,
-        &cancelled,
     )?;
-    if cancelled.load(Ordering::SeqCst) {
+    if context.is_cancelled() {
         return Err("Job dibatalkan.".into());
     }
 
@@ -585,35 +729,30 @@ pub fn pipeline(
         normalize_output_utf8(&output_prefix.with_extension(extension))?;
     }
 
-    emit_progress(
-        &app,
-        &usage_monitor,
-        "finalizing",
-        92.0,
-        "Merapikan transcript dan menyimpan history…",
-        Some(&resolved_backend),
-        None,
-        None,
-        None,
-    );
+    context.emit(ProgressUpdate {
+        stage: "finalizing",
+        percent: 92.0,
+        message: "Merapikan transcript dan menyimpan history…".into(),
+        backend: Some(&resolved_backend),
+        downloaded_bytes: None,
+        total_bytes: None,
+        network_bytes_per_second: None,
+    });
     let json_path = output_prefix.with_extension("json");
     let txt_path = output_prefix.with_extension("txt");
     let srt_path = output_prefix.with_extension("srt");
     let vtt_path = output_prefix.with_extension("vtt");
     let (language, segments, text) = parse_whisper_result(&json_path)?;
     let result_store_path = job_dir.join("result.json");
-    let history_id = history::save_history_record(
-        &app,
-        &request,
-        &language,
-        &resolved_backend,
-        &result_store_path,
-    )?;
-    let result = TranscriptResult {
-        history_id,
+    if !request.keep_audio {
+        remove_file_if_present(&source, "audio sumber")?;
+        remove_file_if_present(&wav, "WAV hasil konversi")?;
+    }
+    let mut result = TranscriptResult {
+        history_id: 0,
         title: request.title.clone(),
         channel: request.channel.clone(),
-        language,
+        language: language.clone(),
         duration: request.duration,
         model: request.model_id.clone(),
         backend: resolved_backend.clone(),
@@ -622,27 +761,72 @@ pub fn pipeline(
         txt_path: txt_path.to_string_lossy().to_string(),
         srt_path: srt_path.to_string_lossy().to_string(),
         vtt_path: vtt_path.to_string_lossy().to_string(),
+        audio_path: request
+            .keep_audio
+            .then(|| wav.to_string_lossy().to_string()),
     };
-    fs::write(
-        &result_store_path,
-        serde_json::to_vec_pretty(&result).map_err(|e| format!("Gagal serialize hasil: {e}"))?,
-    )
-    .map_err(|e| format!("Gagal menyimpan result.json: {e}"))?;
-
-    if !request.keep_audio {
-        let _ = fs::remove_file(&source);
-        let _ = fs::remove_file(&wav);
-    }
-    emit_progress(
+    let history_id = history::save_history_record_with(
         &app,
-        &usage_monitor,
-        "done",
-        100.0,
-        "Transkripsi selesai.",
-        Some(&resolved_backend),
-        None,
-        None,
-        None,
-    );
+        &request,
+        &language,
+        &resolved_backend,
+        &result_store_path,
+        |history_id| {
+            result.history_id = history_id;
+            let bytes = serde_json::to_vec_pretty(&result)
+                .map_err(|e| format!("Gagal serialize hasil: {e}"))?;
+            write_file_atomically(&result_store_path, &bytes)
+        },
+    )?;
+
+    context.emit(ProgressUpdate {
+        stage: "done",
+        percent: 100.0,
+        message: "Transkripsi selesai.".into(),
+        backend: Some(&resolved_backend),
+        downloaded_bytes: None,
+        total_bytes: None,
+        network_bytes_per_second: None,
+    });
+    result.history_id = history_id;
+    job_guard.commit();
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        capture_stderr, normalize_utf8_bytes, JobDirectoryGuard, MAX_CAPTURED_STDERR_BYTES,
+    };
+    use std::io::Cursor;
+    use uuid::Uuid;
+
+    #[test]
+    fn replaces_invalid_utf8_without_panicking() {
+        assert_eq!(
+            normalize_utf8_bytes(b"text: \xAE misalnya"),
+            "text: � misalnya"
+        );
+    }
+
+    #[test]
+    fn job_directory_is_removed_when_pipeline_does_not_commit() {
+        let path = std::env::temp_dir().join(format!("whispertube-job-test-{}", Uuid::new_v4()));
+        {
+            let guard = JobDirectoryGuard::create(path.clone()).unwrap();
+            assert!(path.join(".in-progress").exists());
+            drop(guard);
+        }
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn stderr_is_fully_drained_while_capture_is_bounded() {
+        let bytes = vec![b'x'; MAX_CAPTURED_STDERR_BYTES + 4096];
+        let mut reader = Cursor::new(bytes.clone());
+        let output = capture_stderr(&mut reader).unwrap();
+        assert_eq!(reader.position(), bytes.len() as u64);
+        assert!(output.starts_with(&"x".repeat(MAX_CAPTURED_STDERR_BYTES)));
+        assert!(output.ends_with("[stderr dipotong karena terlalu panjang]"));
+    }
 }

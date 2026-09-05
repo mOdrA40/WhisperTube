@@ -27,6 +27,32 @@ const CUDA_ENGINE_VERSION: &str = "v1.9.1";
 const CUDA_ENGINE_BUILD: &str = "12.4.0";
 const CUDA_ENGINE_SHA256: &str = "106a2030eff8998e4ef320fe72e263a78449e9040386ee27c41ea80b001b601b";
 
+struct TemporaryFileGuard {
+    path: PathBuf,
+    committed: bool,
+}
+
+impl TemporaryFileGuard {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            committed: false,
+        }
+    }
+
+    fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for TemporaryFileGuard {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
 fn cuda_engine_url() -> String {
     format!(
         "https://github.com/ggml-org/whisper.cpp/releases/download/{CUDA_ENGINE_VERSION}/whisper-cublas-{CUDA_ENGINE_BUILD}-bin-x64.zip"
@@ -175,10 +201,16 @@ pub async fn download_model(
 ) -> Result<(), String> {
     let spec = model_spec(&model_id)?;
     let dest = model_path(&app, &model_id)?;
+    let temp = dest.with_extension("bin.download");
+    let temp_guard = TemporaryFileGuard::new(temp.clone());
+    if temp.exists() {
+        tokio::fs::remove_file(&temp)
+            .await
+            .map_err(|e| format!("Gagal membersihkan download model lama: {e}"))?;
+    }
     if dest.exists() {
         return Ok(());
     }
-    let temp = dest.with_extension("bin.download");
     let url = format!(
         "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-{}.bin?download=true",
         spec.id
@@ -209,7 +241,6 @@ pub async fn download_model(
     emit_model_progress(&app, spec.id, 0, total, None);
     loop {
         if cancelled.load(Ordering::SeqCst) {
-            let _ = tokio::fs::remove_file(&temp).await;
             return Err("Download model dibatalkan.".into());
         }
         let chunk = tokio::time::timeout(Duration::from_secs(30), response.chunk())
@@ -220,7 +251,6 @@ pub async fn download_model(
             break;
         };
         if cancelled.load(Ordering::SeqCst) {
-            let _ = tokio::fs::remove_file(&temp).await;
             return Err("Download model dibatalkan.".into());
         }
         file.write_all(&chunk)
@@ -241,12 +271,12 @@ pub async fn download_model(
         .await
         .map_err(|e| format!("Verifikasi model gagal: {e}"))??;
     if cancelled.load(Ordering::SeqCst) {
-        let _ = tokio::fs::remove_file(&temp).await;
         return Err("Download model dibatalkan.".into());
     }
     tokio::fs::rename(&temp, &dest)
         .await
         .map_err(|e| format!("Gagal memasang model: {e}"))?;
+    temp_guard.commit();
     emit_model_progress(&app, spec.id, total, total, None);
     Ok(())
 }
@@ -445,7 +475,9 @@ fn finalize_cuda_engine_blocking(
         return Err("CUDA engine gagal dipasang ke staging.".into());
     }
     emit_cuda_progress(app, 94.0, 0, 0, None);
-    let test = Command::new(&staging_cli)
+    let mut command = Command::new(&staging_cli);
+    crate::process::hide_console(&mut command);
+    let test = command
         .arg("--version")
         .output()
         .map_err(|e| format!("CUDA engine tidak bisa dijalankan: {e}"))?;
@@ -528,7 +560,9 @@ pub fn delete_model(app: &AppHandle, model_id: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_vram_available, recommended_model_id};
+    use super::{ensure_vram_available, recommended_model_id, TemporaryFileGuard};
+    use std::{fs, path::PathBuf};
+    use uuid::Uuid;
 
     #[test]
     fn recommends_model_from_available_vram() {
@@ -542,5 +576,16 @@ mod tests {
         let error = ensure_vram_available("large-v3-q5_0", Some(6144)).unwrap_err();
         assert!(error.contains("Accurate"));
         assert!(ensure_vram_available("large-v3-q5_0", Some(7168)).is_ok());
+    }
+
+    #[test]
+    fn temporary_model_file_is_removed_when_not_committed() {
+        let path =
+            std::env::temp_dir().join(format!("whispertube-model-test-{}.bin", Uuid::new_v4()));
+        fs::write(&path, b"partial").unwrap();
+        {
+            let _guard = TemporaryFileGuard::new(PathBuf::from(&path));
+        }
+        assert!(!path.exists());
     }
 }

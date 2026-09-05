@@ -34,6 +34,7 @@ export function CustomSelect({
   const containerRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
   const selectId = useId();
+  const listboxId = `${selectId}-listbox`;
 
   const selectedOption = options.find((opt) => opt.value === value);
 
@@ -143,11 +144,18 @@ export function CustomSelect({
     >
       <button
         type="button"
+        role="combobox"
         id={selectId}
         className="custom-select-trigger"
         onClick={() => !disabled && setIsOpen((prev) => !prev)}
         aria-haspopup="listbox"
         aria-expanded={isOpen}
+        aria-controls={listboxId}
+        aria-activedescendant={
+          isOpen && highlightedIndex >= 0
+            ? `${listboxId}-option-${highlightedIndex}`
+            : undefined
+        }
         disabled={disabled}
       >
         <span className="trigger-content">
@@ -166,7 +174,13 @@ export function CustomSelect({
 
       {isOpen && (
         <div className="custom-select-popover">
-          <ul ref={listRef} className="custom-select-options" role="listbox" tabIndex={-1}>
+          <ul
+            ref={listRef}
+            id={listboxId}
+            className="custom-select-options"
+            role="listbox"
+            tabIndex={-1}
+          >
             {options.map((option, index) => {
               const isSelected = option.value === value;
               const isHighlighted = index === highlightedIndex;
@@ -174,6 +188,7 @@ export function CustomSelect({
               return (
                 <li
                   key={option.value}
+                  id={`${listboxId}-option-${index}`}
                   role="option"
                   aria-selected={isSelected}
                   aria-disabled={option.disabled}

@@ -56,6 +56,11 @@ DONE
 
 Any external stage can terminate in `FAILED` or `CANCELLED`.
 
+The backend reserves the job lifecycle before spawning the blocking pipeline:
+`Idle → Starting → Running → Cancelling`. A guard releases the reservation on
+every return path, so a process PID is only used for process termination, not
+as the job's sole concurrency lock.
+
 `job-progress` carries stage progress, transferred bytes, network speed, and
 best-effort CPU/GPU utilization samples. GPU utilization is shown when the
 platform exposes a supported metric; unavailable metrics are reported as such
@@ -72,6 +77,7 @@ models/
   ggml-large-v3-q5_0.bin
 jobs/
   <uuid>/
+    audio.wav             # only when Keep processed audio is enabled
     transcript.json
     transcript.txt
     transcript.srt
@@ -81,12 +87,24 @@ whispertube.db
 ```
 
 Downloaded source audio and converted WAV are removed by default after a successful job.
-History deletion validates the job directory under `app-local-data/jobs` and removes
-the complete job folder, including transcript exports, before deleting its SQLite row.
+History creation writes `result.json` atomically inside the same logical operation
+as the SQLite insert, and the transaction commits only after the result file is
+ready. History deletion first moves job directories to a same-filesystem staging
+name, commits the SQLite deletion, then removes the staged folders; failed
+database operations attempt to restore the original directories.
+
+Each new job has an `.in-progress` marker. A failed or cancelled pipeline guard
+removes its folder, while startup removes stale orphan/staging folders after a
+24-hour grace period without touching rows that still reference a valid result.
+When `Keep processed audio` is enabled, the processed WAV path is returned and
+the UI can reveal it in the system file manager.
 
 ## Runtime packs
 
 Development runtime binaries live under `src-tauri/runtime/<platform>` so Tauri can bundle them as resources.
+The Windows bootstrap pins yt-dlp 2026.08.19, FFmpeg 9.0.1, and whisper.cpp
+v1.9.1; archives are downloaded to unique temporary staging paths, checksum
+verified, self-tested, and activated only after validation succeeds.
 
 Windows:
 
@@ -123,12 +141,19 @@ architecture, and detected GPU before they reach the UI or installer. Vulkan is
 kept as an explicit alternative even when CUDA is available, so NVIDIA users
 can compare backends or use Vulkan when needed.
 
+Windows CPU telemetry uses the native `GetSystemTimes` API. GPU telemetry is
+sampled every two seconds to avoid making PowerShell part of the CPU measurement
+loop. External child processes use hidden-console creation flags on Windows.
+
 The repository also contains `.github/workflows/build-accelerator-packs.yml`.
 It builds Metal packs for macOS Intel/Apple Silicon and Vulkan packs for Linux
 and Windows x64 from a pinned official whisper.cpp tag, then publishes ZIP
 assets and SHA-256 sidecars on an `accelerators-v*` GitHub Release. The source
 repository may remain private during development; those release assets must be
-public before a shipped EXE can download them without a GitHub credential.
+public before a shipped EXE can download them without a GitHub credential. A
+pack remains non-downloadable until its final SHA-256 is copied into the
+application catalog and a new application build is produced; the release
+sidecar and GitHub digest are only secondary consistency checks.
 ROCm and OpenVINO remain separate targets because they require specialized
 toolchains or hardware runners.
 

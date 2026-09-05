@@ -26,7 +26,8 @@ $assetNames = @(
 $hashes = @{}
 foreach ($assetName in $assetNames) {
     $asset = @($release.assets) | Where-Object { $_.name -eq $assetName } | Select-Object -First 1
-    $sidecar = @($release.assets) | Where-Object { $_.name -eq "$assetName.sha256" } | Select-Object -First 1
+    $checksumName = "{0}.sha256" -f [System.IO.Path]::GetFileNameWithoutExtension($assetName)
+    $sidecar = @($release.assets) | Where-Object { $_.name -eq $checksumName } | Select-Object -First 1
     if (-not $asset -or -not $sidecar) {
         throw "Asset atau sidecar checksum belum ada untuk $assetName."
     }

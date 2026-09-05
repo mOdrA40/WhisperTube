@@ -29,16 +29,20 @@ const RELEASE_TAG: &str = "accelerators-v0.1.0";
 // hashes in the application source prevents a release-side change from being
 // silently accepted by a shipped build.
 #[allow(dead_code)]
-const METAL_MACOS_ARM64_SHA256: Option<&str> = None;
+const METAL_MACOS_ARM64_SHA256: Option<&str> =
+    Some("a48c3a9b7243f0c9707c2d24aa04c8f7ac17bf7af52dd6847af608014f5070d5");
 
 #[allow(dead_code)]
-const METAL_MACOS_X64_SHA256: Option<&str> = None;
+const METAL_MACOS_X64_SHA256: Option<&str> =
+    Some("11c527f865f2077a1579b17362c9dac177f02e62943177eb5c4076a29c3bd08f");
 
 #[allow(dead_code)]
-const VULKAN_WINDOWS_X64_SHA256: Option<&str> = None;
+const VULKAN_WINDOWS_X64_SHA256: Option<&str> =
+    Some("a8f8e2d0808c48154ab113fe456695218fbb2e2d74e1be5444b340f176f869e8");
 
 #[allow(dead_code)]
-const VULKAN_LINUX_X64_SHA256: Option<&str> = None;
+const VULKAN_LINUX_X64_SHA256: Option<&str> =
+    Some("98f291d42b1e02ea71f9cc6acfa53d5ec5207a9bb67fcd34beb251682f59c07d");
 
 struct PackSpec {
     backend: &'static str,
@@ -169,7 +173,10 @@ async fn release_asset(
         .get("assets")
         .and_then(Value::as_array)
         .ok_or_else(|| "Manifest accelerator tidak memiliki daftar asset.".to_string())?;
-    let checksum_name = format!("{asset_name}.sha256");
+    let checksum_name = format!(
+        "{}.sha256",
+        asset_name.strip_suffix(".zip").unwrap_or(asset_name)
+    );
     let asset = assets
         .iter()
         .find(|asset| asset.get("name").and_then(Value::as_str) == Some(asset_name))
@@ -552,5 +559,15 @@ mod tests {
         } else {
             assert!(specs.is_empty());
         }
+    }
+
+    #[test]
+    fn checksum_asset_drops_zip_suffix() {
+        let asset_name = "whispertube-windows-x64-vulkan.zip";
+        let checksum_name = format!(
+            "{}.sha256",
+            asset_name.strip_suffix(".zip").unwrap_or(asset_name)
+        );
+        assert_eq!(checksum_name, "whispertube-windows-x64-vulkan.sha256");
     }
 }

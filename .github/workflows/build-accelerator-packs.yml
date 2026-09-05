@@ -119,6 +119,7 @@ jobs:
           name: ${{ matrix.package }}
           path: ${{ runner.temp }}/packages/*
           if-no-files-found: error
+          retention-days: 7
 
   release:
     name: Publish accelerator release

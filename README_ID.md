@@ -19,7 +19,7 @@ Platform yang dicakup antara lain YouTube, TikTok, X/Twitter, Facebook, Instagra
 - Tempel URL video yang didukung dan periksa metadata sebelum download.
 - Video publik dan video yang memerlukan login melalui import `cookies.txt` format Netscape.
 - Tidak meminta email atau password Google dan tidak menyalin cookies ke database aplikasi.
-- Browser yang kompatibel dideteksi otomatis: Chrome, Edge, Firefox, Brave, Chromium, Opera, Vivaldi, Whale, serta Safari di macOS. Settings hanya menampilkan browser/profil yang ada di perangkat.
+- Akses `cookies.txt` format Netscape dari berbagai keluarga browser; di macOS, Settings juga dapat mencoba session Safari yang terdeteksi secara langsung.
 - Download `bestaudio/best`, normalisasi FFmpeg ke WAV PCM signed 16-bit mono 16 kHz, lalu inferensi lokal whisper.cpp.
 - Model: Fast (`base`, ~142 MB), Balanced (`large-v3-turbo-q5_0`, ~547 MB), dan Accurate (`large-v3-q5_0`, ~1,1 GB).
 - Verifikasi checksum model, progress, cancel, timestamp, export TXT/SRT/VTT, dan history SQLite lokal.
@@ -70,11 +70,11 @@ Video source → yt-dlp → FFmpeg WAV 16 kHz mono → whisper.cpp
 
 ## Video yang memerlukan login
 
-Login ke platform terkait di browser yang didukung. Di WhisperTube buka **Pengaturan → Akses sumber**, lalu pilih browser dan profil yang memiliki akses. Kembali ke halaman Transkripsi dan klik **Periksa video**.
+Login ke platform terkait terlebih dahulu. Di WhisperTube buka **Pengaturan → Akses sumber**, lalu import file `cookies.txt` format Netscape yang masih baru. Di macOS, session Safari yang terdeteksi juga dapat dicoba secara langsung. Kembali ke halaman Transkripsi dan klik **Periksa video**.
 
 `yt-dlp` hanya membaca sesi browser pilihan saat job berjalan. Dukungan video yang memerlukan login dapat berubah ketika platform mengubah extractor, login flow, atau sistem anti-bot.
 
-Di Windows, enkripsi browser berbasis Chromium dapat membuat yt-dlp gagal membuka profile Brave/Chrome/Edge. Jika terjadi, gunakan **Pengaturan → File cookies manual** dengan export `cookies.txt` format Netscape. File hanya digunakan oleh proses WhisperTube lokal.
+Di Windows, enkripsi browser berbasis Chromium dapat membuat yt-dlp gagal membuka profile Brave/Chrome/Edge, sehingga file cookies manual adalah jalur utama. Di macOS, penyimpanan cookies Safari mungkin memerlukan izin dari macOS. File/session hanya digunakan oleh proses WhisperTube lokal.
 
 ## Build installer
 

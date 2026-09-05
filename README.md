@@ -19,7 +19,7 @@ Supported source families include YouTube, TikTok, X/Twitter, Facebook, Instagra
 - Paste a supported video URL and inspect metadata before downloading.
 - Public videos.
 - Login-protected videos through an imported Netscape `cookies.txt` file. The app never asks for site passwords.
-- Browser discovery for Chrome, Edge, Firefox, Brave, Chromium, Opera, Vivaldi, Whale, and Safari on macOS. Settings only shows browsers and profiles detected on the current device.
+- Manual Netscape `cookies.txt` access works across browser families; on macOS, Settings can also try the detected Safari session directly.
 - Download `bestaudio/best`; the original download is not converted to MP3 first.
 - FFmpeg normalization to signed 16-bit PCM WAV, mono, 16 kHz.
 - Local whisper.cpp inference.
@@ -157,11 +157,11 @@ JSON + TXT + SRT + VTT + SQLite history
 
 ## Login-protected videos
 
-Log in to the relevant platform in a supported browser first. In WhisperTube, open **Settings → Source access** and choose the detected browser and profile containing the required access. Then return to Transcribe and select **Check video**.
+Log in to the relevant platform first. In WhisperTube, open **Settings → Source access** and import a fresh Netscape-format `cookies.txt` file. On macOS, a detected Safari session can also be tried directly. Then return to Transcribe and select **Check video**.
 
 WhisperTube does not request site credentials and does not copy cookies into its database. `yt-dlp` reads the imported local cookies file only while the process runs. Extractor, authentication, anti-bot, and platform changes can still affect protected downloads; keeping `yt-dlp` current is the first line of defense.
 
-On Windows, Chromium-based browser encryption can prevent yt-dlp from decrypting a Brave/Chrome/Edge profile. In that case, use **Settings → Manual cookies file** with a local Netscape-format export. The file is used only by the local WhisperTube process.
+On Windows, Chromium-based browser encryption can prevent yt-dlp from decrypting a Brave/Chrome/Edge profile, so the manual cookies file is the primary path. On macOS, Safari cookie storage may require permission from macOS. The file/session is used only by the local WhisperTube process.
 
 ## Build a Windows installer
 
@@ -219,7 +219,7 @@ Tauri selects the platform-specific app-local-data directory. WhisperTube stores
 - The frontend has no arbitrary shell execution capability.
 - External processes are launched by Rust with argument arrays, not concatenated shell commands.
 - Known model and accelerator downloads are verified with checksums before activation.
-- Browser discovery reads local profile metadata; cookies are read by yt-dlp only for the selected job.
+- Browser discovery reads local profile metadata; imported cookies and the optional Safari session are read by yt-dlp only for the selected job.
 - Only one transcription job and one runtime installer can run at a time.
 - Cancellation terminates the active process tree on Windows with `taskkill /T /F`.
 
@@ -227,7 +227,7 @@ Tauri selects the platform-specific app-local-data directory. WhisperTube stores
 
 1. The pinned CUDA bootstrap currently targets Windows x64 with a detected NVIDIA driver.
 2. Metal and Vulkan packs require matching public GitHub Release assets and are not bundled into the base source setup.
-3. Browser support depends on yt-dlp's current cookie extraction support and the browser's OS security behavior.
+3. Browser support depends on yt-dlp's current cookie extraction support and the browser's OS security behavior; direct Safari access is macOS-only and may require permission.
 4. Login-protected downloads can break when a platform changes authentication, anti-bot, or extractor requirements.
 5. There are no playlist/batch jobs, speaker diarization, word-level subtitle editing, or runtime auto-updates yet.
 6. macOS/Linux bootstrap and installer QA are not as production-ready as the Windows path in v0.1.

@@ -25,10 +25,11 @@ Then rerun the setup script.
 
 ## Video public works but Member-only fails
 
-1. Confirm the selected browser is logged into the Google account that owns the membership.
-2. Try Firefox if Chromium cookie extraction is blocked by a browser/OS security change.
-3. Run the setup script again to refresh yt-dlp to the newest release.
-4. YouTube may have changed PO Token/auth requirements; capture the exact yt-dlp error shown by WhisperTube.
+1. Confirm the imported `cookies.txt` came from the Google account that owns the membership.
+2. On macOS, try the detected Safari session; macOS may require permission to read Safari cookies.
+3. Try Firefox if Chromium cookie extraction or export is blocked by a browser/OS security change.
+4. Run the setup script again to refresh yt-dlp to the newest release.
+5. YouTube may have changed PO Token/auth requirements; capture the exact yt-dlp error shown by WhisperTube.
 
 ## `CUDA selected but NVIDIA GPU/driver not detected`
 

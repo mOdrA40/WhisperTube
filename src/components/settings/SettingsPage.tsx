@@ -1,4 +1,4 @@
-import { Check, CircleStop, Copy, Cpu, Download, ExternalLink, FileKey, LockKeyhole, LoaderCircle, MonitorCog, RotateCcw, Trash2 } from "lucide-react";
+import { Check, CircleStop, Copy, Cpu, Download, ExternalLink, FileKey, Globe2, LockKeyhole, LoaderCircle, MonitorCog, RotateCcw, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { formatBytes, formatMemory } from "../../lib/format";
 import { getAcceleratorCopy, getModelCopy, uiLanguageOptions, useI18n } from "../../i18n";
@@ -11,6 +11,7 @@ const CHROMIUM_BROWSER_IDS = new Set(["chrome", "brave", "edge", "chromium", "op
 
 type SettingsPageProps = {
   cookiesPath: string;
+  usingSafariSession: boolean;
   browsers: BrowserInfo[];
   system: SystemStatus | null;
   models: ModelInfo[];
@@ -24,6 +25,7 @@ type SettingsPageProps = {
   networkSpeedBytesPerSecond: number | null;
   onSelectCookiesFile: () => void;
   onClearCookiesFile: () => void;
+  onUseSafariSession: () => void;
   onOpenUrl: (url: string) => void;
   onDownloadModel: (id: string) => void;
   onCancelModel: () => void;
@@ -37,6 +39,7 @@ type SettingsPageProps = {
 
 export function SettingsPage({
   cookiesPath,
+  usingSafariSession,
   browsers,
   system,
   models,
@@ -50,6 +53,7 @@ export function SettingsPage({
   networkSpeedBytesPerSecond,
   onSelectCookiesFile,
   onClearCookiesFile,
+  onUseSafariSession,
   onOpenUrl,
   onDownloadModel,
   onCancelModel,
@@ -71,6 +75,7 @@ export function SettingsPage({
   }));
   const chromiumDetected = browsers.some((browser) => CHROMIUM_BROWSER_IDS.has(browser.id));
   const firefoxDetected = browsers.some((browser) => browser.id === "firefox");
+  const safariDetected = browsers.some((browser) => browser.id === "safari");
   const showChromiumLink = chromiumDetected || !firefoxDetected;
   const showFirefoxLink = firefoxDetected || !chromiumDetected;
 
@@ -137,6 +142,27 @@ export function SettingsPage({
           </button>
         )}
         <p className="settings-note">{t("settings.cookiesFileNote")}</p>
+
+        {safariDetected && (
+          <div className="info-box">
+            <Globe2 size={16} />
+            <span>
+              {usingSafariSession
+                ? t("settings.safariSessionActive")
+                : t("settings.safariSessionNote")}
+            </span>
+            <button
+              type="button"
+              className="secondary-button compact"
+              onClick={usingSafariSession ? onSelectCookiesFile : onUseSafariSession}
+              disabled={busy}
+            >
+              {usingSafariSession
+                ? t("settings.useCookiesFileInstead")
+                : t("settings.useSafariSession")}
+            </button>
+          </div>
+        )}
 
         <label className="field-label">{t("settings.interfaceLanguage")}</label>
         <CustomSelect

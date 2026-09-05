@@ -83,6 +83,7 @@ export default function App() {
       {app.tab === "settings" && (
         <SettingsPage
           cookiesPath={app.cookiesPath}
+          usingSafariSession={app.usingSafariSession}
           browsers={app.browsers}
           system={app.system}
           models={app.models}
@@ -96,6 +97,7 @@ export default function App() {
           networkSpeedBytesPerSecond={app.networkSpeedBytesPerSecond}
           onSelectCookiesFile={app.selectCookiesFile}
           onClearCookiesFile={app.clearCookiesFile}
+          onUseSafariSession={app.useSafariSession}
           onOpenUrl={(url) => openExternalUrl(url).catch((cause) => app.setError(friendlyError(cause)))}
           onDownloadModel={app.downloadModel}
           onCancelModel={app.cancelJob}

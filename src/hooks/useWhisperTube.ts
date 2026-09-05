@@ -25,6 +25,7 @@ import { getAcceleratorCopy, getModelCopy, useI18n } from "../i18n";
 import type {
   AppTab,
   BackendChoice,
+  BrowserChoice,
   BrowserInfo,
   HistoryItem,
   ModelInfo,
@@ -48,6 +49,7 @@ const initialProgress: ProgressPayload = {
 };
 
 const COOKIES_PATH_STORAGE_KEY = "whispertube.cookiesPath";
+const ACCESS_BROWSER_STORAGE_KEY = "whispertube.accessBrowser";
 
 function readStoredCookiesPath() {
   if (typeof window === "undefined") return "";
@@ -72,11 +74,30 @@ function persistCookiesPath(path: string) {
   }
 }
 
+function readStoredBrowser(): BrowserChoice {
+  if (typeof window === "undefined") return "none";
+  try {
+    return window.localStorage.getItem(ACCESS_BROWSER_STORAGE_KEY) === "safari" ? "safari" : "none";
+  } catch {
+    return "none";
+  }
+}
+
+function persistBrowser(browser: BrowserChoice) {
+  try {
+    if (browser === "safari") window.localStorage.setItem(ACCESS_BROWSER_STORAGE_KEY, browser);
+    else window.localStorage.removeItem(ACCESS_BROWSER_STORAGE_KEY);
+  } catch {
+    // The browser choice still works for the current session if storage is unavailable.
+  }
+}
+
 export function useWhisperTube() {
   const { t } = useI18n();
   const [tab, setTab] = useState<AppTab>("transcribe");
   const [url, setUrl] = useState("");
   const [cookiesPath, setCookiesPath] = useState(readStoredCookiesPath);
+  const [browser, setBrowser] = useState<BrowserChoice>(readStoredBrowser);
   const [backend, setBackend] = useState<BackendChoice>("auto");
   const [language, setLanguage] = useState("auto");
   const [modelId, setModelId] = useState("large-v3-turbo-q5_0");
@@ -123,6 +144,13 @@ export function useWhisperTube() {
   }, []);
 
   useEffect(() => {
+    if (browser === "safari" && browsers.length > 0 && !browsers.some((item) => item.id === "safari")) {
+      setBrowser("none");
+      persistBrowser("none");
+    }
+  }, [browser, browsers]);
+
+  useEffect(() => {
     refreshSystem().catch((cause) => setError(friendlyError(cause)));
 
     const unlistenProgress = subscribeToProgress((payload) => {
@@ -157,6 +185,13 @@ export function useWhisperTube() {
     setMetadata(null);
   }
 
+  function resetInspectedVideo() {
+    setMetadata(null);
+    setResult(null);
+    setSearchQuery("");
+    setCopied(false);
+  }
+
   function clearTranscription() {
     if (busy || inspecting) return;
     setUrl("");
@@ -173,8 +208,11 @@ export function useWhisperTube() {
     try {
       const path = await pickCookiesFile();
       if (!path) return;
+      setBrowser("none");
+      persistBrowser("none");
       setCookiesPath(path);
       persistCookiesPath(path);
+      resetInspectedVideo();
       setError(null);
     } catch (cause) {
       setError(friendlyError(cause));
@@ -184,6 +222,20 @@ export function useWhisperTube() {
   function handleClearCookiesFile() {
     setCookiesPath("");
     persistCookiesPath("");
+    resetInspectedVideo();
+    setError(null);
+  }
+
+  function handleUseSafariSession() {
+    if (!browsers.some((item) => item.id === "safari")) {
+      setError(t("error.safariUnavailable"));
+      return;
+    }
+    setBrowser("safari");
+    persistBrowser("safari");
+    setCookiesPath("");
+    persistCookiesPath("");
+    resetInspectedVideo();
     setError(null);
   }
 
@@ -244,7 +296,7 @@ export function useWhisperTube() {
     setError(null);
     setResult(null);
     try {
-      setMetadata(await inspectMedia(url.trim(), "none", "", cookiesPath));
+      setMetadata(await inspectMedia(url.trim(), browser, "", cookiesPath));
     } catch (cause) {
       setMetadata(null);
       const message = friendlyError(cause);
@@ -410,7 +462,7 @@ export function useWhisperTube() {
         title: metadata.title,
         channel: metadata.channel,
         duration: metadata.duration,
-        browser: "none",
+        browser,
         browserProfile: "",
         cookiesPath,
         backend,
@@ -498,9 +550,11 @@ export function useWhisperTube() {
     setUrl: handleUrlChange,
     clearTranscription,
     cookiesPath,
+    usingSafariSession: browser === "safari",
     browsers,
     selectCookiesFile: handleSelectCookiesFile,
     clearCookiesFile: handleClearCookiesFile,
+    useSafariSession: handleUseSafariSession,
     backend,
     setBackend,
     language,

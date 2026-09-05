@@ -32,7 +32,7 @@ memegang state dan side effect, `services/tauri.ts` menjadi adapter IPC,
 Backend memakai boundary serupa: `commands.rs` hanya adapter command Tauri,
 `types.rs` menyimpan DTO IPC, `state.rs` menyimpan state job runtime,
 `paths.rs` menangani lokasi storage/runtime, `browsers.rs` menangani kompatibilitas argumen cookie
-tanpa membaca cookies saat discovery dan memilih file-cookie args, sedangkan `models.rs`, `sources.rs`,
+tanpa membaca cookies saat discovery, memilih file-cookie args, dan menyediakan sesi Safari langsung di macOS, sedangkan `models.rs`, `sources.rs`,
 `transcription.rs`, dan `history.rs` menangani domain masing-masing. `lib.rs`
 hanya melakukan bootstrap aplikasi dan registrasi command.
 

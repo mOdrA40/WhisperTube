@@ -159,7 +159,10 @@ fn definitions() -> Vec<BrowserDefinition> {
                 id: "safari",
                 label: "Safari",
                 kind: BrowserKind::Safari,
-                roots: vec![home.join("Library/Safari")],
+                roots: vec![
+                    home.join("Library/Safari"),
+                    home.join("Library/Containers/com.apple.Safari/Data/Library"),
+                ],
             },
         ]);
     }

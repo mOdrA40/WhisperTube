@@ -19,7 +19,7 @@ WhisperTube 是一款 local-first 桌面应用，使用 `yt-dlp`、FFmpeg 和 wh
 - 粘贴受支持的视频 URL，在下载前检查视频元数据。
 - 支持公开视频，以及通过导入 Netscape 格式 `cookies.txt` 来处理需要登录的视频。
 - 不要求网站密码，也不会把 cookies 复制到应用数据库。
-- 自动检测受支持的 Chrome、Edge、Firefox、Brave、Chromium、Opera、Vivaldi、Whale；macOS 还支持 Safari。Settings 只显示设备上实际检测到的浏览器和配置文件。
+- 支持从各浏览器系列导入 Netscape 格式的 `cookies.txt`；在 macOS 上，Settings 还可以直接尝试检测到的 Safari 会话。
 - 下载 `bestaudio/best`，使用 FFmpeg 转换为 16-bit PCM WAV、单声道、16 kHz，再通过本地 whisper.cpp 推理。
 - 模型：Fast（`base`，约 142 MB）、Balanced（`large-v3-turbo-q5_0`，约 547 MB）、Accurate（`large-v3-q5_0`，约 1.1 GB）。
 - 模型 checksum 校验、进度显示、取消、时间戳、TXT/SRT/VTT 导出和本地 SQLite 历史记录。
@@ -70,11 +70,11 @@ CUDA 不包含在基础安装中。应用会将其下载到用户 app storage，
 
 ## 需要登录的视频
 
-先在浏览器中登录相关平台并导出 Netscape 格式的 `cookies.txt`。在 WhisperTube 的 Settings 中导入该文件，然后返回转录页面点击 **检查视频**。
+先登录相关平台并导出最新的 Netscape 格式 `cookies.txt`。在 WhisperTube 的 Settings 中导入该文件。在 macOS 上，也可以直接尝试检测到的 Safari 会话，然后返回转录页面点击 **检查视频**。
 
 WhisperTube 只在本地将该文件传递给 yt-dlp，不会上传或写入历史记录。平台的 extractor、登录流程或反爬策略发生变化时，受保护视频支持仍可能受到影响。
 
-在 Windows 上，基于 Chromium 的浏览器加密可能导致 yt-dlp 无法解密 Brave/Chrome/Edge 配置文件。此时可在 **Settings → 手动 cookies 文件** 中导入 Netscape 格式的 `cookies.txt`。该文件只由本机 WhisperTube 进程使用。
+在 Windows 上，基于 Chromium 的浏览器加密可能导致 yt-dlp 无法解密 Brave/Chrome/Edge 配置文件，因此手动 cookies 文件是主要方案。在 macOS 上，Safari cookies 存储可能需要 macOS 权限。文件或会话只由本机 WhisperTube 进程使用。
 
 ## 构建 Windows 安装程序
 

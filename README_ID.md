@@ -84,6 +84,59 @@ Di Windows, enkripsi browser berbasis Chromium dapat membuat yt-dlp gagal membuk
 
 Installer berada di sekitar `src-tauri\target\release\bundle\`. `npm run tauri:build` adalah release build penuh: compile Rust mode release, build frontend, bundling runtime, dan membuat installer.
 
+## Build macOS dan Linux dari source
+
+Build macOS/Linux harus dijalankan di host OS masing-masing karena Tauri memakai
+WebView dan toolchain native. Repository sekarang menyediakan script bootstrap
+dan build native.
+
+### macOS
+
+Pasang Xcode Command Line Tools, Homebrew, Rust, dan Node.js, lalu jalankan dari
+root repository:
+
+```bash
+xcode-select --install
+chmod +x scripts/setup-macos.sh scripts/build-macos.sh
+./scripts/setup-macos.sh
+./scripts/build-macos.sh
+```
+
+Script setup membuat runtime CPU dan Metal secara terpisah. Bundle `.app` dan
+`.dmg` berada di `src-tauri/target/release/bundle/`.
+
+### Linux (Ubuntu/Debian)
+
+Pasang dependency Tauri:
+
+```bash
+sudo apt-get update
+sudo apt-get install libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf xdg-utils cmake pkg-config git nasm xz-utils
+```
+
+Kemudian:
+
+```bash
+chmod +x scripts/setup-linux.sh scripts/build-linux.sh
+./scripts/setup-linux.sh
+./scripts/build-linux.sh
+```
+
+Script Linux membangun FFmpeg statik yang dipin serta engine CPU, lalu membuat
+bundle Debian dan AppImage di
+`src-tauri/target/release/bundle/`. Distro lain membutuhkan padanan dependency
+WebKitGTK, compiler, OpenSSL, FFmpeg, dan packaging-nya sendiri. Untuk
+kompatibilitas glibc, build sebaiknya dilakukan pada base distro tertua yang
+ingin didukung.
+
+Workflow opsional `.github/workflows/build-application-bundles.yml` mengulang
+build native tersebut di runner Windows, macOS, dan Linux GitHub. Jalankan
+manual untuk mendapat artifact sementara, atau push tag aplikasi seperti
+`v0.1.0` untuk menerbitkan installer native NSIS, DMG, Debian, dan AppImage
+dalam GitHub Release. Bundle v0.1 belum ditandatangani dan belum dinotarize.
+Setiap installer memiliki sidecar SHA-256, dan bundle aplikasi menyertakan
+license project serta third-party notices.
+
 ## Accelerator release untuk maintainer
 
 Workflow `.github/workflows/build-accelerator-packs.yml` membuat pack Metal/Vulkan dari source resmi whisper.cpp. Repository boleh private saat development/CI, tetapi release accelerator harus public sebelum EXE dibagikan karena aplikasi tidak membawa GitHub token.
@@ -114,7 +167,8 @@ Model, job, export, dan `whispertube.db` disimpan di app-local-data sesuai OS.
 - Metal/Vulkan memerlukan asset release GitHub publik yang cocok.
 - Video yang memerlukan login bergantung pada kompatibilitas versi yt-dlp serta perubahan keamanan browser/platform.
 - Belum ada playlist/batch job, speaker diarization, word-level subtitle editing, atau auto-update runtime.
-- Jalur installer macOS/Linux belum sekeras jalur Windows.
+- Build macOS/Linux sudah tersedia melalui script native dan CI, tetapi signing, notarization, dan QA lintas distro/hardware belum selesai di v0.1.
+- Bootstrap macOS/Linux membangun FFmpeg statik dari source archive yang dipin; distribusi ke mesin bersih tetap membutuhkan QA dependency dan lisensi per platform.
 
 ## Lisensi
 

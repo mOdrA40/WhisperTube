@@ -5,7 +5,7 @@ WhisperTube source code is MIT-licensed. Runtime components are separate upstrea
 - whisper.cpp — MIT: https://github.com/ggml-org/whisper.cpp
 - OpenAI Whisper model architecture/weights — see upstream model repository and license terms.
 - yt-dlp — Unlicense plus third-party components; official packaged executables may include additional licenses. See its bundled notices/repository: https://github.com/yt-dlp/yt-dlp
-- FFmpeg — LGPL/GPL depending on the exact build configuration. The Windows bootstrap currently downloads the Gyan.dev "essentials" build. Review that distribution's license/build configuration before redistributing binaries commercially.
+- FFmpeg — LGPL/GPL depending on the exact build configuration. Windows uses the pinned Gyan.dev "essentials" build; macOS/Linux build a pinned FFmpeg 9.0.1 source archive with network support disabled. Review the exact configuration and provide the required license/source notices before redistributing binaries commercially.
 - Tauri — Apache-2.0 / MIT ecosystem components.
 - React — MIT.
 - Plus Jakarta Sans — SIL Open Font License 1.1; license text is included in `src/assets/fonts/OFL-PlusJakartaSans.txt`.

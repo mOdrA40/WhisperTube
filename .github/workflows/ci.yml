@@ -52,3 +52,21 @@ jobs:
             }
             Write-Output "$file syntax OK"
           }
+
+  shell:
+    name: Shell script checks
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Bash parser checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n scripts/setup-macos.sh
+          bash -n scripts/setup-linux.sh
+          bash -n scripts/build-macos.sh
+          bash -n scripts/build-linux.sh

@@ -179,6 +179,63 @@ src-tauri\target\release\bundle\
 
 `npm run tauri:build` is the full release build: it compiles Rust in release mode, builds the frontend, bundles runtime resources, and creates the Windows installer. It is not required for every development test.
 
+## Build macOS and Linux bundles from source
+
+The Windows installer is not the only build path. macOS and Linux must be
+built on their native host environments because Tauri uses the host's native
+WebView and packaging toolchain. The repository includes native bootstrap and
+build scripts for both platforms.
+
+### macOS
+
+Install Xcode Command Line Tools, Homebrew, Rust, and Node.js first. Then run
+from the repository root:
+
+```bash
+xcode-select --install
+chmod +x scripts/setup-macos.sh scripts/build-macos.sh
+./scripts/setup-macos.sh
+./scripts/build-macos.sh
+```
+
+The setup builds separate CPU and Metal whisper engines. The application
+bundles are written under `src-tauri/target/release/bundle/`, including the
+native `.app` and `.dmg` outputs when supported by the host.
+
+### Linux (Ubuntu/Debian)
+
+Install Tauri's system dependencies first:
+
+```bash
+sudo apt-get update
+sudo apt-get install libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf xdg-utils cmake pkg-config git nasm xz-utils
+```
+
+Then run:
+
+```bash
+chmod +x scripts/setup-linux.sh scripts/build-linux.sh
+./scripts/setup-linux.sh
+./scripts/build-linux.sh
+```
+
+The Linux script builds a pinned static FFmpeg and CPU whisper engine; the
+application script requests Debian and AppImage bundles. Outputs are written under
+`src-tauri/target/release/bundle/`. Other distributions need their equivalent
+WebKitGTK, compiler, OpenSSL, FFmpeg, and packaging packages.
+
+The Linux bundle should be built on the oldest supported base distribution;
+glibc compatibility can prevent a bundle built on a newer distribution from
+running on an older one.
+
+The optional `.github/workflows/build-application-bundles.yml` repeats the
+native builds on GitHub-hosted Windows, macOS, and Linux runners. Run it
+manually to get short-lived workflow artifacts, or push an application tag such
+as `v0.1.0` to publish the native NSIS, DMG, Debian, and AppImage installers in
+a GitHub Release. These bundles are not code-signed or notarized in v0.1.
+Each installer is accompanied by a SHA-256 sidecar. The application bundles
+also contain the project license and third-party notices.
+
 ## Accelerator releases for maintainers
 
 `.github/workflows/build-accelerator-packs.yml` builds Metal and Vulkan packs from a pinned official whisper.cpp tag. Run the workflow manually to test artifacts, or push a tag such as `accelerators-v0.1.0` to publish a GitHub Release with SHA-256 sidecars.
@@ -240,7 +297,8 @@ Tauri selects the platform-specific app-local-data directory. WhisperTube stores
 3. Browser support depends on yt-dlp's current cookie extraction support and the browser's OS security behavior; direct Safari access is macOS-only and may require permission.
 4. Login-protected downloads can break when a platform changes authentication, anti-bot, or extractor requirements.
 5. There are no playlist/batch jobs, speaker diarization, word-level subtitle editing, or runtime auto-updates yet.
-6. macOS/Linux bootstrap and installer QA are not as production-ready as the Windows path in v0.1.
+6. macOS/Linux builds are available from native scripts and CI, but signing, notarization, and broad distro/hardware QA are not complete in v0.1.
+7. macOS/Linux bootstrap builds FFmpeg statically from a pinned source archive; clean-machine redistribution and license QA are still required.
 
 ## License
 

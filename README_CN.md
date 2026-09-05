@@ -84,6 +84,54 @@ WhisperTube 只在本地将该文件传递给 yt-dlp，不会上传或写入历�
 
 安装程序通常位于 `src-tauri\target\release\bundle\`。`npm run tauri:build` 是完整的 release 构建：编译 release 模式 Rust、构建前端、打包 runtime 资源并创建安装程序。
 
+## 从 source 构建 macOS 和 Linux
+
+macOS/Linux 构建必须在对应的 native host 上执行，因为 Tauri 使用系统的
+WebView 和打包工具链。仓库现在提供了两个平台的 bootstrap 和 build 脚本。
+
+### macOS
+
+先安装 Xcode Command Line Tools、Homebrew、Rust 和 Node.js，然后在仓库根目录运行：
+
+```bash
+xcode-select --install
+chmod +x scripts/setup-macos.sh scripts/build-macos.sh
+./scripts/setup-macos.sh
+./scripts/build-macos.sh
+```
+
+setup 会分别生成 CPU 和 Metal whisper runtime。`.app` 和 `.dmg` bundle 位于
+`src-tauri/target/release/bundle/`。
+
+### Linux（Ubuntu/Debian）
+
+先安装 Tauri 系统依赖：
+
+```bash
+sudo apt-get update
+sudo apt-get install libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf xdg-utils cmake pkg-config git nasm xz-utils
+```
+
+然后运行：
+
+```bash
+chmod +x scripts/setup-linux.sh scripts/build-linux.sh
+./scripts/setup-linux.sh
+./scripts/build-linux.sh
+```
+
+Linux 脚本会先构建固定版本的静态 FFmpeg 和 CPU engine，然后在
+`src-tauri/target/release/bundle/` 生成 Debian 和 AppImage bundle。
+其他发行版需要安装对应的 WebKitGTK、编译器、OpenSSL、FFmpeg 和打包依赖。为了
+兼容 glibc，建议在计划支持的最旧基础发行版上构建。
+
+可选 workflow `.github/workflows/build-application-bundles.yml` 会在 GitHub
+的 Windows、macOS 和 Linux runner 上重复 native build。手动运行可获得临时
+artifact，或者 push 类似 `v0.1.0` 的应用 tag，将 NSIS、DMG、Debian 和 AppImage
+原生安装包发布到 GitHub Release。v0.1 bundle 尚未签名或 notarize。
+每个安装包都会附带 SHA-256 sidecar，应用 bundle 也会包含项目 license 和
+third-party notices。
+
 ## Accelerator release（维护者）
 
 `.github/workflows/build-accelerator-packs.yml` 使用固定版本的官方 whisper.cpp source 构建 Metal/Vulkan pack。开发和 CI 阶段 repository 可以保持 private，但发布 EXE 前 accelerator release 必须公开，因为应用不会内置 GitHub token。
@@ -114,7 +162,8 @@ WhisperTube 只在本地将该文件传递给 yt-dlp，不会上传或写入历�
 - Metal/Vulkan 需要匹配的公开 GitHub Release asset。
 - 需要登录的视频依赖 yt-dlp 兼容性以及浏览器/平台的安全策略变化。
 - 目前没有 playlist/batch job、说话人分离、逐词字幕编辑或 runtime 自动更新。
-- macOS/Linux 的 installer 流程还没有 Windows 路径成熟。
+- macOS/Linux 已提供 native script 和 CI 构建，但 v0.1 尚未完成签名、公证以及广泛的发行版/硬件 QA。
+- macOS/Linux bootstrap 会从固定 source archive 构建静态 FFmpeg；向干净机器分发仍需要完成各平台的依赖和许可证 QA。
 
 ## 许可证
 

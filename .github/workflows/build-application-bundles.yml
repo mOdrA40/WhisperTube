@@ -1,0 +1,213 @@
+name: Build application bundles
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build-unix:
+    name: ${{ matrix.package }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            package: whispertube-macos-arm64
+            setup_script: setup-macos.sh
+            build_script: build-macos.sh
+          - os: macos-15-intel
+            package: whispertube-macos-x64
+            setup_script: setup-macos.sh
+            build_script: build-macos.sh
+          - os: ubuntu-24.04
+            package: whispertube-linux-x64
+            setup_script: setup-linux.sh
+            build_script: build-linux.sh
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install Linux Tauri dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            xdg-utils \
+            ffmpeg \
+            cmake \
+            pkg-config \
+            git \
+            nasm \
+            xz-utils
+
+      - name: Prepare native runtime
+        shell: bash
+        env:
+          SETUP_SCRIPT: ${{ matrix.setup_script }}
+        run: |
+          set -euo pipefail
+          chmod +x "scripts/$SETUP_SCRIPT"
+          "scripts/$SETUP_SCRIPT"
+
+      - name: Build native application bundle
+        shell: bash
+        env:
+          BUILD_SCRIPT: ${{ matrix.build_script }}
+        run: |
+          set -euo pipefail
+          chmod +x "scripts/$BUILD_SCRIPT"
+          "scripts/$BUILD_SCRIPT"
+
+      - name: Verify FFmpeg dependency boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          ffmpeg_path="src-tauri/runtime/$([[ "$RUNNER_OS" == 'macOS' ]] && echo macos || echo linux)/ffmpeg"
+          "$ffmpeg_path" -version
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            if otool -L "$ffmpeg_path" | grep -Eq '/opt/homebrew|/usr/local/opt|/opt/local'; then
+              echo "FFmpeg bundle still links to a macOS package manager path." >&2
+              exit 1
+            fi
+          else
+            dependencies="$(ldd "$ffmpeg_path" 2>&1 || true)"
+            if grep -Eq 'not found|libav(util|codec|format|device|filter|swscale|swresample|postproc)' <<<"$dependencies"; then
+              echo "FFmpeg bundle has missing or external FFmpeg library dependencies." >&2
+              exit 1
+            fi
+          fi
+
+      - name: Collect native installers and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle_root="src-tauri/target/release/bundle"
+          if [[ ! -d "$bundle_root" ]]; then
+            echo "Tauri bundle directory tidak ditemukan: $bundle_root" >&2
+            exit 1
+          fi
+
+          package_dir="$RUNNER_TEMP/packages"
+          mkdir -p "$package_dir"
+          installers=()
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            while IFS= read -r installer; do
+              installers+=("$installer")
+            done < <(find "$bundle_root/dmg" -maxdepth 1 -type f -name '*.dmg' -print)
+          else
+            while IFS= read -r installer; do
+              installers+=("$installer")
+            done < <(find "$bundle_root/deb" "$bundle_root/appimage" -maxdepth 1 -type f \( -name '*.deb' -o -name '*.AppImage' \) -print)
+          fi
+
+          if (( ${#installers[@]} == 0 )); then
+            echo "Installer native tidak ditemukan di $bundle_root" >&2
+            exit 1
+          fi
+
+          for installer in "${installers[@]}"; do
+            filename="$(basename "$installer")"
+            cp "$installer" "$package_dir/$filename"
+            if command -v sha256sum >/dev/null 2>&1; then
+              (cd "$package_dir" && sha256sum "$filename" > "$filename.sha256")
+            else
+              (cd "$package_dir" && shasum -a 256 "$filename" > "$filename.sha256")
+            fi
+          done
+
+      - name: Upload application bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ matrix.package }}
+          path: ${{ runner.temp }}/packages/*
+          if-no-files-found: error
+          retention-days: 7
+
+  build-windows:
+    name: whispertube-windows-x64
+    runs-on: windows-2025
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Prepare native runtime
+        shell: pwsh
+        run: .\scripts\setup-windows.ps1
+
+      - name: Build Windows NSIS installer
+        shell: pwsh
+        run: .\scripts\build-windows.ps1
+
+      - name: Collect Windows installer and checksum
+        shell: pwsh
+        run: |
+          $bundleRoot = Join-Path $PWD 'src-tauri\target\release\bundle\nsis'
+          $installers = @(Get-ChildItem -LiteralPath $bundleRoot -Filter '*.exe' -File)
+          if ($installers.Count -eq 0) {
+            throw "Installer NSIS tidak ditemukan di $bundleRoot"
+          }
+
+          $packageDir = Join-Path $env:RUNNER_TEMP 'packages'
+          New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
+          foreach ($installer in $installers) {
+            $destination = Join-Path $packageDir $installer.Name
+            Copy-Item -LiteralPath $installer.FullName -Destination $destination
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $destination).Hash.ToLowerInvariant()
+            "$hash  $($installer.Name)" | Set-Content -Encoding ascii "$destination.sha256"
+          }
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: whispertube-windows-x64
+          path: ${{ runner.temp }}/packages/*
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish application release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - build-unix
+      - build-windows
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download application bundles
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: packages
+          merge-multiple: true
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" packages/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "WhisperTube application $GITHUB_REF_NAME" \
+            --generate-notes

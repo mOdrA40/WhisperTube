@@ -164,6 +164,21 @@ constants. A release build must be produced after that change, and the
 published assets must remain immutable for the lifetime of that application
 build.
 
+Native application bundles use `scripts/setup-macos.sh` plus
+`scripts/build-macos.sh` on macOS and `scripts/setup-linux.sh` plus
+`scripts/build-linux.sh` on Linux. The corresponding
+`.github/workflows/build-application-bundles.yml` runs those scripts plus the
+Windows bootstrap/build scripts on native GitHub-hosted runners and publishes
+the NSIS, DMG, Debian, and AppImage installers directly for tagged `v*`
+application releases. Each installer has a SHA-256 sidecar. These bundles are
+unsigned in v0.1; macOS signing and notarization, plus broad Linux distribution
+QA, remain release work.
+The bootstrap builds FFmpeg 9.0.1 from a pinned official source archive with
+`--disable-shared` and no network support, rather than copying a host package
+manager binary. Linux additionally requests static linking. This removes the
+Homebrew/distro FFmpeg library dependency, although clean-machine and license
+QA are still required.
+
 ## Next production milestones
 
 1. Sign runtime/model manifests and release assets.

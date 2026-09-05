@@ -20,5 +20,8 @@ for required in "$RUNTIME/ffmpeg" "$RUNTIME/yt-dlp" "$RUNTIME/cpu/whisper-cli"; 
 done
 
 npm ci
-npm run tauri:build -- --bundles deb,appimage
+# GitHub-hosted/container runners may not expose FUSE. Force AppImage tooling
+# to extract and execute in place so linuxdeploy does not depend on a FUSE mount.
+export APPIMAGE_EXTRACT_AND_RUN=1
+npm run tauri:build -- --bundles deb,appimage --verbose
 echo "Linux bundles selesai. Cek: src-tauri/target/release/bundle/"

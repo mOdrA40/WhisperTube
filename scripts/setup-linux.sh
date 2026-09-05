@@ -35,6 +35,8 @@ require_command tar "Install tar dari package manager distro kamu."
 require_command xz "Install xz-utils dari package manager distro kamu."
 require_command getconf "Install libc-dev dari package manager distro kamu."
 require_command ldd "Install libc-dev dari package manager distro kamu."
+require_command file "Install file dari package manager distro kamu."
+require_command patchelf "Install patchelf dari package manager distro kamu."
 require_command pkg-config "Install pkg-config dari package manager distro kamu."
 require_command sha256sum "Install coreutils dari package manager distro kamu."
 
@@ -123,6 +125,21 @@ rm -rf "$CPU"
 mkdir -p "$CPU"
 cp -R "$(dirname "$cli")/." "$CPU/"
 chmod +x "$CPU/whisper-cli"
+
+# whisper.cpp emits sibling shared libraries. Preserve that relationship after
+# Tauri relocates the runtime into a Debian package or AppImage.
+while IFS= read -r -d '' binary; do
+  if file -b "$binary" | grep -Eq 'ELF .* (dynamically linked|shared object)'; then
+    patchelf --set-rpath '$ORIGIN' "$binary"
+  fi
+done < <(find "$CPU" -maxdepth 1 -type f -print0)
+
+if ldd "$CPU/whisper-cli" | grep -q 'not found'; then
+  echo "whisper.cpp Linux runtime masih memiliki dependency yang tidak ditemukan." >&2
+  ldd "$CPU/whisper-cli" >&2
+  exit 1
+fi
+
 "$CPU/whisper-cli" --version >/dev/null
 
 cd "$ROOT"

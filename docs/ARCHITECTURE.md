@@ -171,8 +171,9 @@ Native application bundles use `scripts/setup-macos.sh` plus
 Windows bootstrap/build scripts on native GitHub-hosted runners and publishes
 the NSIS, DMG, Debian, and AppImage installers directly for tagged `v*`
 application releases. Each installer has a SHA-256 sidecar. These bundles are
-unsigned in v0.1; macOS signing and notarization, plus broad Linux distribution
-QA, remain release work.
+unsigned on Windows/Linux in v0.1. macOS uses an ad-hoc signature but is not
+Apple-notarized; official signing and broad Linux distribution QA remain
+release work.
 The bootstrap builds FFmpeg 9.0.1 from a pinned official source archive with
 `--disable-shared` and no network support, rather than copying a host package
 manager binary. Linux additionally requests static linking. This removes the

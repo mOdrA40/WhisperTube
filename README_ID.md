@@ -133,7 +133,8 @@ Workflow opsional `.github/workflows/build-application-bundles.yml` mengulang
 build native tersebut di runner Windows, macOS, dan Linux GitHub. Jalankan
 manual untuk mendapat artifact sementara, atau push tag aplikasi seperti
 `v0.1.0` untuk menerbitkan installer native NSIS, DMG, Debian, dan AppImage
-dalam GitHub Release. Bundle v0.1 belum ditandatangani dan belum dinotarize.
+dalam GitHub Release. Windows dan Linux belum ditandatangani; macOS memakai
+ad-hoc signing gratis tetapi belum dinotarize Apple pada v0.1.
 Setiap installer memiliki sidecar SHA-256, dan bundle aplikasi menyertakan
 license project serta third-party notices.
 
@@ -167,7 +168,7 @@ Model, job, export, dan `whispertube.db` disimpan di app-local-data sesuai OS.
 - Metal/Vulkan memerlukan asset release GitHub publik yang cocok.
 - Video yang memerlukan login bergantung pada kompatibilitas versi yt-dlp serta perubahan keamanan browser/platform.
 - Belum ada playlist/batch job, speaker diarization, word-level subtitle editing, atau auto-update runtime.
-- Build macOS/Linux sudah tersedia melalui script native dan CI, tetapi signing, notarization, dan QA lintas distro/hardware belum selesai di v0.1.
+- Build macOS/Linux sudah tersedia melalui script native dan CI. macOS memakai ad-hoc signing tetapi belum dinotarize; signing Windows/Linux dan QA lintas distro/hardware belum selesai di v0.1.
 - Bootstrap macOS/Linux membangun FFmpeg statik dari source archive yang dipin; distribusi ke mesin bersih tetap membutuhkan QA dependency dan lisensi per platform.
 
 ## Lisensi

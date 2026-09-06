@@ -128,7 +128,8 @@ Linux 脚本会先构建固定版本的静态 FFmpeg 和 CPU engine，然后在
 可选 workflow `.github/workflows/build-application-bundles.yml` 会在 GitHub
 的 Windows、macOS 和 Linux runner 上重复 native build。手动运行可获得临时
 artifact，或者 push 类似 `v0.1.0` 的应用 tag，将 NSIS、DMG、Debian 和 AppImage
-原生安装包发布到 GitHub Release。v0.1 bundle 尚未签名或 notarize。
+原生安装包发布到 GitHub Release。Windows 和 Linux 尚未签名；macOS 使用免费
+ad-hoc 签名，但 v0.1 尚未经过 Apple notarize。
 每个安装包都会附带 SHA-256 sidecar，应用 bundle 也会包含项目 license 和
 third-party notices。
 

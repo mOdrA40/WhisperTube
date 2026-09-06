@@ -207,7 +207,28 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          prerelease_args=()
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            prerelease_args+=(--prerelease)
+          fi
+
+          notes=$(cat <<'EOF'
+          This is a public beta build. Windows is unsigned and macOS uses an ad-hoc signature; macOS is not notarized by Apple.
+
+          Installation:
+          - Windows x64: download the `.exe`. If SmartScreen appears, choose **More info** then **Run anyway**. Do not disable Microsoft Defender globally.
+          - macOS Apple Silicon: download the `aarch64.dmg`.
+          - macOS Intel: download the `x64.dmg`.
+          - macOS first launch: move WhisperTube to Applications. If Gatekeeper blocks it, open **System Settings > Privacy & Security > Open Anyway**. Do not disable Gatekeeper globally.
+          - Linux x64 AppImage: run `chmod +x WhisperTube_*.AppImage`, then execute the file.
+          - Debian/Ubuntu x64: run `sudo apt install ./WhisperTube_*_amd64.deb`.
+
+          Every installer has a matching `.sha256` file for integrity verification. Models are downloaded by the app when first selected.
+          EOF
+          )
+
           gh release create "$GITHUB_REF_NAME" packages/* \
             --repo "$GITHUB_REPOSITORY" \
             --title "WhisperTube application $GITHUB_REF_NAME" \
-            --generate-notes
+            --notes "$notes" \
+            "${prerelease_args[@]}"

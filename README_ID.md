@@ -84,6 +84,12 @@ Di Windows, enkripsi browser berbasis Chromium dapat membuat yt-dlp gagal membuk
 
 Installer berada di sekitar `src-tauri\target\release\bundle\`. `npm run tauri:build` adalah release build penuh: compile Rust mode release, build frontend, bundling runtime, dan membuat installer.
 
+## Pembaruan aplikasi
+
+WhisperTube memiliki updater di dalam aplikasi. Aplikasi memeriksa release bertanda tangan, menampilkan banner jika versi baru tersedia, lalu mengunduh dan memasang updater dari Settings tanpa user membuka GitHub. GitHub Release tetap menjadi tempat distribusi file di belakang layar, bukan backend aplikasi.
+
+Detail konfigurasi key, secret GitHub Actions, dan alur tag release ada di [docs/UPDATER.md](docs/UPDATER.md).
+
 ## Build macOS dan Linux dari source
 
 Build macOS/Linux harus dijalankan di host OS masing-masing karena Tauri memakai
@@ -132,8 +138,9 @@ ingin didukung.
 Workflow opsional `.github/workflows/build-application-bundles.yml` mengulang
 build native tersebut di runner Windows, macOS, dan Linux GitHub. Jalankan
 manual untuk mendapat artifact sementara, atau push tag aplikasi seperti
-`v0.1.0` untuk menerbitkan installer native NSIS, DMG, Debian, dan AppImage
-dalam GitHub Release. Windows dan Linux belum ditandatangani; macOS memakai
+`v0.1.1` untuk menerbitkan installer native NSIS, DMG, Debian, dan AppImage
+dalam GitHub Release. Artifact updater memiliki signature Tauri terpisah untuk
+verifikasi update; Windows belum memiliki Authenticode signing dan macOS memakai
 ad-hoc signing gratis tetapi belum dinotarize Apple pada v0.1.
 Setiap installer memiliki sidecar SHA-256, dan bundle aplikasi menyertakan
 license project serta third-party notices.
@@ -167,7 +174,7 @@ Model, job, export, dan `whispertube.db` disimpan di app-local-data sesuai OS.
 - CUDA yang dipin saat ini khusus Windows x64 dengan driver NVIDIA terdeteksi.
 - Metal/Vulkan memerlukan asset release GitHub publik yang cocok.
 - Video yang memerlukan login bergantung pada kompatibilitas versi yt-dlp serta perubahan keamanan browser/platform.
-- Belum ada playlist/batch job, speaker diarization, word-level subtitle editing, atau auto-update runtime.
+- Belum ada playlist/batch job, speaker diarization, word-level subtitle editing, atau auto-update runtime/model.
 - Build macOS/Linux sudah tersedia melalui script native dan CI. macOS memakai ad-hoc signing tetapi belum dinotarize; signing Windows/Linux dan QA lintas distro/hardware belum selesai di v0.1.
 - Bootstrap macOS/Linux membangun FFmpeg statik dari source archive yang dipin; distribusi ke mesin bersih tetap membutuhkan QA dependency dan lisensi per platform.
 

@@ -23,5 +23,13 @@ npm ci
 # GitHub-hosted/container runners may not expose FUSE. Force AppImage tooling
 # to extract and execute in place so linuxdeploy does not depend on a FUSE mount.
 export APPIMAGE_EXTRACT_AND_RUN=1
-npm run tauri:build -- --bundles deb,appimage --verbose
+build_args=(--bundles deb,appimage --verbose)
+if [[ "${TAURI_CREATE_UPDATER_ARTIFACTS:-}" == "true" ]]; then
+  if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" && -z "${TAURI_SIGNING_PRIVATE_KEY_PATH:-}" ]]; then
+    echo "TAURI_SIGNING_PRIVATE_KEY atau TAURI_SIGNING_PRIVATE_KEY_PATH wajib diisi saat membuat artifact updater." >&2
+    exit 1
+  fi
+  build_args+=(--config '{"bundle":{"createUpdaterArtifacts":true}}')
+fi
+npm run tauri:build -- "${build_args[@]}"
 echo "Linux bundles selesai. Cek: src-tauri/target/release/bundle/"

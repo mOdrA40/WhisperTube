@@ -2,7 +2,7 @@ import { Check, CircleStop, Copy, Cpu, Download, ExternalLink, FileKey, Globe2, 
 import { useEffect, useRef, useState } from "react";
 import { formatBytes, formatMemory } from "../../lib/format";
 import { getAcceleratorCopy, getModelCopy, uiLanguageOptions, useI18n } from "../../i18n";
-import type { AcceleratorInfo, BackendChoice, BrowserInfo, ModelDownloadPayload, ModelInfo, SystemStatus } from "../../types";
+import type { AcceleratorInfo, AppUpdateInfo, AppUpdateProgress, AppUpdateStatus, BackendChoice, BrowserInfo, ModelDownloadPayload, ModelInfo, SystemStatus } from "../../types";
 import { CustomSelect, type SelectOption } from "../common/CustomSelect";
 
 const COOKIES_EXTENSION_URL = "https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc";
@@ -23,6 +23,10 @@ type SettingsPageProps = {
   installingAccelerator: Exclude<BackendChoice, "auto" | "cpu" | "cuda"> | null;
   acceleratorDownloadPercent: number;
   networkSpeedBytesPerSecond: number | null;
+  appUpdate: AppUpdateInfo | null;
+  appUpdateStatus: AppUpdateStatus;
+  appUpdateProgress: AppUpdateProgress;
+  appUpdateError: string | null;
   onSelectCookiesFile: () => void;
   onClearCookiesFile: () => void;
   onUseSafariSession: () => void;
@@ -35,6 +39,8 @@ type SettingsPageProps = {
   onCancelCuda: () => void;
   onInstallAccelerator: (backend: Exclude<BackendChoice, "auto" | "cpu" | "cuda">) => void;
   onCancelAccelerator: () => void;
+  onCheckForUpdate: () => void;
+  onInstallAppUpdate: () => void;
 };
 
 export function SettingsPage({
@@ -51,6 +57,10 @@ export function SettingsPage({
   installingAccelerator,
   acceleratorDownloadPercent,
   networkSpeedBytesPerSecond,
+  appUpdate,
+  appUpdateStatus,
+  appUpdateProgress,
+  appUpdateError,
   onSelectCookiesFile,
   onClearCookiesFile,
   onUseSafariSession,
@@ -63,6 +73,8 @@ export function SettingsPage({
   onCancelCuda,
   onInstallAccelerator,
   onCancelAccelerator,
+  onCheckForUpdate,
+  onInstallAppUpdate,
 }: SettingsPageProps) {
   const { language: uiLanguage, setLanguage: setUiLanguage, t } = useI18n();
   const [cookiesDialogOpen, setCookiesDialogOpen] = useState(false);
@@ -132,6 +144,63 @@ export function SettingsPage({
 
   return (
     <div className="settings-grid">
+      <section className="card settings-card update-settings-card">
+        <div className="card-title-row">
+          <div>
+            <span className="eyebrow">{t("update.eyebrow")}</span>
+            <h3>{t("update.title")}</h3>
+          </div>
+          <Download size={20} />
+        </div>
+        <p className="settings-note">{t("update.description")}</p>
+        {appUpdate ? (
+          <div className="update-settings-available">
+            <strong>{t("update.available", { version: appUpdate.version })}</strong>
+            {appUpdate.notes && (
+              <div className="update-notes">
+                <span>{t("update.releaseNotes")}</span>
+                <p>{appUpdate.notes}</p>
+              </div>
+            )}
+            {appUpdateStatus === "installing" && (
+              <div className="update-settings-progress">
+                <div className="update-progress-track">
+                  <span style={{ width: `${Math.round(appUpdateProgress.percent)}%` }} />
+                </div>
+                <small>{t("update.installing", { percent: Math.round(appUpdateProgress.percent) })}</small>
+              </div>
+            )}
+          </div>
+        ) : appUpdateStatus === "up-to-date" ? (
+          <p className="settings-success">{t("update.upToDate")}</p>
+        ) : null}
+        {appUpdateError && (
+          <p className="settings-error">{t("update.error", { error: appUpdateError })}</p>
+        )}
+        <div className="update-settings-actions">
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={onCheckForUpdate}
+            disabled={appUpdateStatus === "checking" || appUpdateStatus === "installing"}
+          >
+            {appUpdateStatus === "checking" ? <LoaderCircle className="spin" size={15} /> : <RotateCcw size={15} />}
+            {appUpdateStatus === "checking" ? t("update.checking") : t("update.check")}
+          </button>
+          {appUpdate && appUpdateStatus !== "installing" && (
+            <button
+              type="button"
+              className="primary-button"
+              onClick={onInstallAppUpdate}
+              disabled={busy}
+            >
+              <Download size={15} /> {t("update.install")}
+            </button>
+          )}
+        </div>
+        {appUpdate && <p className="settings-note">{t("update.restartHint")}</p>}
+      </section>
+
       <section className="card settings-card">
         <div className="card-title-row">
           <div>

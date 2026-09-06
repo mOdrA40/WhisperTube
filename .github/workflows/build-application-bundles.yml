@@ -13,20 +13,28 @@ jobs:
   build-unix:
     name: ${{ matrix.package }}
     runs-on: ${{ matrix.os }}
+    env:
+      TAURI_CREATE_UPDATER_ARTIFACTS: ${{ startsWith(github.ref, 'refs/tags/v') && 'true' || 'false' }}
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      UPDATE_ARCH: ${{ matrix.architecture }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: macos-15
             package: whispertube-macos-arm64
+            architecture: arm64
             setup_script: setup-macos.sh
             build_script: build-macos.sh
           - os: macos-15-intel
             package: whispertube-macos-x64
+            architecture: x64
             setup_script: setup-macos.sh
             build_script: build-macos.sh
           - os: ubuntu-24.04
             package: whispertube-linux-x64
+            architecture: x64
             setup_script: setup-linux.sh
             build_script: build-linux.sh
 
@@ -135,6 +143,26 @@ jobs:
             fi
           done
 
+          if [[ "$TAURI_CREATE_UPDATER_ARTIFACTS" == "true" ]]; then
+            if [[ "$RUNNER_OS" == "macOS" ]]; then
+              updater_bundle="$(find "$bundle_root/macos" -maxdepth 1 -type f -name '*.app.tar.gz' -print -quit)"
+              if [[ -z "$updater_bundle" || ! -f "$updater_bundle.sig" ]]; then
+                echo "Artifact updater macOS atau signature tidak ditemukan di $bundle_root/macos" >&2
+                exit 1
+              fi
+              updater_name="$(basename "${updater_bundle%.app.tar.gz}")-${UPDATE_ARCH}.app.tar.gz"
+              cp "$updater_bundle" "$package_dir/$updater_name"
+              cp "$updater_bundle.sig" "$package_dir/$updater_name.sig"
+            else
+              updater_bundle="$(find "$bundle_root/appimage" -maxdepth 1 -type f -name '*.AppImage' -print -quit)"
+              if [[ -z "$updater_bundle" || ! -f "$updater_bundle.sig" ]]; then
+                echo "Artifact updater Linux atau signature tidak ditemukan di $bundle_root/appimage" >&2
+                exit 1
+              fi
+              cp "$updater_bundle.sig" "$package_dir/$(basename "$updater_bundle").sig"
+            fi
+          fi
+
       - name: Upload application bundle
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -146,6 +174,10 @@ jobs:
   build-windows:
     name: whispertube-windows-x64
     runs-on: windows-2025
+    env:
+      TAURI_CREATE_UPDATER_ARTIFACTS: ${{ startsWith(github.ref, 'refs/tags/v') && 'true' || 'false' }}
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     steps:
       - name: Checkout source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -168,7 +200,6 @@ jobs:
           if ($installers.Count -eq 0) {
             throw "Installer NSIS tidak ditemukan di $bundleRoot"
           }
-
           $packageDir = Join-Path $env:RUNNER_TEMP 'packages'
           New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
           foreach ($installer in $installers) {
@@ -176,6 +207,13 @@ jobs:
             Copy-Item -LiteralPath $installer.FullName -Destination $destination
             $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $destination).Hash.ToLowerInvariant()
             "$hash  $($installer.Name)" | Set-Content -Encoding ascii "$destination.sha256"
+            if ($env:TAURI_CREATE_UPDATER_ARTIFACTS -eq 'true') {
+              $signaturePath = "$($installer.FullName).sig"
+              if (-not (Test-Path -LiteralPath $signaturePath -PathType Leaf)) {
+                throw "Signature updater tidak ditemukan: $signaturePath"
+              }
+              Copy-Item -LiteralPath $signaturePath -Destination (Join-Path $packageDir "$($installer.Name).sig")
+            }
           }
 
       - name: Upload Windows installer
@@ -201,6 +239,75 @@ jobs:
         with:
           path: packages
           merge-multiple: true
+
+      - name: Checkout source for release validation
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Generate updater manifest
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          find_asset() {
+            local pattern="$1"
+            find packages -maxdepth 1 -type f -iname "$pattern" -print -quit
+          }
+
+          version="${RELEASE_TAG#v}"
+          package_version="$(jq -r '.version' package.json)"
+          tauri_version="$(jq -r '.version' src-tauri/tauri.conf.json)"
+          cargo_version="$(sed -n '/^\[package\]/,/^\[/p' src-tauri/Cargo.toml | sed -n 's/^version = "\(.*\)"/\1/p' | head -n 1)"
+
+          if [[ "$package_version" != "$version" || "$tauri_version" != "$version" || "$cargo_version" != "$version" ]]; then
+            echo "Versi release tidak konsisten: tag=$version package.json=$package_version tauri.conf.json=$tauri_version Cargo.toml=$cargo_version" >&2
+            exit 1
+          fi
+
+          windows_asset="$(find_asset '*.exe')"
+          mac_x64_asset="$(find_asset '*-x64.app.tar.gz')"
+          mac_arm64_asset="$(find_asset '*-arm64.app.tar.gz')"
+          linux_asset="$(find_asset '*.AppImage')"
+
+          for required in "$windows_asset" "$mac_x64_asset" "$mac_arm64_asset" "$linux_asset"; do
+            if [[ -z "$required" || ! -f "$required" || ! -f "$required.sig" ]]; then
+              echo "Artifact updater atau signature tidak lengkap: ${required:-<kosong>}" >&2
+              exit 1
+            fi
+          done
+
+          release_base="https://github.com/${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}"
+          pub_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          jq -n \
+            --arg version "$version" \
+            --arg notes "WhisperTube ${version} application update." \
+            --arg pub_date "$pub_date" \
+            --arg windows_url "${release_base}/$(basename "$windows_asset")" \
+            --arg windows_signature "$(cat "$windows_asset.sig")" \
+            --arg mac_x64_url "${release_base}/$(basename "$mac_x64_asset")" \
+            --arg mac_x64_signature "$(cat "$mac_x64_asset.sig")" \
+            --arg mac_arm64_url "${release_base}/$(basename "$mac_arm64_asset")" \
+            --arg mac_arm64_signature "$(cat "$mac_arm64_asset.sig")" \
+            --arg linux_url "${release_base}/$(basename "$linux_asset")" \
+            --arg linux_signature "$(cat "$linux_asset.sig")" \
+            '{
+              version: $version,
+              notes: $notes,
+              pub_date: $pub_date,
+              platforms: {
+                "windows-x86_64": { url: $windows_url, signature: $windows_signature },
+                "darwin-x86_64": { url: $mac_x64_url, signature: $mac_x64_signature },
+                "darwin-aarch64": { url: $mac_arm64_url, signature: $mac_arm64_signature },
+                "linux-x86_64": { url: $linux_url, signature: $linux_signature }
+              }
+            }' > packages/latest.json
+
+          jq . packages/latest.json
 
       - name: Publish GitHub Release
         env:

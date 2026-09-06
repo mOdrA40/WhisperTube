@@ -1,3 +1,5 @@
+import { useState } from "react";
+import { AppUpdateBanner } from "./components/common/AppUpdateBanner";
 import { AppShell } from "./components/layout/AppShell";
 import { ErrorAlert } from "./components/common/ErrorAlert";
 import { HistoryPage } from "./components/history/HistoryPage";
@@ -9,6 +11,12 @@ import { openExternalUrl } from "./services/tauri";
 
 export default function App() {
   const app = useWhisperTube();
+  const [dismissedUpdateVersion, setDismissedUpdateVersion] = useState<string | null>(null);
+  const showUpdateBanner = Boolean(
+    app.appUpdate &&
+    app.appUpdateStatus !== "up-to-date" &&
+    dismissedUpdateVersion !== app.appUpdate.version,
+  );
 
   return (
     <AppShell
@@ -19,6 +27,16 @@ export default function App() {
       onTabChange={app.setTab}
     >
       <ErrorAlert message={app.error} onDismiss={() => app.setError(null)} />
+      {showUpdateBanner && app.appUpdate && (
+        <AppUpdateBanner
+          update={app.appUpdate}
+          status={app.appUpdateStatus}
+          progress={app.appUpdateProgress}
+          busy={app.busy}
+          onInstall={app.installAppUpdate}
+          onDismiss={() => setDismissedUpdateVersion(app.appUpdate?.version ?? null)}
+        />
+      )}
 
       {app.tab === "transcribe" && (
         <TranscribePage
@@ -96,6 +114,10 @@ export default function App() {
           installingAccelerator={app.installingAccelerator}
           acceleratorDownloadPercent={app.acceleratorDownloadPercent}
           networkSpeedBytesPerSecond={app.networkSpeedBytesPerSecond}
+          appUpdate={app.appUpdate}
+          appUpdateStatus={app.appUpdateStatus}
+          appUpdateProgress={app.appUpdateProgress}
+          appUpdateError={app.appUpdateError}
           onSelectCookiesFile={app.selectCookiesFile}
           onClearCookiesFile={app.clearCookiesFile}
           onUseSafariSession={app.useSafariSession}
@@ -108,6 +130,8 @@ export default function App() {
           onCancelCuda={app.cancelJob}
           onInstallAccelerator={app.installAccelerator}
           onCancelAccelerator={app.cancelJob}
+          onCheckForUpdate={app.checkForAppUpdate}
+          onInstallAppUpdate={app.installAppUpdate}
         />
       )}
     </AppShell>

@@ -2,6 +2,20 @@ export type AppTab = "transcribe" | "history" | "settings";
 export type BrowserChoice = "none" | "chrome" | "edge" | "firefox" | "brave" | "chromium" | "opera" | "vivaldi" | "whale" | "safari";
 export type BackendChoice = "auto" | "cpu" | "cuda" | "metal" | "vulkan";
 
+export type AppUpdateInfo = {
+  version: string;
+  notes: string | null;
+  date: string | null;
+};
+
+export type AppUpdateStatus = "idle" | "checking" | "available" | "up-to-date" | "installing";
+
+export type AppUpdateProgress = {
+  downloadedBytes: number;
+  totalBytes: number | null;
+  percent: number;
+};
+
 export type AcceleratorInfo = {
   id: string;
   label: string;

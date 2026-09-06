@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   cancelJob as cancelJobRequest,
+  checkForAppUpdate,
   deleteHistory as deleteHistoryRequest,
   deleteModel,
   downloadModel,
@@ -9,6 +10,7 @@ import {
   installAccelerator,
   installCudaEngine,
   inspectMedia,
+  installAppUpdate,
   listBrowsers,
   listHistory,
   listModels,
@@ -24,6 +26,9 @@ import {
 import { friendlyError } from "../lib/format";
 import { getAcceleratorCopy, getModelCopy, useI18n } from "../i18n";
 import type {
+  AppUpdateInfo,
+  AppUpdateProgress,
+  AppUpdateStatus,
   AppTab,
   BackendChoice,
   BrowserChoice,
@@ -121,6 +126,14 @@ export function useWhisperTube() {
   const [installingAccelerator, setInstallingAccelerator] = useState<Exclude<BackendChoice, "auto" | "cpu" | "cuda"> | null>(null);
   const [acceleratorDownloadPercent, setAcceleratorDownloadPercent] = useState(0);
   const [networkSpeedBytesPerSecond, setNetworkSpeedBytesPerSecond] = useState<number | null>(null);
+  const [appUpdate, setAppUpdate] = useState<AppUpdateInfo | null>(null);
+  const [appUpdateStatus, setAppUpdateStatus] = useState<AppUpdateStatus>("idle");
+  const [appUpdateProgress, setAppUpdateProgress] = useState<AppUpdateProgress>({
+    downloadedBytes: 0,
+    totalBytes: null,
+    percent: 0,
+  });
+  const [appUpdateError, setAppUpdateError] = useState<string | null>(null);
   const autoConfigured = useRef(false);
 
   const selectedModel = models.find((model) => model.id === modelId);
@@ -152,7 +165,17 @@ export function useWhisperTube() {
   }, [browser, browsers]);
 
   useEffect(() => {
+    let disposed = false;
     refreshSystem().catch((cause) => setError(friendlyError(cause)));
+    checkForAppUpdate()
+      .then((update) => {
+        if (disposed) return;
+        setAppUpdate(update);
+        setAppUpdateStatus(update ? "available" : "up-to-date");
+      })
+      .catch(() => {
+        // Update checks are best-effort on startup. The Settings action reports manual failures.
+      });
 
     const unlistenProgress = subscribeToProgress((payload) => {
       setProgress(payload);
@@ -174,12 +197,41 @@ export function useWhisperTube() {
     });
 
     return () => {
+      disposed = true;
       unlistenProgress.then((unlisten) => unlisten());
       unlistenModel.then((unlisten) => unlisten());
       unlistenCuda.then((unlisten) => unlisten());
       unlistenAccelerator.then((unlisten) => unlisten());
     };
   }, [refreshSystem]);
+
+  async function handleCheckForAppUpdate() {
+    setAppUpdateStatus("checking");
+    setAppUpdateError(null);
+    try {
+      const update = await checkForAppUpdate();
+      setAppUpdate(update);
+      setAppUpdateStatus(update ? "available" : "up-to-date");
+    } catch (cause) {
+      setAppUpdateStatus("idle");
+      setAppUpdateError(friendlyError(cause));
+    }
+  }
+
+  async function handleInstallAppUpdate() {
+    if (!appUpdate || busy) return;
+    setAppUpdateStatus("installing");
+    setAppUpdateError(null);
+    setAppUpdateProgress({ downloadedBytes: 0, totalBytes: null, percent: 0 });
+    try {
+      await installAppUpdate(setAppUpdateProgress);
+      setAppUpdate(null);
+      setAppUpdateStatus("up-to-date");
+    } catch (cause) {
+      setAppUpdateStatus("available");
+      setAppUpdateError(friendlyError(cause));
+    }
+  }
 
   function handleUrlChange(nextUrl: string) {
     setUrl(nextUrl);
@@ -608,6 +660,12 @@ export function useWhisperTube() {
     installingAccelerator,
     acceleratorDownloadPercent,
     networkSpeedBytesPerSecond,
+    appUpdate,
+    appUpdateStatus,
+    appUpdateProgress,
+    appUpdateError,
+    checkForAppUpdate: handleCheckForAppUpdate,
+    installAppUpdate: handleInstallAppUpdate,
     startTranscription: handleStartTranscription,
     cancelJob: handleCancelJob,
     loadHistory: handleLoadHistory,

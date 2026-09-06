@@ -231,9 +231,10 @@ running on an older one.
 The optional `.github/workflows/build-application-bundles.yml` repeats the
 native builds on GitHub-hosted Windows, macOS, and Linux runners. Run it
 manually to get short-lived workflow artifacts, or push an application tag such
-as `v0.1.0` to publish the native NSIS, DMG, Debian, and AppImage installers in
-a GitHub Release. Windows and Linux remain unsigned; macOS uses a free ad-hoc
-signature but is not Apple-notarized in v0.1.
+as `v0.1.1` to publish the native NSIS, DMG, Debian, and AppImage installers in
+a GitHub Release. Updater artifacts use Tauri signatures for update verification;
+Windows has no Authenticode signing yet, and macOS uses a free ad-hoc signature
+but is not Apple-notarized in v0.1.
 Each installer is accompanied by a SHA-256 sidecar. The application bundles
 also contain the project license and third-party notices.
 
@@ -297,7 +298,7 @@ Tauri selects the platform-specific app-local-data directory. WhisperTube stores
 2. Metal and Vulkan packs require matching public GitHub Release assets and are not bundled into the base source setup.
 3. Browser support depends on yt-dlp's current cookie extraction support and the browser's OS security behavior; direct Safari access is macOS-only and may require permission.
 4. Login-protected downloads can break when a platform changes authentication, anti-bot, or extractor requirements.
-5. There are no playlist/batch jobs, speaker diarization, word-level subtitle editing, or runtime auto-updates yet.
+5. There are no playlist/batch jobs, speaker diarization, word-level subtitle editing, or runtime/model auto-updates yet. App updates are handled by the signed Tauri updater; see [`docs/UPDATER.md`](docs/UPDATER.md).
 6. macOS/Linux builds are available from native scripts and CI. macOS uses an ad-hoc signature but is not notarized; Windows/Linux signing and broad distro/hardware QA are not complete in v0.1.
 7. macOS/Linux bootstrap builds FFmpeg statically from a pinned source archive; clean-machine redistribution and license QA are still required.
 

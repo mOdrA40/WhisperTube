@@ -1,6 +1,6 @@
 [package]
 name = "whispertube"
-version = "0.1.1"
+version = "0.1.2"
 description = "Local-first YouTube transcription with whisper.cpp"
 authors = ["WhisperTube"]
 edition = "2021"

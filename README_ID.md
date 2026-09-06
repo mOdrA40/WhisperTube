@@ -138,7 +138,7 @@ ingin didukung.
 Workflow opsional `.github/workflows/build-application-bundles.yml` mengulang
 build native tersebut di runner Windows, macOS, dan Linux GitHub. Jalankan
 manual untuk mendapat artifact sementara, atau push tag aplikasi seperti
-`v0.1.1` untuk menerbitkan installer native NSIS, DMG, Debian, dan AppImage
+`v0.1.2` untuk menerbitkan installer native NSIS, DMG, Debian, dan AppImage
 dalam GitHub Release. Artifact updater memiliki signature Tauri terpisah untuk
 verifikasi update; Windows belum memiliki Authenticode signing dan macOS memakai
 ad-hoc signing gratis tetapi belum dinotarize Apple pada v0.1.

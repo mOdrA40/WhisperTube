@@ -233,6 +233,19 @@ Jangan menggunakan destructive Git command seperti:
 
 kecuali benar-benar diminta dan konsekuensinya jelas.
 
+## Release dan distribusi
+
+WhisperTube memiliki dua jalur release yang berbeda. Jangan mencampur keduanya.
+
+- **Application release** memakai `.github/workflows/build-application-bundles.yml` dan tag `v*`, misalnya `v0.1.2`. Jalur ini membangun installer Windows `.exe`, macOS `.dmg`, Linux `.deb`/AppImage, serta artifact updater dan `latest.json`.
+- Sebelum membuat tag application release, versi harus sama di `package.json`, `src-tauri/tauri.conf.json`, dan `src-tauri/Cargo.toml`. Validasi workflow akan menolak tag yang berbeda dari ketiga versi tersebut.
+- Application release updater membutuhkan repository secret GitHub Actions `TAURI_SIGNING_PRIVATE_KEY`. Private key tidak boleh masuk repository, log, commit, atau pesan pengguna. Public key updater boleh berada di `src-tauri/tauri.conf.json`.
+- **Accelerator release** memakai `.github/workflows/build-accelerator-packs.yml` dan tag `accelerators-*`, misalnya `accelerators-v0.1.2`. Jalur ini hanya membangun pack Metal/Vulkan dan tidak membangun ulang installer aplikasi.
+- Jika hanya ada perubahan kode aplikasi, jalankan application release saja. Jika hanya ada perubahan accelerator, jalankan accelerator release saja. Jangan memakai tag `v*` untuk accelerator atau `accelerators-*` untuk aplikasi.
+- `workflow_dispatch` hanya menghasilkan artifact sementara untuk QA. Release publik yang harus memiliki asset GitHub Release dan updater manifest dipicu dengan push tag yang sesuai.
+- Jangan memakai ulang tag release yang sudah ada. Gunakan versi/tag baru, verifikasi job Actions selesai, lalu periksa asset release sebelum menyatakan distribusi berhasil.
+- Instalasi lama yang dibuat sebelum updater tersedia memerlukan satu kali pembaruan manual; setelah itu update aplikasi harus melalui updater bertanda tangan.
+
 ## Definition of Done
 
 Tugas dianggap selesai hanya jika:

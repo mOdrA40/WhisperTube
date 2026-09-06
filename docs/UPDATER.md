@@ -5,7 +5,7 @@ WhisperTube memakai Tauri Updater dengan `latest.json` statis. User dapat mengec
 ## Alur release
 
 1. Naikkan versi secara konsisten di `package.json`, `src-tauri/tauri.conf.json`, dan `src-tauri/Cargo.toml`.
-2. Push tag aplikasi, misalnya `v0.1.1`.
+2. Push tag aplikasi, misalnya `v0.1.2`.
 3. Workflow `.github/workflows/build-application-bundles.yml` membangun installer dan updater artifact bertanda tangan.
 4. Workflow mengunggah installer, file `.sig`, dan `latest.json` ke GitHub Release.
 5. Aplikasi membaca `latest.json`, memverifikasi signature, lalu mengunduh dan memasang update dari Settings atau banner update.

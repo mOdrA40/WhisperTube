@@ -231,7 +231,7 @@ running on an older one.
 The optional `.github/workflows/build-application-bundles.yml` repeats the
 native builds on GitHub-hosted Windows, macOS, and Linux runners. Run it
 manually to get short-lived workflow artifacts, or push an application tag such
-as `v0.1.1` to publish the native NSIS, DMG, Debian, and AppImage installers in
+as `v0.1.2` to publish the native NSIS, DMG, Debian, and AppImage installers in
 a GitHub Release. Updater artifacts use Tauri signatures for update verification;
 Windows has no Authenticode signing yet, and macOS uses a free ad-hoc signature
 but is not Apple-notarized in v0.1.

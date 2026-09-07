@@ -2,7 +2,10 @@ use serde_json::Value;
 use std::io::Read;
 use std::process::{Command, ExitStatus, Stdio};
 use std::{
-    sync::OnceLock,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, OnceLock,
+    },
     time::{Duration, Instant},
 };
 use tauri::AppHandle;
@@ -192,7 +195,32 @@ fn drain_bounded(mut reader: impl Read, limit: usize) -> Result<(Vec<u8>, bool),
     Ok((captured, truncated))
 }
 
-fn run_output(mut command: Command) -> Result<CapturedOutput, String> {
+struct ActiveProcessGuard {
+    active_pid: Arc<Mutex<Option<u32>>>,
+}
+
+impl ActiveProcessGuard {
+    fn new(active_pid: Arc<Mutex<Option<u32>>>, pid: u32) -> Self {
+        if let Ok(mut active) = active_pid.lock() {
+            *active = Some(pid);
+        }
+        Self { active_pid }
+    }
+}
+
+impl Drop for ActiveProcessGuard {
+    fn drop(&mut self) {
+        if let Ok(mut active) = self.active_pid.lock() {
+            *active = None;
+        }
+    }
+}
+
+fn run_output(
+    mut command: Command,
+    active_pid: &Arc<Mutex<Option<u32>>>,
+    cancelled: &Arc<AtomicBool>,
+) -> Result<CapturedOutput, String> {
     crate::process::hide_console(&mut command);
     command
         .stdout(Stdio::piped())
@@ -201,14 +229,23 @@ fn run_output(mut command: Command) -> Result<CapturedOutput, String> {
     let mut child = command
         .spawn()
         .map_err(|e| format!("Gagal menjalankan process metadata: {e}"))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "Stdout metadata tidak tersedia.".to_string())?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| "Stderr metadata tidak tersedia.".to_string())?;
+    let _active_process = ActiveProcessGuard::new(Arc::clone(active_pid), child.id());
+    let stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            crate::process::terminate_child(&mut child);
+            let _ = child.wait();
+            return Err("Stdout metadata tidak tersedia.".into());
+        }
+    };
+    let stderr = match child.stderr.take() {
+        Some(stderr) => stderr,
+        None => {
+            crate::process::terminate_child(&mut child);
+            let _ = child.wait();
+            return Err("Stderr metadata tidak tersedia.".into());
+        }
+    };
     let stdout_reader =
         std::thread::spawn(move || drain_bounded(stdout, MAX_METADATA_STDOUT_BYTES));
     let stderr_reader =
@@ -217,6 +254,13 @@ fn run_output(mut command: Command) -> Result<CapturedOutput, String> {
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
+            Ok(None) if cancelled.load(Ordering::SeqCst) => {
+                crate::process::terminate_child(&mut child);
+                let _ = child.wait();
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err("Pemeriksaan metadata dibatalkan.".into());
+            }
             Ok(None) if started.elapsed() >= METADATA_PROCESS_TIMEOUT => {
                 crate::process::terminate_child(&mut child);
                 let _ = child.wait();
@@ -427,6 +471,8 @@ pub async fn inspect_media(
     browser: String,
     profile: Option<String>,
     cookies_path: Option<String>,
+    active_pid: Arc<Mutex<Option<u32>>>,
+    cancelled: Arc<AtomicBool>,
 ) -> Result<VideoMetadata, String> {
     let safe_url =
         validate_media_url(&url).map_err(|error| format!("{SOURCE_INPUT_ERROR_PREFIX}{error}"))?;
@@ -437,6 +483,9 @@ pub async fn inspect_media(
         ));
     }
     tokio::task::spawn_blocking(move || {
+        if cancelled.load(Ordering::SeqCst) {
+            return Err("Pemeriksaan metadata dibatalkan.".into());
+        }
         let cookie_args = cookie_args(&browser, profile.as_deref(), cookies_path.as_deref())
             .map_err(|error| {
                 if cookies_path.is_some() {
@@ -460,7 +509,7 @@ pub async fn inspect_media(
                 command.args(js_runtime_args());
                 command.args(&cookie_args);
                 command.arg(&safe_url);
-                let output = run_output(command)?;
+                let output = run_output(command, &active_pid, &cancelled)?;
 
                 if output.status.success() {
                     break output;
@@ -473,6 +522,9 @@ pub async fn inspect_media(
                     break output;
                 }
 
+                if cancelled.load(Ordering::SeqCst) {
+                    return Err("Pemeriksaan metadata dibatalkan.".into());
+                }
                 std::thread::sleep(METADATA_RETRY_BASE_DELAY * attempt as u32);
             }
         };

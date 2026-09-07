@@ -21,7 +21,7 @@ export default function App() {
   return (
     <AppShell
       tab={app.tab}
-      historyCount={app.history.length}
+      historyCount={app.historyTotalCount}
       runtimeReady={app.runtimeReady}
       system={app.system}
       onTabChange={app.setTab}

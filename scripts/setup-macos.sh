@@ -96,7 +96,14 @@ fi
 mv "$YT_DLP_TMP" "$RUNTIME/yt-dlp"
 chmod +x "$RUNTIME/yt-dlp"
 
-git clone --depth 1 --branch v1.9.1 https://github.com/ggml-org/whisper.cpp.git "$WORK/whisper.cpp"
+WHISPER_VERSION="v1.9.1"
+WHISPER_COMMIT="f049fff95a089aa9969deb009cdd4892b3e74916"
+git clone --depth 1 --branch "$WHISPER_VERSION" https://github.com/ggml-org/whisper.cpp.git "$WORK/whisper.cpp"
+actual_whisper_commit="$(git -C "$WORK/whisper.cpp" rev-parse HEAD)"
+if [[ "$actual_whisper_commit" != "$WHISPER_COMMIT" ]]; then
+  echo "Commit whisper.cpp tidak sesuai: expected $WHISPER_COMMIT, actual $actual_whisper_commit" >&2
+  exit 1
+fi
 
 build_engine() {
   local build_dir="$1"

@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+pub(crate) const MAX_TRANSCRIPT_RESULT_BYTES: u64 = 32 * 1024 * 1024;
+pub(crate) const MAX_TRANSCRIPT_SEGMENTS: usize = 100_000;
+pub(crate) const MAX_TRANSCRIPT_TEXT_BYTES: usize = 16 * 1024 * 1024;
+
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct BrowserProfile {
@@ -159,6 +163,7 @@ pub struct HistoryItem {
 pub struct HistoryPageResult {
     pub items: Vec<HistoryItem>,
     pub has_more: bool,
+    pub total_count: i64,
 }
 
 #[derive(Deserialize, Clone)]

@@ -38,6 +38,8 @@ describe("HistoryPage", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Select all" }));
     expect(screen.getAllByRole("checkbox").filter((checkbox) => (checkbox as HTMLInputElement).checked)).toHaveLength(100);
+    expect(screen.getByRole("checkbox", { name: "Select history item: Video 1" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Delete history: Video 1" })).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Delete selected" }));
     fireEvent.click(screen.getByRole("button", { name: /^Delete$/ }));

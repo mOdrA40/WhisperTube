@@ -174,7 +174,7 @@ export function HistoryPage({ history, hasMore, loadingMore, onRefresh, onLoadMo
                 checked={selectedIds.has(item.id)}
                 disabled={!selectedIds.has(item.id) && selectedIds.size >= MAX_DELETE_SELECTION}
                 onChange={() => toggleSelection(item.id)}
-                aria-label={t("history.selectItem")}
+                aria-label={t("history.selectItem", { title: item.title })}
               />
               <button type="button" className="history-item-main" onClick={() => onLoad(item.id)}>
               <div className="history-icon">
@@ -196,8 +196,8 @@ export function HistoryPage({ history, hasMore, loadingMore, onRefresh, onLoadMo
                 type="button"
                 className="icon-button danger history-delete-button"
                 onClick={(event) => void handleDelete([item.id], event.currentTarget)}
-                title={t("history.deleteOne")}
-                aria-label={t("history.deleteOne")}
+                title={t("history.deleteOne", { title: item.title })}
+                aria-label={t("history.deleteOne", { title: item.title })}
               >
                 <Trash2 size={17} />
               </button>

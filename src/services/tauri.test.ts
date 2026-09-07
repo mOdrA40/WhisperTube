@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
-import { deleteModel, downloadModel, installAppUpdate, listHistory, startTranscription } from "./tauri";
+import { deleteModel, downloadModel, inspectMedia, installAppUpdate, listHistory, startTranscription } from "./tauri";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn().mockResolvedValue(undefined),
@@ -17,6 +17,7 @@ describe("Tauri IPC contracts", () => {
     await downloadModel("base");
     await deleteModel("base");
     await listHistory(42);
+    await inspectMedia("https://www.youtube.com/watch?v=test", "none", "", "");
     const request = {
       url: "https://www.youtube.com/watch?v=test",
       title: "Test",
@@ -35,7 +36,13 @@ describe("Tauri IPC contracts", () => {
     expect(invoke).toHaveBeenNthCalledWith(1, "download_model", { modelId: "base" });
     expect(invoke).toHaveBeenNthCalledWith(2, "delete_model", { modelId: "base" });
     expect(invoke).toHaveBeenNthCalledWith(3, "list_history", { beforeId: 42 });
-    expect(invoke).toHaveBeenNthCalledWith(4, "start_transcription", { request });
+    expect(invoke).toHaveBeenNthCalledWith(4, "inspect_media", {
+      url: "https://www.youtube.com/watch?v=test",
+      browser: "none",
+      profile: null,
+      cookiesPath: null,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(5, "start_transcription", { request });
   });
 
   it("reserves and releases the shared operation around app updates", async () => {

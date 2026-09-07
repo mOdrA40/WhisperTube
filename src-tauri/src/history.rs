@@ -13,7 +13,10 @@ use uuid::Uuid;
 
 use crate::{
     paths::app_data_dir,
-    types::{HistoryItem, HistoryPageResult, TranscriptRequest, TranscriptResult},
+    types::{
+        HistoryItem, HistoryPageResult, TranscriptRequest, TranscriptResult,
+        MAX_TRANSCRIPT_RESULT_BYTES, MAX_TRANSCRIPT_SEGMENTS, MAX_TRANSCRIPT_TEXT_BYTES,
+    },
 };
 
 const ORPHAN_JOB_GRACE: Duration = Duration::from_secs(24 * 60 * 60);
@@ -105,6 +108,9 @@ pub fn list_history(app: &AppHandle, before_id: Option<i64>) -> Result<HistoryPa
         return Err("Cursor history tidak valid.".into());
     }
     let conn = open_connection(app)?;
+    let total_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM history", [], |row| row.get(0))
+        .map_err(|e| format!("Gagal menghitung history: {e}"))?;
     let mut statement = conn
         .prepare(
             "SELECT id, title, channel, source_url, created_at, duration, language, model, backend
@@ -131,7 +137,11 @@ pub fn list_history(app: &AppHandle, before_id: Option<i64>) -> Result<HistoryPa
         .map_err(|e| format!("Gagal decode history: {e}"))?;
     let has_more = items.len() > HISTORY_PAGE_SIZE;
     items.truncate(HISTORY_PAGE_SIZE);
-    Ok(HistoryPageResult { items, has_more })
+    Ok(HistoryPageResult {
+        items,
+        has_more,
+        total_count,
+    })
 }
 
 pub fn load_history(app: &AppHandle, id: i64) -> Result<TranscriptResult, String> {
@@ -153,9 +163,30 @@ pub fn load_history(app: &AppHandle, id: i64) -> Result<TranscriptResult, String
     {
         return Err("File history berada di luar folder job WhisperTube.".into());
     }
+    let result_size = fs::metadata(&canonical_result)
+        .map_err(|e| format!("Gagal membaca ukuran file history: {e}"))?
+        .len();
+    if result_size > MAX_TRANSCRIPT_RESULT_BYTES {
+        return Err("File history melebihi batas ukuran aman.".into());
+    }
     let bytes = fs::read(canonical_result)
         .map_err(|e| format!("File transcript history tidak ditemukan: {e}"))?;
-    serde_json::from_slice(&bytes).map_err(|e| format!("File history rusak: {e}"))
+    decode_history_result(&bytes)
+}
+
+fn decode_history_result(bytes: &[u8]) -> Result<TranscriptResult, String> {
+    if bytes.len() as u64 > MAX_TRANSCRIPT_RESULT_BYTES {
+        return Err("File history melebihi batas ukuran aman.".into());
+    }
+    let result: TranscriptResult =
+        serde_json::from_slice(bytes).map_err(|e| format!("File history rusak: {e}"))?;
+    if result.segments.len() > MAX_TRANSCRIPT_SEGMENTS {
+        return Err("File history memiliki terlalu banyak segment.".into());
+    }
+    if result.text.len() > MAX_TRANSCRIPT_TEXT_BYTES {
+        return Err("Teks history melebihi batas ukuran aman.".into());
+    }
+    Ok(result)
 }
 
 fn job_dir_for_result(app: &AppHandle, result_path: &str) -> Result<Option<PathBuf>, String> {
@@ -429,4 +460,20 @@ pub fn reveal_audio(app: &AppHandle, audio_path: &str) -> Result<(), String> {
         .reveal_item_in_dir(canonical_path)
         .map_err(|e| format!("Gagal membuka lokasi audio: {e}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_history_result;
+    use crate::types::MAX_TRANSCRIPT_RESULT_BYTES;
+
+    #[test]
+    fn rejects_history_result_before_deserializing_an_oversized_file() {
+        let bytes = vec![b'x'; MAX_TRANSCRIPT_RESULT_BYTES as usize + 1];
+        let error = match decode_history_result(&bytes) {
+            Ok(_) => panic!("oversized history result should be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.contains("batas ukuran aman"));
+    }
 }

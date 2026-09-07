@@ -21,7 +21,7 @@ export function AppUpdateBanner({
 }: AppUpdateBannerProps) {
   const { t } = useI18n();
   const installing = status === "installing";
-  const percent = Math.round(progress.percent);
+  const percent = Math.max(0, Math.min(100, Math.round(progress.percent)));
 
   return (
     <section className="update-banner" role="status" aria-live="polite">
@@ -39,7 +39,14 @@ export function AppUpdateBanner({
             : update.notes ?? t("update.restartHint")}
         </p>
         {installing && (
-          <div className="update-progress-track" aria-label={t("update.installing", { percent })}>
+          <div
+            className="update-progress-track"
+            role="progressbar"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={percent}
+            aria-label={t("update.installing", { percent })}
+          >
             <span style={{ width: `${percent}%` }} />
           </div>
         )}

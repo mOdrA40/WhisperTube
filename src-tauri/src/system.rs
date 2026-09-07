@@ -485,6 +485,10 @@ pub fn system_status(app: &AppHandle) -> Result<SystemStatus, String> {
     let gpu_memory_mb = gpu.as_ref().and_then(|info| info.total_memory_mb);
     let gpu_free_memory_mb = gpu.as_ref().and_then(|info| info.free_memory_mb);
     let available_vram_mb = gpu.as_ref().and_then(GpuInfo::available_memory_mb);
+    let accelerators = accelerators::catalog(app, gpu.is_some())?;
+    let vulkan_installed = accelerators
+        .iter()
+        .any(|accelerator| accelerator.backend == "vulkan" && accelerator.installed);
     let cpu_threads = std::thread::available_parallelism()
         .map(|value| value.get())
         .unwrap_or(1);
@@ -500,6 +504,15 @@ pub fn system_status(app: &AppHandle) -> Result<SystemStatus, String> {
                 gpu_name.clone().unwrap_or_else(|| "NVIDIA GPU".into()),
                 format_vram(gpu_free_memory_mb),
                 recommended_id,
+            ),
+            recommended_id,
+            "auto".to_string(),
+        )
+    } else if nvidia && cuda_supported && !cuda_engine && vulkan_installed {
+        (
+            format!(
+                "NVIDIA terdeteksi ({}). Auto akan mencoba Vulkan; pasang CUDA jika ingin backend CUDA.",
+                format_vram(gpu_free_memory_mb),
             ),
             recommended_id,
             "auto".to_string(),
@@ -548,7 +561,7 @@ pub fn system_status(app: &AppHandle) -> Result<SystemStatus, String> {
         recommended_model_id,
         recommended_backend,
         cuda_supported,
-        accelerators: accelerators::catalog(app, gpu.is_some())?,
+        accelerators,
     })
 }
 

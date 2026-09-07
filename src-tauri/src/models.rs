@@ -2,6 +2,7 @@ use reqwest::Client as AsyncClient;
 use sha1::{Digest, Sha1};
 use sha2::Sha256;
 use std::{
+    collections::HashMap,
     fs,
     fs::File,
     io::{self, Read},
@@ -9,9 +10,9 @@ use std::{
     process::Command,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, Mutex, OnceLock,
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 use tauri::{AppHandle, Emitter};
 use tokio::io::AsyncWriteExt;
@@ -29,6 +30,28 @@ const CUDA_ENGINE_SHA256: &str = "106a2030eff8998e4ef320fe72e263a78449e9040386ee
 const MAX_CUDA_ARCHIVE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES: usize = 4096;
 const MAX_EXTRACTED_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ModelFingerprint {
+    size: u64,
+    modified: SystemTime,
+}
+
+static VERIFIED_MODELS: OnceLock<Mutex<HashMap<PathBuf, ModelFingerprint>>> = OnceLock::new();
+
+fn verified_models() -> &'static Mutex<HashMap<PathBuf, ModelFingerprint>> {
+    VERIFIED_MODELS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn model_fingerprint(path: &Path) -> Result<ModelFingerprint, String> {
+    let metadata = fs::metadata(path).map_err(|e| format!("Gagal membaca metadata model: {e}"))?;
+    Ok(ModelFingerprint {
+        size: metadata.len(),
+        modified: metadata
+            .modified()
+            .map_err(|e| format!("Waktu perubahan model tidak dapat dibaca: {e}"))?,
+    })
+}
 
 struct TemporaryFileGuard {
     path: PathBuf,
@@ -167,9 +190,43 @@ fn verify_sha1(path: &Path, expected: &str) -> Result<(), String> {
     let actual = format!("{:x}", hasher.finalize());
     if actual != expected {
         return Err(format!(
-            "Checksum model tidak cocok. Expected {expected}, actual {actual}. File dihapus demi keamanan."
+            "Checksum model tidak cocok. Expected {expected}, actual {actual}. File tidak dapat digunakan."
         ));
     }
+    Ok(())
+}
+
+pub fn verify_model_file(path: &Path, model_id: &str) -> Result<(), String> {
+    let spec = model_spec(model_id)?;
+    let fingerprint = model_fingerprint(path)
+        .map_err(|error| format!("Gagal membaca metadata model {}: {error}", spec.label))?;
+    if fingerprint.size == 0 {
+        return Err(format!(
+            "Model {} kosong dan tidak dapat digunakan.",
+            spec.label
+        ));
+    }
+    let already_verified = verified_models()
+        .lock()
+        .map_err(|_| "Cache verifikasi model terkunci".to_string())?
+        .get(path)
+        .is_some_and(|cached| *cached == fingerprint);
+    if already_verified {
+        return Ok(());
+    }
+    verify_sha1(path, spec.sha1)?;
+    let verified_fingerprint = model_fingerprint(path)
+        .map_err(|error| format!("Gagal memeriksa ulang model {}: {error}", spec.label))?;
+    if verified_fingerprint != fingerprint {
+        return Err(format!(
+            "Model {} berubah selama proses verifikasi dan tidak dapat digunakan.",
+            spec.label
+        ));
+    }
+    verified_models()
+        .lock()
+        .map_err(|_| "Cache verifikasi model terkunci".to_string())?
+        .insert(path.to_path_buf(), verified_fingerprint);
     Ok(())
 }
 
@@ -212,6 +269,10 @@ pub async fn download_model(
             .map_err(|e| format!("Gagal membersihkan download model lama: {e}"))?;
     }
     if dest.exists() {
+        let dest_for_verify = dest.clone();
+        tokio::task::spawn_blocking(move || verify_model_file(&dest_for_verify, &model_id))
+            .await
+            .map_err(|e| format!("Verifikasi model gagal: {e}"))??;
         return Ok(());
     }
     let url = format!(
@@ -591,14 +652,19 @@ pub async fn install_cuda_engine(app: AppHandle, cancelled: Arc<AtomicBool>) -> 
 pub fn delete_model(app: &AppHandle, model_id: &str) -> Result<(), String> {
     let path = model_path(app, model_id)?;
     if path.exists() {
-        fs::remove_file(path).map_err(|e| format!("Gagal menghapus model: {e}"))?;
+        fs::remove_file(&path).map_err(|e| format!("Gagal menghapus model: {e}"))?;
+    }
+    if let Ok(mut cache) = verified_models().lock() {
+        cache.remove(&path);
     }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_vram_available, recommended_model_id, TemporaryFileGuard};
+    use super::{
+        ensure_vram_available, recommended_model_id, verify_model_file, TemporaryFileGuard,
+    };
     use std::{fs, path::PathBuf};
     use uuid::Uuid;
 
@@ -625,5 +691,15 @@ mod tests {
             let _guard = TemporaryFileGuard::new(PathBuf::from(&path));
         }
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn rejects_empty_existing_model_file() {
+        let path =
+            std::env::temp_dir().join(format!("whispertube-empty-model-{}.bin", Uuid::new_v4()));
+        fs::write(&path, []).unwrap();
+        let error = verify_model_file(&path, "base").unwrap_err();
+        assert!(error.contains("kosong"));
+        fs::remove_file(path).unwrap();
     }
 }

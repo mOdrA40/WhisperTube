@@ -11,6 +11,7 @@ pub enum OperationState {
     ModelDownloading(String),
     RuntimeInstalling(String),
     ModelDeleting(String),
+    Inspecting,
     AppUpdating,
 }
 
@@ -62,6 +63,14 @@ impl OperationGuard {
         Self::reserve(state, OperationState::ModelDeleting(model_id), None)
     }
 
+    pub fn reserve_inspecting(state: &AppState) -> Result<Self, String> {
+        Self::reserve(
+            state,
+            OperationState::Inspecting,
+            Some(&state.inspect_cancelled),
+        )
+    }
+
     pub fn reserve_app_update(state: &AppState) -> Result<(), String> {
         let mut active = state
             .operation
@@ -90,6 +99,10 @@ impl OperationGuard {
             }
             OperationState::RuntimeInstalling(_) => {
                 state.runtime_cancelled.store(true, Ordering::SeqCst);
+                true
+            }
+            OperationState::Inspecting => {
+                state.inspect_cancelled.store(true, Ordering::SeqCst);
                 true
             }
             OperationState::Idle
@@ -148,6 +161,7 @@ fn operation_conflict_message(operation: &OperationState) -> String {
         OperationState::ModelDeleting(model_id) => {
             format!("Model {model_id} sedang dihapus.")
         }
+        OperationState::Inspecting => "Pemeriksaan metadata sedang berjalan.".into(),
         OperationState::AppUpdating => {
             "Pembaruan aplikasi sedang berjalan. Tunggu sampai selesai terlebih dahulu.".into()
         }
@@ -188,6 +202,7 @@ pub struct AppState {
     pub cancelled: Arc<AtomicBool>,
     pub model_cancelled: Arc<AtomicBool>,
     pub runtime_cancelled: Arc<AtomicBool>,
+    pub inspect_cancelled: Arc<AtomicBool>,
     pub vulkan_probe: Arc<Mutex<Option<VulkanProbeResult>>>,
 }
 
@@ -288,6 +303,7 @@ mod tests {
         assert!(JobGuard::reserve(&state).is_err());
         assert!(OperationGuard::reserve_runtime_install(&state, "cuda".into()).is_err());
         assert!(OperationGuard::reserve_model_delete(&state, "base".into()).is_err());
+        assert!(OperationGuard::reserve_inspecting(&state).is_err());
         assert!(OperationGuard::reserve_app_update(&state).is_err());
         drop(model);
 
@@ -295,6 +311,7 @@ mod tests {
         assert!(JobGuard::reserve(&state).is_err());
         assert!(OperationGuard::reserve_model_download(&state, "base".into()).is_err());
         assert!(OperationGuard::reserve_model_delete(&state, "base".into()).is_err());
+        assert!(OperationGuard::reserve_inspecting(&state).is_err());
         assert!(OperationGuard::reserve_app_update(&state).is_err());
         drop(runtime);
 
@@ -302,6 +319,7 @@ mod tests {
         assert!(JobGuard::reserve(&state).is_err());
         assert!(OperationGuard::reserve_model_download(&state, "base".into()).is_err());
         assert!(OperationGuard::reserve_runtime_install(&state, "cuda".into()).is_err());
+        assert!(OperationGuard::reserve_inspecting(&state).is_err());
         assert!(OperationGuard::reserve_app_update(&state).is_err());
         drop(model_delete);
 
@@ -310,6 +328,15 @@ mod tests {
         assert!(OperationGuard::reserve_model_download(&state, "base".into()).is_err());
         assert!(OperationGuard::reserve_runtime_install(&state, "cuda".into()).is_err());
         assert!(OperationGuard::reserve_model_delete(&state, "base".into()).is_err());
+        assert!(OperationGuard::reserve_inspecting(&state).is_err());
         OperationGuard::release_app_update(&state).unwrap();
+
+        let inspect = OperationGuard::reserve_inspecting(&state).unwrap();
+        assert!(JobGuard::reserve(&state).is_err());
+        assert!(OperationGuard::reserve_model_download(&state, "base".into()).is_err());
+        assert!(OperationGuard::reserve_runtime_install(&state, "cuda".into()).is_err());
+        assert!(OperationGuard::reserve_model_delete(&state, "base".into()).is_err());
+        assert!(OperationGuard::reserve_app_update(&state).is_err());
+        drop(inspect);
     }
 }

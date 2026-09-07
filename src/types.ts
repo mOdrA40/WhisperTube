@@ -156,6 +156,7 @@ export type HistoryItem = {
 export type HistoryPageResult = {
   items: HistoryItem[];
   hasMore: boolean;
+  totalCount: number;
 };
 
 export type TranscriptRequest = {

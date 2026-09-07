@@ -85,6 +85,7 @@ export function SettingsPage({
   const cookiesContinueRef = useRef<HTMLButtonElement>(null);
   const cookiesDialogWasOpen = useRef(false);
   const modelDownloadActive = Object.keys(downloadingModel).length > 0;
+  const updatePercent = Math.max(0, Math.min(100, Math.round(appUpdateProgress.percent)));
   const interfaceLanguageOptions: SelectOption[] = uiLanguageOptions.map((option) => ({
     value: option.value,
     label: option.label,
@@ -164,10 +165,17 @@ export function SettingsPage({
             )}
             {appUpdateStatus === "installing" && (
               <div className="update-settings-progress">
-                <div className="update-progress-track">
-                  <span style={{ width: `${Math.round(appUpdateProgress.percent)}%` }} />
+                <div
+                  className="update-progress-track"
+                  role="progressbar"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={updatePercent}
+                  aria-label={t("update.installing", { percent: updatePercent })}
+                >
+                  <span style={{ width: `${updatePercent}%` }} />
                 </div>
-                <small>{t("update.installing", { percent: Math.round(appUpdateProgress.percent) })}</small>
+                <small>{t("update.installing", { percent: updatePercent })}</small>
               </div>
             )}
           </div>

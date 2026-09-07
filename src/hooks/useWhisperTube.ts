@@ -113,6 +113,7 @@ export function useWhisperTube() {
   const [browsers, setBrowsers] = useState<BrowserInfo[]>([]);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [historyTotalCount, setHistoryTotalCount] = useState(0);
   const [historyHasMore, setHistoryHasMore] = useState(false);
   const [loadingMoreHistory, setLoadingMoreHistory] = useState(false);
   const [result, setResult] = useState<TranscriptResult | null>(null);
@@ -158,6 +159,7 @@ export function useWhisperTube() {
     setModels(nextModels);
     setHistory(nextHistory.items);
     setHistoryHasMore(nextHistory.hasMore);
+    setHistoryTotalCount(nextHistory.totalCount);
   }, []);
 
   useEffect(() => {
@@ -609,6 +611,7 @@ export function useWhisperTube() {
         return [...previous, ...page.items.filter((item) => !known.has(item.id))];
       });
       setHistoryHasMore(page.hasMore);
+      setHistoryTotalCount(page.totalCount);
     } catch (cause) {
       setError(friendlyError(cause));
     } finally {
@@ -660,6 +663,7 @@ export function useWhisperTube() {
     system,
     models,
     history,
+    historyTotalCount,
     historyHasMore,
     loadingMoreHistory,
     result,

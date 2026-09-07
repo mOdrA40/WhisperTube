@@ -85,12 +85,23 @@ pub fn end_app_update(state: State<'_, AppState>) -> Result<(), String> {
 #[tauri::command(rename_all = "camelCase")]
 pub async fn inspect_media(
     app: AppHandle,
+    state: State<'_, AppState>,
     url: String,
     browser: String,
     profile: Option<String>,
     cookies_path: Option<String>,
 ) -> Result<VideoMetadata, String> {
-    sources::inspect_media(app, url, browser, profile, cookies_path).await
+    let _operation = OperationGuard::reserve_inspecting(&state)?;
+    sources::inspect_media(
+        app,
+        url,
+        browser,
+        profile,
+        cookies_path,
+        state.active_pid.clone(),
+        state.inspect_cancelled.clone(),
+    )
+    .await
 }
 
 #[tauri::command(rename_all = "camelCase")]

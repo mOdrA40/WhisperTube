@@ -139,6 +139,7 @@ function NavItem({ active, icon, badge, onClick, children }: NavItemProps) {
       type="button"
       className={`nav-item ${active ? "active" : ""}`}
       onClick={onClick}
+      aria-current={active ? "page" : undefined}
     >
       <div className="nav-item-icon">{icon}</div>
       <span className="nav-item-label">{children}</span>

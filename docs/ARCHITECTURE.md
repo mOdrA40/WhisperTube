@@ -102,8 +102,10 @@ the UI can reveal it in the system file manager.
 ## Runtime packs
 
 Development runtime binaries live under `src-tauri/runtime/<platform>` so Tauri can bundle them as resources.
-The Windows bootstrap pins yt-dlp 2026.08.19, FFmpeg 9.0.1, and whisper.cpp
-v1.9.1; archives are downloaded to unique temporary staging paths, checksum
+The Windows bootstrap pins yt-dlp 2026.08.19, FFmpeg 9.0.1, and the
+whisper.cpp v1.9.1 CPU asset by checksum. Unix source builds and accelerator
+packs pin whisper.cpp v1.9.1 to commit
+`f049fff95a089aa9969deb009cdd4892b3e74916`; archives are downloaded to unique temporary staging paths, checksum
 verified, self-tested, and activated only after validation succeeds.
 
 Windows:
@@ -156,11 +158,25 @@ the app session; cancellation and timeout failures are retried. A failed probe
 causes Auto to fall back to CPU when the CPU engine is available; explicitly
 selected Vulkan fails closed with the diagnostic error.
 The full-buffer transcription path is limited to two hours and rechecks the
-actual converted WAV size before loading inference buffers.
+actual converted WAV size before loading inference buffers. Its initial disk
+reservation covers the maximum source download, generated WAV, and a safety
+buffer; periodic checks count only bytes that still need to be written so
+existing partial files are not double-counted. Output files and stored result
+JSON also have hard byte, segment-count, and transcript-text limits.
 
-Transcription, model download/delete, runtime installation, and app update share
-one atomic operation reservation in `AppState`, so separate IPC calls cannot
-pass independent preflight checks and overlap during the mutation window.
+Metadata inspection, transcription, model download/delete, runtime
+installation, and app update share one atomic operation reservation in
+`AppState`, so separate IPC calls cannot pass independent preflight checks and
+overlap during the mutation window. Metadata and transcription child processes
+are registered for cancellation and shutdown cleanup. Pipeline subprocesses
+also use inactivity watchdogs; CPU inference receives a longer allowance than
+download, conversion, and accelerated inference.
+
+Installed models are checksum-verified before use. A successful verification
+is cached only for the current file size and modification timestamp, avoiding a
+full model hash on every subsequent job while invalidating the cache when the
+file changes. CPU inference can use up to 16 logical threads; accelerated
+backends remain capped at 12 to keep host work responsive.
 
 The repository also contains `.github/workflows/build-accelerator-packs.yml`.
 It builds Metal packs for macOS Intel/Apple Silicon and Vulkan packs for Linux

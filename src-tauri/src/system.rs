@@ -139,14 +139,11 @@ pub fn detect_nvidia() -> Option<GpuInfo> {
     let output = candidates.into_iter().find_map(|program| {
         let mut command = Command::new(program);
         crate::process::hide_console(&mut command);
-        command
-            .args([
-                "--query-gpu=name,memory.total,memory.free",
-                "--format=csv,noheader,nounits",
-            ])
-            .output()
-            .ok()
-            .filter(|out| out.status.success())
+        command.args([
+            "--query-gpu=name,memory.total,memory.free",
+            "--format=csv,noheader,nounits",
+        ]);
+        command_output_with_timeout(command, Duration::from_secs(2))
     });
     match output {
         Some(out) => {
@@ -194,15 +191,13 @@ fn clean_gpu_name(value: &str) -> Option<String> {
 fn detect_generic_gpu() -> Option<GpuInfo> {
     let mut command = Command::new("powershell.exe");
     crate::process::hide_console(&mut command);
-    let output = command
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "Get-CimInstance -ClassName Win32_VideoController | Select-Object -ExpandProperty Name",
-        ])
-        .output()
-        .ok()?;
+    command.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "Get-CimInstance -ClassName Win32_VideoController | Select-Object -ExpandProperty Name",
+    ]);
+    let output = command_output_with_timeout(command, Duration::from_secs(3))?;
     let name = String::from_utf8_lossy(&output.stdout)
         .lines()
         .find_map(clean_gpu_name)?;
@@ -217,10 +212,8 @@ fn detect_generic_gpu() -> Option<GpuInfo> {
 fn detect_generic_gpu() -> Option<GpuInfo> {
     let mut command = Command::new("system_profiler");
     crate::process::hide_console(&mut command);
-    let name = command
-        .args(["SPDisplaysDataType", "-detailLevel", "basic"])
-        .output()
-        .ok()
+    command.args(["SPDisplaysDataType", "-detailLevel", "basic"]);
+    let name = command_output_with_timeout(command, Duration::from_secs(5))
         .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
         .and_then(|output| {
             output.lines().find_map(|line| {

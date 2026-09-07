@@ -113,6 +113,8 @@ export function useWhisperTube() {
   const [browsers, setBrowsers] = useState<BrowserInfo[]>([]);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [historyHasMore, setHistoryHasMore] = useState(false);
+  const [loadingMoreHistory, setLoadingMoreHistory] = useState(false);
   const [result, setResult] = useState<TranscriptResult | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [progress, setProgress] = useState<ProgressPayload>(initialProgress);
@@ -154,7 +156,8 @@ export function useWhisperTube() {
       autoConfigured.current = true;
     }
     setModels(nextModels);
-    setHistory(nextHistory);
+    setHistory(nextHistory.items);
+    setHistoryHasMore(nextHistory.hasMore);
   }, []);
 
   useEffect(() => {
@@ -219,7 +222,7 @@ export function useWhisperTube() {
   }
 
   async function handleInstallAppUpdate() {
-    if (!appUpdate || busy) return;
+    if (!appUpdate || operationActive) return;
     setAppUpdateStatus("installing");
     setAppUpdateError(null);
     setAppUpdateProgress({ downloadedBytes: 0, totalBytes: null, percent: 0 });
@@ -301,6 +304,9 @@ export function useWhisperTube() {
 
   const autoAcceleratorInstalled = Boolean(system?.accelerators.some((accelerator) => accelerator.installed));
   const modelDownloadActive = Object.keys(downloadingModel).length > 0;
+  const operationActive = Boolean(
+    busy || inspecting || modelDownloadActive || installingCuda || installingAccelerator,
+  );
   const cudaInstallRequired = Boolean(system?.cudaSupported && system.nvidia && backend === "auto" && !system.cudaEngine && !autoAcceleratorInstalled);
   const vramWarning = useMemo(() => {
     if (!selectedModel || backend === "cpu" || backend === "metal" || backend === "vulkan" || !system) return null;
@@ -377,6 +383,8 @@ export function useWhisperTube() {
                     ? t("error.sourceRuntime")
                     : normalizedMessage.startsWith("media_source_metadata:")
                       ? t("error.sourceMetadata")
+                      : normalizedMessage.startsWith("media_source_duration:")
+                        ? t("error.sourceDuration")
                       : normalizedMessage.startsWith("media_source_browser:")
                         ? t("error.sourceBrowser")
                         : normalizedMessage.startsWith("media_source_input:")
@@ -588,6 +596,24 @@ export function useWhisperTube() {
     }
   }
 
+  async function handleLoadMoreHistory() {
+    if (loadingMoreHistory || !historyHasMore) return;
+    setLoadingMoreHistory(true);
+    setError(null);
+    try {
+      const page = await listHistory(history.at(-1)?.id ?? null);
+      setHistory((previous) => {
+        const known = new Set(previous.map((item) => item.id));
+        return [...previous, ...page.items.filter((item) => !known.has(item.id))];
+      });
+      setHistoryHasMore(page.hasMore);
+    } catch (cause) {
+      setError(friendlyError(cause));
+    } finally {
+      setLoadingMoreHistory(false);
+    }
+  }
+
   async function handleRevealAudio() {
     if (!result?.audioPath) return;
     try {
@@ -632,11 +658,14 @@ export function useWhisperTube() {
     system,
     models,
     history,
+    historyHasMore,
+    loadingMoreHistory,
     result,
     searchQuery,
     setSearchQuery,
     progress,
     busy,
+    operationActive,
     inspecting,
     error,
     setError,
@@ -669,6 +698,7 @@ export function useWhisperTube() {
     startTranscription: handleStartTranscription,
     cancelJob: handleCancelJob,
     loadHistory: handleLoadHistory,
+    loadMoreHistory: handleLoadMoreHistory,
     deleteHistory: handleDeleteHistory,
     exportFile: handleExport,
     revealAudio: handleRevealAudio,

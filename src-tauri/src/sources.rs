@@ -1,10 +1,17 @@
 use serde_json::Value;
-use std::process::{Command, Stdio};
-use std::{sync::OnceLock, time::Duration};
+use std::io::Read;
+use std::process::{Command, ExitStatus, Stdio};
+use std::{
+    sync::OnceLock,
+    time::{Duration, Instant},
+};
 use tauri::AppHandle;
 use url::Url;
 
-use crate::{browsers::cookie_args, paths::tool_path, types::VideoMetadata};
+use crate::{
+    browsers::cookie_args, paths::tool_path, transcription::MAX_MEDIA_DURATION_SECONDS,
+    types::VideoMetadata,
+};
 
 #[derive(Clone, Copy)]
 struct SourceDefinition {
@@ -73,6 +80,9 @@ const SOURCES: &[SourceDefinition] = &[
 
 const METADATA_MAX_ATTEMPTS: usize = 3;
 const METADATA_RETRY_BASE_DELAY: Duration = Duration::from_millis(900);
+const METADATA_PROCESS_TIMEOUT: Duration = Duration::from_secs(45);
+const MAX_METADATA_STDOUT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_METADATA_STDERR_BYTES: usize = 256 * 1024;
 const TIKTOK_REHYDRATION_ERROR: &str = "unable to extract universal data for rehydration";
 const TIKTOK_TRANSIENT_ERROR_PREFIX: &str = "media_tiktok_transient:";
 const SOURCE_TRANSIENT_ERROR_PREFIX: &str = "media_source_transient:";
@@ -81,6 +91,7 @@ const SOURCE_MEMBERSHIP_ERROR_PREFIX: &str = "media_source_membership_required:"
 const SOURCE_ACCESS_ERROR_PREFIX: &str = "media_source_access_required:";
 const SOURCE_UNAVAILABLE_ERROR_PREFIX: &str = "media_source_unavailable:";
 const SOURCE_INPUT_ERROR_PREFIX: &str = "media_source_input:";
+const SOURCE_DURATION_ERROR_PREFIX: &str = "media_source_duration:";
 const SOURCE_BROWSER_ERROR_PREFIX: &str = "media_source_browser:";
 const SOURCE_BROWSER_DECRYPTION_ERROR_PREFIX: &str = "media_source_browser_decryption:";
 const SOURCE_COOKIE_FILE_ERROR_PREFIX: &str = "media_source_cookie_file:";
@@ -125,6 +136,19 @@ pub fn validate_media_url(raw: &str) -> Result<String, String> {
     Ok(parsed.to_string())
 }
 
+pub(crate) fn validate_media_duration(duration: f64, is_live: bool) -> Result<(), String> {
+    if is_live || !duration.is_finite() || duration <= 0.0 {
+        return Err("Live stream atau media tanpa durasi pasti belum didukung.".into());
+    }
+    if duration > MAX_MEDIA_DURATION_SECONDS {
+        return Err(format!(
+            "Durasi media melebihi batas {} jam.",
+            (MAX_MEDIA_DURATION_SECONDS / 3600.0) as u64
+        ));
+    }
+    Ok(())
+}
+
 fn source_label_from_metadata(value: &Value, safe_url: &str) -> String {
     value
         .get("extractor_key")
@@ -141,11 +165,92 @@ fn source_label_from_metadata(value: &Value, safe_url: &str) -> String {
         .unwrap_or_else(|| "Video".into())
 }
 
-fn run_output(mut command: Command) -> Result<std::process::Output, String> {
+struct CapturedOutput {
+    status: ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+fn drain_bounded(mut reader: impl Read, limit: usize) -> Result<(Vec<u8>, bool), String> {
+    let mut captured = Vec::with_capacity(limit.min(64 * 1024));
+    let mut buffer = [0u8; 16 * 1024];
+    let mut truncated = false;
+    loop {
+        let read = match reader.read(&mut buffer) {
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(format!("Gagal membaca output metadata: {error}")),
+        };
+        if read == 0 {
+            break;
+        }
+        let remaining = limit.saturating_sub(captured.len());
+        let retained = remaining.min(read);
+        captured.extend_from_slice(&buffer[..retained]);
+        truncated |= retained < read;
+    }
+    Ok((captured, truncated))
+}
+
+fn run_output(mut command: Command) -> Result<CapturedOutput, String> {
     crate::process::hide_console(&mut command);
     command
-        .output()
-        .map_err(|e| format!("Gagal menjalankan process: {e}"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null());
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("Gagal menjalankan process metadata: {e}"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Stdout metadata tidak tersedia.".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "Stderr metadata tidak tersedia.".to_string())?;
+    let stdout_reader =
+        std::thread::spawn(move || drain_bounded(stdout, MAX_METADATA_STDOUT_BYTES));
+    let stderr_reader =
+        std::thread::spawn(move || drain_bounded(stderr, MAX_METADATA_STDERR_BYTES));
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() >= METADATA_PROCESS_TIMEOUT => {
+                crate::process::terminate_child(&mut child);
+                let _ = child.wait();
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err("Pemeriksaan metadata melewati batas waktu 45 detik.".into());
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(error) => {
+                crate::process::terminate_child(&mut child);
+                let _ = child.wait();
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err(format!("Gagal memantau process metadata: {error}"));
+            }
+        }
+    };
+    let (stdout, stdout_truncated) = stdout_reader
+        .join()
+        .map_err(|_| "Reader stdout metadata gagal.".to_string())??;
+    let (mut stderr, stderr_truncated) = stderr_reader
+        .join()
+        .map_err(|_| "Reader stderr metadata gagal.".to_string())??;
+    if stdout_truncated {
+        return Err("Output metadata terlalu besar untuk diproses dengan aman.".into());
+    }
+    if stderr_truncated {
+        stderr.extend_from_slice(b"\n[stderr dipotong karena terlalu panjang]");
+    }
+    Ok(CapturedOutput {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 pub fn js_runtime_args() -> Vec<String> {
@@ -383,6 +488,11 @@ pub async fn inspect_media(
         }
         let value: Value = serde_json::from_slice(&output.stdout)
             .map_err(|e| format!("{SOURCE_METADATA_ERROR_PREFIX}Output metadata yt-dlp tidak valid: {e}"))?;
+        let duration = value.get("duration").and_then(Value::as_f64).unwrap_or(0.0);
+        let is_live = value.get("is_live").and_then(Value::as_bool).unwrap_or(false)
+            || matches!(value.get("live_status").and_then(Value::as_str), Some("is_live" | "is_upcoming"));
+        validate_media_duration(duration, is_live)
+            .map_err(|error| format!("{SOURCE_DURATION_ERROR_PREFIX}{error}"))?;
         Ok(VideoMetadata {
             id: value.get("id").and_then(Value::as_str).unwrap_or("unknown").into(),
             title: value.get("title").and_then(Value::as_str).unwrap_or("Untitled video").into(),
@@ -392,7 +502,7 @@ pub async fn inspect_media(
                 .and_then(Value::as_str)
                 .unwrap_or("Unknown channel")
                 .into(),
-            duration: value.get("duration").and_then(Value::as_f64).unwrap_or(0.0),
+            duration,
             thumbnail: value.get("thumbnail").and_then(Value::as_str).map(str::to_string),
             webpage_url: value
                 .get("webpage_url")
@@ -410,9 +520,10 @@ pub async fn inspect_media(
 #[cfg(test)]
 mod tests {
     use super::{
-        metadata_error_prefix, metadata_retry_reason, source_for_host, validate_media_url,
-        MetadataRetryReason,
+        drain_bounded, metadata_error_prefix, metadata_retry_reason, source_for_host,
+        validate_media_duration, validate_media_url, MetadataRetryReason,
     };
+    use std::io::Cursor;
 
     #[test]
     fn accepts_supported_social_video_hosts() {
@@ -429,6 +540,23 @@ mod tests {
                 "expected {url} to be accepted"
             );
         }
+    }
+
+    #[test]
+    fn rejects_live_unknown_and_excessively_long_media() {
+        assert!(validate_media_duration(60.0, false).is_ok());
+        assert!(validate_media_duration(0.0, false).is_err());
+        assert!(validate_media_duration(f64::NAN, false).is_err());
+        assert!(validate_media_duration(60.0, true).is_err());
+        assert!(validate_media_duration(8.0 * 60.0 * 60.0 + 1.0, false).is_err());
+    }
+
+    #[test]
+    fn bounded_metadata_reader_drains_but_caps_retained_bytes() {
+        let input = vec![b'x'; 1024];
+        let (captured, truncated) = drain_bounded(Cursor::new(input), 128).unwrap();
+        assert_eq!(captured.len(), 128);
+        assert!(truncated);
     }
 
     #[test]

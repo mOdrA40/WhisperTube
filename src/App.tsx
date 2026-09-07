@@ -32,7 +32,7 @@ export default function App() {
           update={app.appUpdate}
           status={app.appUpdateStatus}
           progress={app.appUpdateProgress}
-          busy={app.busy}
+          busy={app.operationActive}
           onInstall={app.installAppUpdate}
           onDismiss={() => setDismissedUpdateVersion(app.appUpdate?.version ?? null)}
         />
@@ -93,7 +93,10 @@ export default function App() {
       {app.tab === "history" && (
         <HistoryPage
           history={app.history}
+          hasMore={app.historyHasMore}
+          loadingMore={app.loadingMoreHistory}
           onRefresh={app.refreshSystem}
+          onLoadMore={app.loadMoreHistory}
           onLoad={app.loadHistory}
           onDelete={app.deleteHistory}
           onTabChange={app.setTab}
@@ -106,7 +109,7 @@ export default function App() {
           browsers={app.browsers}
           system={app.system}
           models={app.models}
-          busy={app.busy}
+          busy={app.operationActive}
           downloadingModel={app.downloadingModel}
           accelerators={app.system?.accelerators ?? []}
           installingCuda={app.installingCuda}

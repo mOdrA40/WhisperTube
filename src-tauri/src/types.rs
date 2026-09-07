@@ -154,6 +154,13 @@ pub struct HistoryItem {
     pub backend: String,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryPageResult {
+    pub items: Vec<HistoryItem>,
+    pub has_more: bool,
+}
+
 #[derive(Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct TranscriptRequest {

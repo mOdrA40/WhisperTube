@@ -6,7 +6,8 @@ use crate::{
     state::{AppState, JobGuard},
     system, transcription,
     types::{
-        HistoryItem, ModelInfo, SystemStatus, TranscriptRequest, TranscriptResult, VideoMetadata,
+        HistoryPageResult, ModelInfo, SystemStatus, TranscriptRequest, TranscriptResult,
+        VideoMetadata,
     },
 };
 
@@ -262,9 +263,9 @@ pub fn cancel_job(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
-pub fn list_history(app: AppHandle) -> Result<Vec<HistoryItem>, String> {
-    history::list_history(&app)
+#[tauri::command(rename_all = "camelCase")]
+pub fn list_history(app: AppHandle, before_id: Option<i64>) -> Result<HistoryPageResult, String> {
+    history::list_history(&app, before_id)
 }
 
 #[tauri::command]

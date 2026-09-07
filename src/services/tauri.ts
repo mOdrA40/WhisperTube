@@ -12,7 +12,7 @@ import type {
   AcceleratorDownloadPayload,
   BackendChoice,
   CudaDownloadPayload,
-  HistoryItem,
+  HistoryPageResult,
   ModelDownloadPayload,
   ModelInfo,
   ProgressPayload,
@@ -79,8 +79,8 @@ export function listBrowsers() {
   return invoke<BrowserInfo[]>("list_browsers");
 }
 
-export function listHistory() {
-  return invoke<HistoryItem[]>("list_history");
+export function listHistory(beforeId: number | null = null) {
+  return invoke<HistoryPageResult>("list_history", { beforeId });
 }
 
 export function inspectMedia(url: string, browser: BrowserChoice, browserProfile: string, cookiesPath: string) {

@@ -153,6 +153,11 @@ export type HistoryItem = {
   backend: string;
 };
 
+export type HistoryPageResult = {
+  items: HistoryItem[];
+  hasMore: boolean;
+};
+
 export type TranscriptRequest = {
   url: string;
   title: string;

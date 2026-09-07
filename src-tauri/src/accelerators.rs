@@ -23,6 +23,9 @@ use crate::{
 
 const RELEASE_REPOSITORY: &str = "mOdrA40/WhisperTube";
 const RELEASE_TAG: &str = "accelerators-v0.1.0";
+const MAX_ACCELERATOR_ARCHIVE_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_ARCHIVE_ENTRIES: usize = 4096;
+const MAX_EXTRACTED_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 // These values are filled by scripts/sync-accelerator-hashes.ps1 after the
 // matching public GitHub Release has been built and reviewed. Keeping the
@@ -265,6 +268,9 @@ async fn download_archive(
         ));
     }
     let total = response.content_length().unwrap_or(0);
+    if total > MAX_ACCELERATOR_ARCHIVE_BYTES {
+        return Err("Ukuran accelerator dari server melebihi batas aman.".into());
+    }
     let mut file = tokio::fs::File::create(destination)
         .await
         .map_err(|e| format!("Gagal membuat file accelerator: {e}"))?;
@@ -281,6 +287,9 @@ async fn download_archive(
         let Some(chunk) = chunk else {
             break;
         };
+        if downloaded.saturating_add(chunk.len() as u64) > MAX_ACCELERATOR_ARCHIVE_BYTES {
+            return Err("Download accelerator melebihi batas ukuran aman.".into());
+        }
         if cancelled.load(Ordering::SeqCst) {
             return Err("Download accelerator dibatalkan.".into());
         }
@@ -330,8 +339,12 @@ fn extract_zip_safely(archive_path: &Path, destination: &Path) -> Result<(), Str
         File::open(archive_path).map_err(|e| format!("Gagal membuka archive accelerator: {e}"))?;
     let mut archive = ZipArchive::new(archive_file)
         .map_err(|e| format!("Archive accelerator tidak valid: {e}"))?;
+    if archive.len() > MAX_ARCHIVE_ENTRIES {
+        return Err("Archive accelerator memiliki terlalu banyak file.".into());
+    }
     fs::create_dir_all(destination)
         .map_err(|e| format!("Gagal membuat folder extract accelerator: {e}"))?;
+    let mut extracted_bytes = 0u64;
     for index in 0..archive.len() {
         let mut entry = archive
             .by_index(index)
@@ -340,6 +353,10 @@ fn extract_zip_safely(archive_path: &Path, destination: &Path) -> Result<(), Str
             .enclosed_name()
             .ok_or_else(|| "Archive accelerator memiliki path tidak aman.".to_string())?
             .to_path_buf();
+        extracted_bytes = extracted_bytes.saturating_add(entry.size());
+        if extracted_bytes > MAX_EXTRACTED_BYTES {
+            return Err("Isi archive accelerator melebihi batas ukuran aman.".into());
+        }
         let target = destination.join(relative);
         if entry.name().ends_with('/') {
             fs::create_dir_all(&target)

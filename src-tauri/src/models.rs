@@ -26,6 +26,9 @@ use crate::{
 const CUDA_ENGINE_VERSION: &str = "v1.9.1";
 const CUDA_ENGINE_BUILD: &str = "12.4.0";
 const CUDA_ENGINE_SHA256: &str = "106a2030eff8998e4ef320fe72e263a78449e9040386ee27c41ea80b001b601b";
+const MAX_CUDA_ARCHIVE_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_ARCHIVE_ENTRIES: usize = 4096;
+const MAX_EXTRACTED_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 struct TemporaryFileGuard {
     path: PathBuf,
@@ -233,6 +236,10 @@ pub async fn download_model(
     let total = response
         .content_length()
         .unwrap_or(spec.size_mb * 1024 * 1024);
+    let max_download_bytes = spec.size_mb.saturating_mul(1024 * 1024).saturating_mul(5) / 4;
+    if total > max_download_bytes {
+        return Err("Ukuran model dari server melebihi batas aman.".into());
+    }
     let mut file = tokio::fs::File::create(&temp)
         .await
         .map_err(|e| format!("Gagal membuat file model: {e}"))?;
@@ -250,6 +257,9 @@ pub async fn download_model(
         let Some(chunk) = chunk else {
             break;
         };
+        if downloaded.saturating_add(chunk.len() as u64) > max_download_bytes {
+            return Err("Download model melebihi batas ukuran aman.".into());
+        }
         if cancelled.load(Ordering::SeqCst) {
             return Err("Download model dibatalkan.".into());
         }
@@ -326,9 +336,13 @@ fn extract_zip_safely(archive_path: &Path, destination: &Path) -> Result<(), Str
         File::open(archive_path).map_err(|e| format!("Gagal membuka archive CUDA: {e}"))?;
     let mut archive =
         ZipArchive::new(archive_file).map_err(|e| format!("Archive CUDA tidak valid: {e}"))?;
+    if archive.len() > MAX_ARCHIVE_ENTRIES {
+        return Err("Archive CUDA memiliki terlalu banyak file.".into());
+    }
     fs::create_dir_all(destination)
         .map_err(|e| format!("Gagal membuat folder extract CUDA: {e}"))?;
 
+    let mut extracted_bytes = 0u64;
     for index in 0..archive.len() {
         let mut entry = archive
             .by_index(index)
@@ -337,6 +351,10 @@ fn extract_zip_safely(archive_path: &Path, destination: &Path) -> Result<(), Str
             .enclosed_name()
             .ok_or_else(|| "Archive CUDA memiliki path yang tidak aman.".to_string())?
             .to_path_buf();
+        extracted_bytes = extracted_bytes.saturating_add(entry.size());
+        if extracted_bytes > MAX_EXTRACTED_BYTES {
+            return Err("Isi archive CUDA melebihi batas ukuran aman.".into());
+        }
         let target = destination.join(relative);
         if entry.name().ends_with('/') {
             fs::create_dir_all(&target).map_err(|e| format!("Gagal membuat folder CUDA: {e}"))?;
@@ -412,6 +430,9 @@ async fn download_cuda_package(
     }
 
     let total = response.content_length().unwrap_or(0);
+    if total > MAX_CUDA_ARCHIVE_BYTES {
+        return Err("Ukuran CUDA package dari server melebihi batas aman.".into());
+    }
     let mut file = tokio::fs::File::create(zip_path)
         .await
         .map_err(|e| format!("Gagal membuat file download CUDA: {e}"))?;
@@ -428,6 +449,9 @@ async fn download_cuda_package(
         let Some(chunk) = chunk else {
             break;
         };
+        if downloaded.saturating_add(chunk.len() as u64) > MAX_CUDA_ARCHIVE_BYTES {
+            return Err("Download CUDA melebihi batas ukuran aman.".into());
+        }
         if cancelled.load(Ordering::SeqCst) {
             return Err("Download CUDA dibatalkan.".into());
         }

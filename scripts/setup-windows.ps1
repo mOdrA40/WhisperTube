@@ -97,11 +97,28 @@ try {
     Expand-Archive -Path $WhisperZip -DestinationPath $WhisperExtract -Force
     $ReleaseDir = Get-ChildItem -Path $WhisperExtract -Directory -Recurse | Where-Object { $_.Name -eq "Release" } | Select-Object -First 1
     if ($ReleaseDir) {
-        Copy-Item -Path (Join-Path $ReleaseDir.FullName "*") -Destination $StagingCpu -Recurse -Force
+        $RuntimeFiles = @(Get-ChildItem -LiteralPath $ReleaseDir.FullName -File | Where-Object {
+            $_.Name -eq "whisper-cli.exe" -or
+            $_.Name -eq "whisper.dll" -or
+            $_.Name -like "ggml*.dll"
+        })
+        if (-not ($RuntimeFiles | Where-Object { $_.Name -eq "whisper-cli.exe" })) {
+            throw "whisper-cli.exe tidak ditemukan dalam folder Release whisper.cpp."
+        }
+        foreach ($RuntimeFile in $RuntimeFiles) {
+            Copy-Item -LiteralPath $RuntimeFile.FullName -Destination $StagingCpu -Force
+        }
     } else {
         $WhisperCli = Get-ChildItem -Path $WhisperExtract -Filter "whisper-cli.exe" -Recurse | Select-Object -First 1
         if (-not $WhisperCli) { throw "whisper-cli.exe tidak ditemukan setelah extract." }
-        Copy-Item -Path (Join-Path $WhisperCli.Directory.FullName "*") -Destination $StagingCpu -Recurse -Force
+        $RuntimeFiles = @(Get-ChildItem -LiteralPath $WhisperCli.Directory.FullName -File | Where-Object {
+            $_.Name -eq "whisper-cli.exe" -or
+            $_.Name -eq "whisper.dll" -or
+            $_.Name -like "ggml*.dll"
+        })
+        foreach ($RuntimeFile in $RuntimeFiles) {
+            Copy-Item -LiteralPath $RuntimeFile.FullName -Destination $StagingCpu -Force
+        }
     }
 
     $StagedWhisperCli = Join-Path $StagingCpu "whisper-cli.exe"

@@ -1695,6 +1695,11 @@ input:focus-visible,
   line-height: 1.45;
 }
 
+.history-load-more {
+  align-self: center;
+  margin-top: 8px;
+}
+
 .update-settings-card {
   border-color: rgba(139, 92, 246, 0.3);
   background: linear-gradient(145deg, rgba(28, 22, 52, 0.78), rgba(15, 19, 31, 0.9));

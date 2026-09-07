@@ -20,7 +20,7 @@ use crate::{
     history, models,
     paths::{engine_path, jobs_dir, model_path, tool_path},
     process,
-    sources::{js_runtime_args, validate_media_url},
+    sources::{js_runtime_args, validate_media_duration, validate_media_url},
     system::{detect_gpu, detect_nvidia, UsageMonitor},
     types::{ProgressPayload, Segment, TranscriptRequest, TranscriptResult},
 };
@@ -159,6 +159,8 @@ fn remove_file_if_present(path: &Path, label: &str) -> Result<(), String> {
 }
 
 const MAX_CAPTURED_STDERR_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_MEDIA_DURATION_SECONDS: f64 = 8.0 * 60.0 * 60.0;
+const MAX_MEDIA_DOWNLOAD_BYTES: &str = "4G";
 
 fn capture_stderr(mut reader: impl Read) -> Result<String, String> {
     let mut captured = Vec::with_capacity(MAX_CAPTURED_STDERR_BYTES);
@@ -220,6 +222,10 @@ fn run_download(
         .args([
             "--ignore-config",
             "--no-playlist",
+            "--match-filter",
+            "!is_live & duration <= 28800",
+            "--max-filesize",
+            MAX_MEDIA_DOWNLOAD_BYTES,
             "--newline",
             "--quiet",
             "--progress",
@@ -557,12 +563,20 @@ fn run_whisper(
         }
     };
     let progress_re = Regex::new(r"progress\s*=\s*([0-9]+)%").unwrap();
-    let mut stderr_all = String::new();
+    let mut stderr_all = Vec::with_capacity(MAX_CAPTURED_STDERR_BYTES);
+    let mut stderr_truncated = false;
     let stderr_result = (|| -> Result<(), String> {
         for line in BufReader::new(stderr_pipe).lines() {
             let line = line.map_err(|e| format!("Gagal membaca progress whisper.cpp: {e}"))?;
-            stderr_all.push_str(&line);
-            stderr_all.push('\n');
+            let line_bytes = line.as_bytes();
+            let remaining = MAX_CAPTURED_STDERR_BYTES.saturating_sub(stderr_all.len());
+            let retained = remaining.min(line_bytes.len());
+            stderr_all.extend_from_slice(&line_bytes[..retained]);
+            if retained < line_bytes.len() || stderr_all.len() == MAX_CAPTURED_STDERR_BYTES {
+                stderr_truncated = true;
+            } else {
+                stderr_all.push(b'\n');
+            }
             if let Some(caps) = progress_re.captures(&line) {
                 if let Ok(percent) = caps[1].parse::<f64>() {
                     context.emit(ProgressUpdate {
@@ -595,7 +609,11 @@ fn run_whisper(
     stderr_result?;
     let status = status?;
     if !status.success() {
-        return Err(process_failed(context.cancelled, stderr_all, "Whisper"));
+        let mut stderr = String::from_utf8_lossy(&stderr_all).into_owned();
+        if stderr_truncated {
+            stderr.push_str("\n[stderr dipotong karena terlalu panjang]");
+        }
+        return Err(process_failed(context.cancelled, stderr, "Whisper"));
     }
     Ok(resolved_backend)
 }
@@ -653,6 +671,7 @@ pub fn pipeline(
         return Err("Job dibatalkan.".into());
     }
     validate_media_url(&request.url)?;
+    validate_media_duration(request.duration, false)?;
     let yt_dlp = tool_path(&app, "yt-dlp")?;
     let ffmpeg = tool_path(&app, "ffmpeg")?;
     if !yt_dlp.exists() || !ffmpeg.exists() {
@@ -698,6 +717,7 @@ pub fn pipeline(
         network_bytes_per_second: None,
     });
     run_ffmpeg(&context, &source, &wav, request.duration)?;
+    remove_file_if_present(&source, "audio sumber")?;
     if context.is_cancelled() {
         return Err("Job dibatalkan.".into());
     }
@@ -745,7 +765,6 @@ pub fn pipeline(
     let (language, segments, text) = parse_whisper_result(&json_path)?;
     let result_store_path = job_dir.join("result.json");
     if !request.keep_audio {
-        remove_file_if_present(&source, "audio sumber")?;
         remove_file_if_present(&wav, "WAV hasil konversi")?;
     }
     let mut result = TranscriptResult {

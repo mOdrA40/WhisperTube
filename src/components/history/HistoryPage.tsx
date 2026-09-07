@@ -6,13 +6,16 @@ import { getModelLabel, useI18n } from "../../i18n";
 
 type HistoryPageProps = {
   history: HistoryItem[];
+  hasMore: boolean;
+  loadingMore: boolean;
   onRefresh: () => void;
+  onLoadMore: () => void;
   onLoad: (id: number) => void;
   onDelete: (ids: number[]) => Promise<void>;
   onTabChange: (tab: AppTab) => void;
 };
 
-export function HistoryPage({ history, onRefresh, onLoad, onDelete, onTabChange }: HistoryPageProps) {
+export function HistoryPage({ history, hasMore, loadingMore, onRefresh, onLoadMore, onLoad, onDelete, onTabChange }: HistoryPageProps) {
   const { language, t } = useI18n();
   const dateLocale = language === "zh" ? "zh-CN" : language === "id" ? "id-ID" : "en-US";
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
@@ -189,6 +192,16 @@ export function HistoryPage({ history, onRefresh, onLoad, onDelete, onTabChange 
               </button>
             </div>
           ))}
+          {hasMore && (
+            <button
+              type="button"
+              className="secondary-button history-load-more"
+              onClick={onLoadMore}
+              disabled={loadingMore}
+            >
+              {loadingMore ? t("history.loadingMore") : t("history.loadMore")}
+            </button>
+          )}
         </div>
       )}
 

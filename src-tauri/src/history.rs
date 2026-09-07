@@ -13,10 +13,11 @@ use uuid::Uuid;
 
 use crate::{
     paths::app_data_dir,
-    types::{HistoryItem, TranscriptRequest, TranscriptResult},
+    types::{HistoryItem, HistoryPageResult, TranscriptRequest, TranscriptResult},
 };
 
 const ORPHAN_JOB_GRACE: Duration = Duration::from_secs(24 * 60 * 60);
+const HISTORY_PAGE_SIZE: usize = 100;
 
 pub fn database_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(app_data_dir(app)?.join("whispertube.db"))
@@ -99,16 +100,19 @@ where
     Ok(history_id)
 }
 
-pub fn list_history(app: &AppHandle) -> Result<Vec<HistoryItem>, String> {
+pub fn list_history(app: &AppHandle, before_id: Option<i64>) -> Result<HistoryPageResult, String> {
+    if before_id.is_some_and(|id| id <= 0) {
+        return Err("Cursor history tidak valid.".into());
+    }
     let conn = open_connection(app)?;
     let mut statement = conn
         .prepare(
             "SELECT id, title, channel, source_url, created_at, duration, language, model, backend
-             FROM history ORDER BY id DESC LIMIT 100",
+             FROM history WHERE (?1 IS NULL OR id < ?1) ORDER BY id DESC LIMIT ?2",
         )
         .map_err(|e| format!("Gagal membaca history: {e}"))?;
     let rows = statement
-        .query_map([], |row| {
+        .query_map(params![before_id, (HISTORY_PAGE_SIZE + 1) as i64], |row| {
             Ok(HistoryItem {
                 id: row.get(0)?,
                 title: row.get(1)?,
@@ -122,8 +126,12 @@ pub fn list_history(app: &AppHandle) -> Result<Vec<HistoryItem>, String> {
             })
         })
         .map_err(|e| format!("Gagal query history: {e}"))?;
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("Gagal decode history: {e}"))
+    let mut items = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Gagal decode history: {e}"))?;
+    let has_more = items.len() > HISTORY_PAGE_SIZE;
+    items.truncate(HISTORY_PAGE_SIZE);
+    Ok(HistoryPageResult { items, has_more })
 }
 
 pub fn load_history(app: &AppHandle, id: i64) -> Result<TranscriptResult, String> {

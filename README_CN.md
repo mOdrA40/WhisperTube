@@ -14,6 +14,8 @@ WhisperTube 是一款 local-first 桌面应用，使用 `yt-dlp`、FFmpeg 和 wh
 
 支持的来源包括 YouTube、TikTok、X/Twitter、Facebook、Instagram、Reddit、Twitch、Vimeo、Dailymotion、Pinterest、LinkedIn、Tumblr、Bilibili 和 VK。支持范围取决于当前 yt-dlp extractor，并可能随着平台变化而改变。
 
+为确保磁盘和内存使用可控，转录仅支持时长明确且不超过 8 小时的非直播媒体。直播和即将开始的直播会在下载前被拒绝。
+
 ## 功能
 
 - 粘贴受支持的视频 URL，在下载前检查视频元数据。

@@ -21,6 +21,7 @@ use crate::{
     paths::{engine_path, jobs_dir, model_path, tool_path},
     process,
     sources::{js_runtime_args, validate_media_duration, validate_media_url},
+    state::VulkanProbeResult,
     system::{detect_gpu, detect_nvidia, UsageMonitor},
     types::{ProgressPayload, Segment, TranscriptRequest, TranscriptResult},
 };
@@ -30,6 +31,7 @@ struct JobContext<'a> {
     usage: &'a UsageMonitor,
     active_pid: &'a Arc<Mutex<Option<u32>>>,
     cancelled: &'a Arc<AtomicBool>,
+    vulkan_probe: &'a Arc<Mutex<Option<VulkanProbeResult>>>,
 }
 
 struct ProgressUpdate<'a> {
@@ -159,7 +161,7 @@ fn remove_file_if_present(path: &Path, label: &str) -> Result<(), String> {
 }
 
 const MAX_CAPTURED_STDERR_BYTES: usize = 64 * 1024;
-pub(crate) const MAX_MEDIA_DURATION_SECONDS: f64 = 8.0 * 60.0 * 60.0;
+pub(crate) const MAX_MEDIA_DURATION_SECONDS: f64 = 2.0 * 60.0 * 60.0;
 const MAX_MEDIA_DOWNLOAD_BYTES: &str = "4G";
 
 fn capture_stderr(mut reader: impl Read) -> Result<String, String> {
@@ -219,11 +221,12 @@ fn run_download(
         }
     })?;
     command
+        .args(["--ignore-config", "--no-playlist", "--match-filter"])
+        .arg(format!(
+            "!is_live & duration <= {}",
+            MAX_MEDIA_DURATION_SECONDS as u64
+        ))
         .args([
-            "--ignore-config",
-            "--no-playlist",
-            "--match-filter",
-            "!is_live & duration <= 28800",
             "--max-filesize",
             MAX_MEDIA_DOWNLOAD_BYTES,
             "--newline",
@@ -437,19 +440,196 @@ fn run_ffmpeg(
     Ok(())
 }
 
-fn choose_backend(app: &AppHandle, requested: &str) -> Result<(String, PathBuf), String> {
+const VULKAN_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+fn write_vulkan_probe_wav(path: &Path) -> Result<(), String> {
+    const SAMPLE_RATE: u32 = 16_000;
+    const CHANNELS: u16 = 1;
+    const BITS_PER_SAMPLE: u16 = 16;
+    const SAMPLE_COUNT: u32 = SAMPLE_RATE;
+    let data_bytes = SAMPLE_COUNT * u32::from(CHANNELS) * u32::from(BITS_PER_SAMPLE / 8);
+    let mut file =
+        File::create(path).map_err(|e| format!("Gagal membuat input probe Vulkan: {e}"))?;
+    file.write_all(b"RIFF")
+        .and_then(|_| file.write_all(&(36 + data_bytes).to_le_bytes()))
+        .and_then(|_| file.write_all(b"WAVEfmt "))
+        .and_then(|_| file.write_all(&16u32.to_le_bytes()))
+        .and_then(|_| file.write_all(&1u16.to_le_bytes()))
+        .and_then(|_| file.write_all(&CHANNELS.to_le_bytes()))
+        .and_then(|_| file.write_all(&SAMPLE_RATE.to_le_bytes()))
+        .and_then(|_| {
+            file.write_all(
+                &(SAMPLE_RATE * u32::from(CHANNELS) * u32::from(BITS_PER_SAMPLE / 8)).to_le_bytes(),
+            )
+        })
+        .and_then(|_| file.write_all(&(CHANNELS * (BITS_PER_SAMPLE / 8)).to_le_bytes()))
+        .and_then(|_| file.write_all(&BITS_PER_SAMPLE.to_le_bytes()))
+        .and_then(|_| file.write_all(b"data"))
+        .and_then(|_| file.write_all(&data_bytes.to_le_bytes()))
+        .and_then(|_| file.write_all(&vec![0u8; data_bytes as usize]))
+        .map_err(|e| format!("Gagal menulis input probe Vulkan: {e}"))
+}
+
+fn vulkan_probe_signature(engine: &Path, model: &Path) -> String {
+    fn file_signature(path: &Path) -> String {
+        let metadata = fs::metadata(path);
+        let length = metadata.as_ref().map(|value| value.len()).unwrap_or(0);
+        let modified = metadata
+            .and_then(|value| value.modified())
+            .ok()
+            .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|value| format!("{}:{}", value.as_secs(), value.subsec_nanos()))
+            .unwrap_or_else(|| "unknown".into());
+        format!("{}:{length}:{modified}", path.display())
+    }
+
+    format!(
+        "engine={}|model={}",
+        file_signature(engine),
+        file_signature(model)
+    )
+}
+
+fn run_vulkan_probe(context: &JobContext, engine: &Path, model: &Path) -> Result<(), String> {
+    let probe_dir =
+        std::env::temp_dir().join(format!("whispertube-vulkan-probe-{}", Uuid::new_v4()));
+    fs::create_dir_all(&probe_dir)
+        .map_err(|e| format!("Gagal membuat folder probe Vulkan: {e}"))?;
+    let wav = probe_dir.join("silence.wav");
+    let output = probe_dir.join("probe");
+    let result = (|| -> Result<(), String> {
+        write_vulkan_probe_wav(&wav)?;
+        let mut command = Command::new(engine);
+        process::hide_console(&mut command);
+        command
+            .args(["-m"])
+            .arg(model)
+            .args(["-f"])
+            .arg(&wav)
+            .args(["-l", "auto", "-t", "1", "-nt", "-np", "-nfa", "-of"])
+            .arg(&output)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .stdin(Stdio::null());
+        let mut child = command
+            .spawn()
+            .map_err(|e| format!("engine Vulkan tidak bisa dijalankan: {e}"))?;
+        let child_pid = child.id();
+        set_active_pid(context.active_pid, Some(child_pid));
+        let stderr = match child.stderr.take() {
+            Some(stderr) => drain_stderr(stderr),
+            None => {
+                process::terminate_child(&mut child);
+                let _ = child.wait();
+                set_active_pid(context.active_pid, None);
+                return Err(
+                    "engine Vulkan tidak menyediakan stderr untuk capability probe.".into(),
+                );
+            }
+        };
+        let started = std::time::Instant::now();
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) if context.is_cancelled() => {
+                    process::terminate_child(&mut child);
+                    let _ = child.wait();
+                    set_active_pid(context.active_pid, None);
+                    let _ = join_stderr(stderr);
+                    return Err("Job dibatalkan.".into());
+                }
+                Ok(None) if started.elapsed() >= VULKAN_PROBE_TIMEOUT => {
+                    process::terminate_child(&mut child);
+                    let _ = child.wait();
+                    set_active_pid(context.active_pid, None);
+                    let stderr = join_stderr(stderr)?;
+                    let detail = if stderr.trim().is_empty() {
+                        String::new()
+                    } else {
+                        format!(" Detail: {}", stderr.trim())
+                    };
+                    return Err(format!(
+                        "capability probe Vulkan melewati batas waktu.{detail}"
+                    ));
+                }
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+                Err(error) => {
+                    process::terminate_child(&mut child);
+                    let _ = child.wait();
+                    set_active_pid(context.active_pid, None);
+                    let _ = join_stderr(stderr);
+                    return Err(format!(
+                        "Status capability probe Vulkan tidak bisa dibaca: {error}"
+                    ));
+                }
+            }
+        };
+        set_active_pid(context.active_pid, None);
+        let stderr = join_stderr(stderr)?;
+        if !status.success() {
+            return Err(process_failed(
+                context.cancelled,
+                stderr,
+                "Capability probe Vulkan",
+            ));
+        }
+        Ok(())
+    })();
+    let _ = fs::remove_dir_all(&probe_dir);
+    result
+}
+
+fn ensure_vulkan_probe(context: &JobContext, engine: &Path, model: &Path) -> Result<(), String> {
+    let signature = vulkan_probe_signature(engine, model);
+    run_cached_vulkan_probe(context.vulkan_probe, signature, || {
+        run_vulkan_probe(context, engine, model)
+    })
+}
+
+fn run_cached_vulkan_probe<F>(
+    cache: &Arc<Mutex<Option<VulkanProbeResult>>>,
+    signature: String,
+    probe: F,
+) -> Result<(), String>
+where
+    F: FnOnce() -> Result<(), String>,
+{
+    if cache
+        .lock()
+        .map_err(|_| "Cache probe Vulkan terkunci")?
+        .as_ref()
+        .is_some_and(|cached| cached.signature == signature)
+    {
+        return Ok(());
+    }
+
+    let result = probe();
+    if result.is_ok() {
+        *cache.lock().map_err(|_| "Cache probe Vulkan terkunci")? =
+            Some(VulkanProbeResult { signature });
+    }
+    result
+}
+
+fn choose_backend(
+    context: &JobContext,
+    requested: &str,
+    model: &Path,
+) -> Result<(String, PathBuf, Option<String>, Option<usize>), String> {
+    let app = context.app;
     let cpu = engine_path(app, "cpu")?;
     let cuda = engine_path(app, "cuda")?;
     let metal = engine_path(app, "metal")?;
     let vulkan = engine_path(app, "vulkan")?;
-    let nvidia = detect_nvidia().is_some();
-    let gpu_detected = detect_gpu().is_some();
+    let nvidia_gpu = detect_nvidia();
+    let nvidia = nvidia_gpu.is_some();
+    let gpu_detected = nvidia || detect_gpu().is_some();
     match requested {
         "cpu" => {
             if !cpu.exists() {
                 Err("CPU whisper engine belum terpasang.".into())
             } else {
-                Ok(("cpu".into(), cpu))
+                Ok(("cpu".into(), cpu, None, None))
             }
         }
         "cuda" => {
@@ -460,7 +640,12 @@ fn choose_backend(app: &AppHandle, requested: &str) -> Result<(String, PathBuf),
             } else if !cuda.exists() {
                 Err("CUDA engine belum terpasang. Install CUDA acceleration dari Settings terlebih dahulu.".into())
             } else {
-                Ok(("cuda".into(), cuda))
+                Ok((
+                    "cuda".into(),
+                    cuda,
+                    None,
+                    nvidia_gpu.as_ref().and_then(|gpu| gpu.device_index),
+                ))
             }
         }
         "metal" => {
@@ -469,7 +654,7 @@ fn choose_backend(app: &AppHandle, requested: &str) -> Result<(String, PathBuf),
             } else if !metal.exists() {
                 Err("Metal engine belum terpasang. Install Apple Metal dari Settings terlebih dahulu.".into())
             } else {
-                Ok(("metal".into(), metal))
+                Ok(("metal".into(), metal, None, None))
             }
         }
         "vulkan" => {
@@ -483,23 +668,44 @@ fn choose_backend(app: &AppHandle, requested: &str) -> Result<(String, PathBuf),
                         .into(),
                 )
             } else {
-                Ok(("vulkan".into(), vulkan))
+                ensure_vulkan_probe(context, &vulkan, model).map_err(|error| {
+                    format!("Vulkan dipilih tetapi capability probe gagal: {error}")
+                })?;
+                Ok(("vulkan".into(), vulkan, None, None))
             }
         }
         "auto" => {
             if nvidia && cfg!(all(target_os = "windows", target_arch = "x86_64")) && cuda.exists() {
-                Ok(("cuda".into(), cuda))
+                Ok((
+                    "cuda".into(),
+                    cuda,
+                    None,
+                    nvidia_gpu.as_ref().and_then(|gpu| gpu.device_index),
+                ))
             } else if cfg!(target_os = "macos") && metal.exists() {
-                Ok(("metal".into(), metal))
+                Ok(("metal".into(), metal, None, None))
             } else if cfg!(any(target_os = "windows", target_os = "linux"))
                 && gpu_detected
                 && vulkan.exists()
             {
-                Ok(("vulkan".into(), vulkan))
+                match ensure_vulkan_probe(context, &vulkan, model) {
+                    Ok(()) => Ok(("vulkan".into(), vulkan, None, None)),
+                    Err(error) if cpu.exists() => Ok((
+                        "cpu".into(),
+                        cpu,
+                        Some(format!(
+                            "Vulkan tidak lolos capability probe ({error}); transkripsi dilanjutkan dengan CPU."
+                        )),
+                        None,
+                    )),
+                    Err(error) => Err(format!(
+                        "Vulkan tidak lolos capability probe dan CPU engine tidak tersedia: {error}"
+                    )),
+                }
             } else if nvidia && cfg!(all(target_os = "windows", target_arch = "x86_64")) {
                 Err("NVIDIA GPU terdeteksi tetapi CUDA engine belum terpasang. Pasang CUDA acceleration terlebih dahulu.".into())
             } else if cpu.exists() {
-                Ok(("cpu".into(), cpu))
+                Ok(("cpu".into(), cpu, None, None))
             } else {
                 Err("Tidak ada whisper engine yang siap digunakan.".into())
             }
@@ -517,7 +723,19 @@ fn run_whisper(
     backend: &str,
     model_id: &str,
 ) -> Result<String, String> {
-    let (resolved_backend, engine) = choose_backend(context.app, backend)?;
+    let (resolved_backend, engine, fallback_message, device_index) =
+        choose_backend(context, backend, model)?;
+    if let Some(message) = fallback_message {
+        context.emit(ProgressUpdate {
+            stage: "transcribing",
+            percent: 0.0,
+            message,
+            backend: Some("cpu"),
+            downloaded_bytes: None,
+            total_bytes: None,
+            network_bytes_per_second: None,
+        });
+    }
     if resolved_backend == "cuda" {
         let gpu = detect_nvidia().ok_or_else(|| {
             "NVIDIA GPU tidak lagi terdeteksi. Pilih CPU atau periksa driver.".to_string()
@@ -544,6 +762,10 @@ fn run_whisper(
         .stdin(Stdio::null());
     if resolved_backend == "cpu" {
         command.arg("-ng");
+    } else if resolved_backend == "cuda" {
+        if let Some(device_index) = device_index {
+            command.arg("-dev").arg(device_index.to_string());
+        }
     }
     let mut child = command
         .spawn()
@@ -665,6 +887,7 @@ pub fn pipeline(
     app: AppHandle,
     active_pid: Arc<Mutex<Option<u32>>>,
     cancelled: Arc<AtomicBool>,
+    vulkan_probe: Arc<Mutex<Option<VulkanProbeResult>>>,
     request: TranscriptRequest,
 ) -> Result<TranscriptResult, String> {
     if cancelled.load(Ordering::SeqCst) {
@@ -705,6 +928,7 @@ pub fn pipeline(
         usage: &usage_monitor,
         active_pid: &active_pid,
         cancelled: &cancelled,
+        vulkan_probe: &vulkan_probe,
     };
 
     context.emit(ProgressUpdate {
@@ -736,7 +960,14 @@ pub fn pipeline(
     if context.is_cancelled() {
         return Err("Job dibatalkan.".into());
     }
-    crate::resources::require_memory(inference_required, "inference Whisper")?;
+    let actual_wav_bytes = fs::metadata(&wav)
+        .map_err(|e| format!("Gagal membaca ukuran WAV hasil konversi: {e}"))?
+        .len();
+    let actual_inference_required = actual_wav_bytes
+        .saturating_mul(2)
+        .saturating_add(model_bytes)
+        .saturating_add(512 * 1024 * 1024);
+    crate::resources::require_memory(actual_inference_required, "inference Whisper")?;
 
     let output_prefix = job_dir.join("transcript");
     context.emit(ProgressUpdate {
@@ -831,9 +1062,13 @@ pub fn pipeline(
 #[cfg(test)]
 mod tests {
     use super::{
-        capture_stderr, normalize_utf8_bytes, JobDirectoryGuard, MAX_CAPTURED_STDERR_BYTES,
+        capture_stderr, normalize_utf8_bytes, run_cached_vulkan_probe, JobDirectoryGuard,
+        MAX_CAPTURED_STDERR_BYTES,
     };
-    use std::io::Cursor;
+    use std::{
+        io::Cursor,
+        sync::{Arc, Mutex},
+    };
     use uuid::Uuid;
 
     #[test]
@@ -863,5 +1098,46 @@ mod tests {
         assert_eq!(reader.position(), bytes.len() as u64);
         assert!(output.starts_with(&"x".repeat(MAX_CAPTURED_STDERR_BYTES)));
         assert!(output.ends_with("[stderr dipotong karena terlalu panjang]"));
+    }
+
+    #[test]
+    fn transient_vulkan_probe_failure_is_retried_and_not_cached() {
+        let cache = Arc::new(Mutex::new(None));
+        let mut attempts = 0;
+        let signature = "engine:model".to_string();
+
+        let first = run_cached_vulkan_probe(&cache, signature.clone(), || {
+            attempts += 1;
+            Err("Job dibatalkan.".into())
+        });
+        let second = run_cached_vulkan_probe(&cache, signature, || {
+            attempts += 1;
+            Err("capability probe Vulkan melewati batas waktu.".into())
+        });
+
+        assert!(first.is_err());
+        assert!(second.is_err());
+        assert_eq!(attempts, 2);
+        assert!(cache.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn successful_vulkan_probe_is_cached() {
+        let cache = Arc::new(Mutex::new(None));
+        let mut attempts = 0;
+        let signature = "engine:model".to_string();
+
+        run_cached_vulkan_probe(&cache, signature.clone(), || {
+            attempts += 1;
+            Ok(())
+        })
+        .unwrap();
+        run_cached_vulkan_probe(&cache, signature, || {
+            attempts += 1;
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(attempts, 1);
     }
 }

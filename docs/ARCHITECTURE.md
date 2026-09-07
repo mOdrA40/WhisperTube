@@ -131,8 +131,11 @@ activation. The request has a 30-second connection/response timeout, a
 download chunks.
 
 The system status query reads NVIDIA name, total VRAM, and free VRAM through
-`nvidia-smi`, and uses platform-specific graphics detection for other GPU
-vendors. Model entries expose conservative CUDA guardrails: Fast requires
+`nvidia-smi`, selecting the device with the most free memory when multiple
+NVIDIA GPUs are present. The selected device index is passed to whisper.cpp for
+CUDA inference; Vulkan does not reuse the NVIDIA index and lets its own backend
+device ordering decide. It uses platform-specific graphics detection for other
+GPU vendors. Model entries expose conservative CUDA guardrails: Fast requires
 about 2 GB, Balanced 4 GB, and Accurate 7 GB of free VRAM. These are
 preflight safety thresholds; actual available memory can change when other
 GPU applications are running. CUDA is offered only on supported Windows x64
@@ -142,8 +145,22 @@ kept as an explicit alternative even when CUDA is available, so NVIDIA users
 can compare backends or use Vulkan when needed.
 
 Windows CPU telemetry uses the native `GetSystemTimes` API. GPU telemetry is
-sampled every two seconds to avoid making PowerShell part of the CPU measurement
-loop. External child processes use hidden-console creation flags on Windows.
+sampled every five seconds, and the resolved `nvidia-smi` executable path is
+cached to avoid repeating vendor/path discovery on every sample. External child
+processes use hidden-console creation flags on Windows.
+
+Auto Vulkan selection runs a bounded capability probe using the selected
+whisper.cpp engine, the installed model, and a generated one-second silent WAV.
+Only successful results are cached for the engine/model file signatures during
+the app session; cancellation and timeout failures are retried. A failed probe
+causes Auto to fall back to CPU when the CPU engine is available; explicitly
+selected Vulkan fails closed with the diagnostic error.
+The full-buffer transcription path is limited to two hours and rechecks the
+actual converted WAV size before loading inference buffers.
+
+Transcription, model download/delete, runtime installation, and app update share
+one atomic operation reservation in `AppState`, so separate IPC calls cannot
+pass independent preflight checks and overlap during the mutation window.
 
 The repository also contains `.github/workflows/build-accelerator-packs.yml`.
 It builds Metal packs for macOS Intel/Apple Silicon and Vulkan packs for Linux

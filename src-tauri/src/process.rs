@@ -1,4 +1,5 @@
 use std::{
+    io::Read,
     process::{Child, Command, ExitStatus, Stdio},
     time::{Duration, Instant},
 };
@@ -70,27 +71,89 @@ pub fn terminate_child(child: &mut Child) {
     let _ = child.kill();
 }
 
-pub fn run_with_timeout(command: &mut Command, timeout: Duration) -> Result<ExitStatus, String> {
+pub fn run_with_timeout_captured(
+    command: &mut Command,
+    timeout: Duration,
+    stderr_limit: usize,
+) -> Result<(ExitStatus, String), String> {
     command
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .stdin(Stdio::null());
     let mut child = command
         .spawn()
         .map_err(|e| format!("Proses tidak bisa dimulai: {e}"))?;
+    let stderr = match child.stderr.take() {
+        Some(stderr) => stderr,
+        None => {
+            terminate_child(&mut child);
+            let _ = child.wait();
+            return Err("stderr process tidak bisa dibaca.".into());
+        }
+    };
+    let stderr_reader = std::thread::spawn(move || capture_bounded(stderr, stderr_limit));
     let started = Instant::now();
     loop {
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|e| format!("Status proses tidak bisa dibaca: {e}"))?
-        {
-            return Ok(status);
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let stderr = stderr_reader
+                    .join()
+                    .map_err(|_| "Reader stderr process gagal.".to_string())??;
+                return Ok((status, stderr));
+            }
+            Err(error) => {
+                terminate_child(&mut child);
+                let _ = child.wait();
+                let stderr = stderr_reader
+                    .join()
+                    .map_err(|_| "Reader stderr process gagal.".to_string())??;
+                let detail = if stderr.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!(" Detail: {}", stderr.trim())
+                };
+                return Err(format!("Status proses tidak bisa dibaca: {error}.{detail}"));
+            }
+            Ok(None) => {}
         }
         if started.elapsed() >= timeout {
             terminate_child(&mut child);
             let _ = child.wait();
-            return Err("Proses melewati batas waktu.".into());
+            let stderr = stderr_reader
+                .join()
+                .map_err(|_| "Reader stderr process gagal.".to_string())??;
+            let detail = if stderr.trim().is_empty() {
+                String::new()
+            } else {
+                format!(" Detail: {}", stderr.trim())
+            };
+            return Err(format!("Proses melewati batas waktu.{detail}"));
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+fn capture_bounded(mut reader: impl Read, limit: usize) -> Result<String, String> {
+    let mut captured = Vec::with_capacity(limit.min(64 * 1024));
+    let mut buffer = [0u8; 8 * 1024];
+    let mut truncated = false;
+    loop {
+        let read = match reader.read(&mut buffer) {
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(format!("Gagal membaca stderr process: {error}")),
+        };
+        if read == 0 {
+            break;
+        }
+        let remaining = limit.saturating_sub(captured.len());
+        let retained = remaining.min(read);
+        captured.extend_from_slice(&buffer[..retained]);
+        truncated |= retained < read;
+    }
+    let mut output = String::from_utf8_lossy(&captured).into_owned();
+    if truncated {
+        output.push_str("\n[stderr dipotong karena terlalu panjang]");
+    }
+    Ok(output)
 }

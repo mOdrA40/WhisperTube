@@ -503,10 +503,16 @@ fn finalize_blocking(
     let mut command = std::process::Command::new(&staging_cli);
     crate::process::hide_console(&mut command);
     command.arg("--version");
-    let status = crate::process::run_with_timeout(&mut command, Duration::from_secs(10))
-        .map_err(|e| format!("Accelerator gagal melakukan self-check: {e}"))?;
+    let (status, stderr) =
+        crate::process::run_with_timeout_captured(&mut command, Duration::from_secs(10), 64 * 1024)
+            .map_err(|e| format!("Accelerator gagal melakukan self-check: {e}"))?;
     if !status.success() {
-        return Err("Accelerator gagal melakukan self-check.".into());
+        let detail = if stderr.trim().is_empty() {
+            String::new()
+        } else {
+            format!(" Detail: {}", stderr.trim())
+        };
+        return Err(format!("Accelerator gagal melakukan self-check.{detail}"));
     }
     if cancelled.load(Ordering::SeqCst) {
         return Err("Download accelerator dibatalkan.".into());

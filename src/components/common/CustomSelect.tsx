@@ -18,6 +18,8 @@ type CustomSelectProps = {
   placeholder?: string;
   className?: string;
   prefixIcon?: ReactNode;
+  ariaLabel?: string;
+  ariaLabelledBy?: string;
 };
 
 export function CustomSelect({
@@ -28,6 +30,8 @@ export function CustomSelect({
   placeholder = "Select...",
   className = "",
   prefixIcon,
+  ariaLabel,
+  ariaLabelledBy,
 }: CustomSelectProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [highlightedIndex, setHighlightedIndex] = useState<number>(-1);
@@ -151,6 +155,8 @@ export function CustomSelect({
         aria-haspopup="listbox"
         aria-expanded={isOpen}
         aria-controls={listboxId}
+        aria-label={ariaLabel}
+        aria-labelledby={ariaLabelledBy}
         aria-activedescendant={
           isOpen && highlightedIndex >= 0
             ? `${listboxId}-option-${highlightedIndex}`

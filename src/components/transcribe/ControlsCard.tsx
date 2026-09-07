@@ -265,6 +265,7 @@ export function ControlsCard({
         options={languageOptions}
         onChange={onLanguageChange}
         disabled={busy}
+        ariaLabel={t("controls.language")}
       />
 
       <label className="field-label">{t("controls.computeBackend")}</label>
@@ -273,6 +274,7 @@ export function ControlsCard({
         options={backendOptions}
         onChange={(val) => onBackendChange(val as BackendChoice)}
         disabled={busy}
+        ariaLabel={t("controls.computeBackend")}
       />
       <div className="recommendation">
         <Sparkles size={14} /> {getRecommendation(system, t)}

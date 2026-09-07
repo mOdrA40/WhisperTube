@@ -1,89 +1,14 @@
-use std::sync::{atomic::Ordering, Arc};
 use tauri::{AppHandle, State};
 
 use crate::{
-    accelerators, browsers, history, models, process, sources,
-    state::{AppState, JobGuard},
+    accelerators, browsers, history, models, sources,
+    state::{AppState, JobGuard, OperationGuard},
     system, transcription,
     types::{
         HistoryPageResult, ModelInfo, SystemStatus, TranscriptRequest, TranscriptResult,
         VideoMetadata,
     },
 };
-
-fn begin_runtime_install(
-    state: &AppState,
-    operation: &str,
-) -> Result<Arc<std::sync::atomic::AtomicBool>, String> {
-    if JobGuard::is_active(state)? {
-        return Err(
-            "Transkripsi sedang berjalan. Tunggu sampai selesai atau batalkan terlebih dahulu."
-                .into(),
-        );
-    }
-    let mut active = state
-        .runtime_installing
-        .lock()
-        .map_err(|_| "State runtime terkunci")?;
-    if let Some(current) = active.as_deref() {
-        return Err(format!("Installer runtime {current} sedang berjalan."));
-    }
-    let model_active = state
-        .model_downloading
-        .lock()
-        .map_err(|_| "State model terkunci")?;
-    if let Some(model_id) = model_active.as_deref() {
-        return Err(format!("Download model {model_id} sedang berjalan."));
-    }
-    *active = Some(operation.to_string());
-    state.runtime_cancelled.store(false, Ordering::SeqCst);
-    Ok(state.runtime_cancelled.clone())
-}
-
-fn end_runtime_install(state: &AppState, operation: &str) {
-    if let Ok(mut active) = state.runtime_installing.lock() {
-        if active.as_deref() == Some(operation) {
-            *active = None;
-        }
-    }
-}
-
-fn begin_model_download(
-    state: &AppState,
-    model_id: &str,
-) -> Result<Arc<std::sync::atomic::AtomicBool>, String> {
-    if JobGuard::is_active(state)? {
-        return Err(
-            "Transkripsi sedang berjalan. Tunggu sampai selesai atau batalkan terlebih dahulu."
-                .into(),
-        );
-    }
-    let runtime_active = state
-        .runtime_installing
-        .lock()
-        .map_err(|_| "State runtime terkunci")?;
-    if let Some(operation) = runtime_active.as_deref() {
-        return Err(format!("Installer runtime {operation} sedang berjalan."));
-    }
-    let mut active = state
-        .model_downloading
-        .lock()
-        .map_err(|_| "State model terkunci")?;
-    if let Some(current) = active.as_deref() {
-        return Err(format!("Download model {current} sedang berjalan."));
-    }
-    *active = Some(model_id.to_string());
-    state.model_cancelled.store(false, Ordering::SeqCst);
-    Ok(state.model_cancelled.clone())
-}
-
-fn end_model_download(state: &AppState, model_id: &str) {
-    if let Ok(mut active) = state.model_downloading.lock() {
-        if active.as_deref() == Some(model_id) {
-            *active = None;
-        }
-    }
-}
 
 #[tauri::command]
 pub fn system_status(app: AppHandle) -> Result<SystemStatus, String> {
@@ -106,12 +31,8 @@ pub async fn download_model(
     state: State<'_, AppState>,
     model_id: String,
 ) -> Result<(), String> {
-    if JobGuard::is_active(&state)? {
-        return Err("Masih ada job transkripsi yang sedang berjalan.".into());
-    }
-    let cancelled = begin_model_download(&state, &model_id)?;
-    let result = models::download_model(app, model_id.clone(), cancelled).await;
-    end_model_download(&state, &model_id);
+    let _operation = OperationGuard::reserve_model_download(&state, model_id.clone())?;
+    let result = models::download_model(app, model_id, state.model_cancelled.clone()).await;
     result
 }
 
@@ -125,10 +46,8 @@ pub async fn install_cuda_engine(app: AppHandle, state: State<'_, AppState>) -> 
     if system::detect_nvidia().is_none() {
         return Err("NVIDIA GPU/driver tidak terdeteksi. CUDA engine tidak perlu dipasang.".into());
     }
-    let operation = "cuda";
-    let cancelled = begin_runtime_install(&state, operation)?;
-    let result = models::install_cuda_engine(app, cancelled).await;
-    end_runtime_install(&state, operation);
+    let _operation = OperationGuard::reserve_runtime_install(&state, "cuda".into())?;
+    let result = models::install_cuda_engine(app, state.runtime_cancelled.clone()).await;
     result
 }
 
@@ -138,10 +57,8 @@ pub async fn install_accelerator(
     state: State<'_, AppState>,
     backend: String,
 ) -> Result<(), String> {
-    let operation = backend.clone();
-    let cancelled = begin_runtime_install(&state, &operation)?;
-    let result = accelerators::install(app, backend, cancelled).await;
-    end_runtime_install(&state, &operation);
+    let _operation = OperationGuard::reserve_runtime_install(&state, backend.clone())?;
+    let result = accelerators::install(app, backend, state.runtime_cancelled.clone()).await;
     result
 }
 
@@ -151,26 +68,18 @@ pub fn delete_model(
     state: State<'_, AppState>,
     model_id: String,
 ) -> Result<(), String> {
-    if JobGuard::is_active(&state)? {
-        return Err("Model tidak bisa dihapus saat transkripsi berjalan.".into());
-    }
-    if state
-        .model_downloading
-        .lock()
-        .map_err(|_| "State model terkunci")?
-        .is_some()
-    {
-        return Err("Model tidak bisa dihapus saat download model berjalan.".into());
-    }
-    if state
-        .runtime_installing
-        .lock()
-        .map_err(|_| "State runtime terkunci")?
-        .is_some()
-    {
-        return Err("Model tidak bisa dihapus saat installer runtime berjalan.".into());
-    }
+    let _operation = OperationGuard::reserve_model_delete(&state, model_id.clone())?;
     models::delete_model(&app, &model_id)
+}
+
+#[tauri::command]
+pub fn begin_app_update(state: State<'_, AppState>) -> Result<(), String> {
+    OperationGuard::reserve_app_update(&state)
+}
+
+#[tauri::command]
+pub fn end_app_update(state: State<'_, AppState>) -> Result<(), String> {
+    OperationGuard::release_app_update(&state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -190,56 +99,13 @@ pub async fn start_transcription(
     state: State<'_, AppState>,
     request: TranscriptRequest,
 ) -> Result<TranscriptResult, String> {
-    if state
-        .runtime_installing
-        .lock()
-        .map_err(|_| "State runtime terkunci")?
-        .is_some()
-    {
-        return Err(
-            "Installer runtime masih berjalan. Tunggu sampai selesai atau batalkan terlebih dahulu."
-                .into(),
-        );
-    }
-    if state
-        .model_downloading
-        .lock()
-        .map_err(|_| "State model terkunci")?
-        .is_some()
-    {
-        return Err(
-            "Download model masih berjalan. Tunggu sampai selesai atau batalkan terlebih dahulu."
-                .into(),
-        );
-    }
     let job_guard = JobGuard::reserve(&state)?;
     let active_pid = state.active_pid.clone();
     let cancelled = state.cancelled.clone();
-    if state
-        .model_downloading
-        .lock()
-        .map_err(|_| "State model terkunci")?
-        .is_some()
-    {
-        return Err(
-            "Download model masih berjalan. Tunggu sampai selesai atau batalkan terlebih dahulu."
-                .into(),
-        );
-    }
-    if state
-        .runtime_installing
-        .lock()
-        .map_err(|_| "State runtime terkunci")?
-        .is_some()
-    {
-        return Err(
-            "Installer runtime masih berjalan. Tunggu sampai selesai atau batalkan terlebih dahulu."
-                .into(),
-        );
-    }
+    let vulkan_probe = state.vulkan_probe.clone();
     tokio::task::spawn_blocking(move || {
         job_guard.mark_running()?;
-        transcription::pipeline(app, active_pid, cancelled, request)
+        transcription::pipeline(app, active_pid, cancelled, vulkan_probe, request)
     })
     .await
     .map_err(|e| format!("Transcription task gagal: {e}"))?
@@ -247,19 +113,7 @@ pub async fn start_transcription(
 
 #[tauri::command]
 pub fn cancel_job(state: State<'_, AppState>) -> Result<(), String> {
-    let _ = JobGuard::request_cancel(&state)?;
-    state.cancelled.store(true, Ordering::SeqCst);
-    state.model_cancelled.store(true, Ordering::SeqCst);
-    state.runtime_cancelled.store(true, Ordering::SeqCst);
-    let guard = state
-        .active_pid
-        .lock()
-        .map_err(|_| "State process terkunci")?;
-    let pid = *guard;
-    drop(guard);
-    if let Some(pid) = pid {
-        process::terminate_process_tree(pid);
-    }
+    OperationGuard::request_cancel(&state)?;
     Ok(())
 }
 

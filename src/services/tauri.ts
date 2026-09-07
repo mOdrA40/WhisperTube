@@ -40,6 +40,20 @@ export async function installAppUpdate(onProgress: (progress: AppUpdateProgress)
   const update = pendingAppUpdate ?? await check();
   if (!update) throw new Error("NO_UPDATE_AVAILABLE");
 
+  await invoke("begin_app_update");
+  try {
+    await installPendingUpdate(update, onProgress);
+  } finally {
+    try {
+      await invoke("end_app_update");
+    } catch (cause) {
+      console.warn("Gagal melepaskan reservation update aplikasi.", cause);
+    }
+  }
+}
+
+async function installPendingUpdate(update: Update, onProgress: (progress: AppUpdateProgress) => void) {
+
   let downloadedBytes = 0;
   let totalBytes: number | null = null;
   onProgress({ downloadedBytes, totalBytes, percent: 0 });

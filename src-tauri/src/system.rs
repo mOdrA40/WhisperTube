@@ -2,7 +2,7 @@ use std::{
     process::{Command, Output, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
     },
     thread::JoinHandle,
     time::{Duration, Instant},
@@ -18,13 +18,17 @@ use crate::{
     types::SystemStatus,
 };
 
-const USAGE_SAMPLE_INTERVAL: Duration = Duration::from_secs(2);
+const USAGE_SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
+
+static NVIDIA_SMI_PROGRAM: OnceLock<Option<String>> = OnceLock::new();
+static NVIDIA_SELECTED_DEVICE: OnceLock<Mutex<Option<usize>>> = OnceLock::new();
 
 #[derive(Clone, Debug)]
 pub struct GpuInfo {
     pub name: String,
     pub total_memory_mb: Option<u64>,
     pub free_memory_mb: Option<u64>,
+    pub device_index: Option<usize>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -129,43 +133,74 @@ fn format_vram(memory_mb: Option<u64>) -> String {
 }
 
 pub fn detect_nvidia() -> Option<GpuInfo> {
-    let mut candidates = vec!["nvidia-smi".to_string()];
-    #[cfg(target_os = "windows")]
-    {
-        candidates.push(r"C:\Windows\System32\nvidia-smi.exe".into());
-        candidates.push(r"C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe".into());
-    }
-
-    let output = candidates.into_iter().find_map(|program| {
+    let program = nvidia_smi_program()?;
+    let output = {
         let mut command = Command::new(program);
         crate::process::hide_console(&mut command);
         command.args([
-            "--query-gpu=name,memory.total,memory.free",
+            "--query-gpu=index,name,memory.total,memory.free",
             "--format=csv,noheader,nounits",
         ]);
         command_output_with_timeout(command, Duration::from_secs(2))
-    });
-    match output {
-        Some(out) => {
-            let line = String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .next()
-                .unwrap_or_default()
-                .trim()
-                .to_string();
+    };
+    let gpu = output.and_then(|out| parse_nvidia_gpus(&out.stdout));
+    if let Ok(mut selected) = NVIDIA_SELECTED_DEVICE
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+    {
+        *selected = gpu.as_ref().and_then(|value| value.device_index);
+    }
+    gpu
+}
+
+fn parse_nvidia_gpus(output: &[u8]) -> Option<GpuInfo> {
+    String::from_utf8_lossy(output)
+        .lines()
+        .filter_map(|line| {
             let mut fields = line.split(',').map(str::trim);
-            let name = fields.next().unwrap_or_default().to_string();
-            if name.is_empty() {
-                return None;
-            }
-            Some(GpuInfo {
+            let device_index = fields.next()?.parse().ok();
+            let name = fields.next()?.to_string();
+            (!name.is_empty()).then(|| GpuInfo {
                 name,
                 total_memory_mb: fields.next().and_then(|value| value.parse().ok()),
                 free_memory_mb: fields.next().and_then(|value| value.parse().ok()),
+                device_index,
             })
-        }
-        _ => None,
-    }
+        })
+        .fold(None, |best: Option<GpuInfo>, candidate| {
+            let candidate_memory = candidate
+                .free_memory_mb
+                .or(candidate.total_memory_mb)
+                .unwrap_or(0);
+            let best_memory = best
+                .as_ref()
+                .and_then(|value| value.free_memory_mb.or(value.total_memory_mb))
+                .unwrap_or(0);
+            if best.is_none() || candidate_memory > best_memory {
+                Some(candidate)
+            } else {
+                best
+            }
+        })
+}
+
+fn nvidia_smi_program() -> Option<&'static str> {
+    NVIDIA_SMI_PROGRAM
+        .get_or_init(|| {
+            let mut candidates = vec!["nvidia-smi".to_string()];
+            #[cfg(target_os = "windows")]
+            {
+                candidates.push(r"C:\Windows\System32\nvidia-smi.exe".into());
+                candidates.push(r"C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe".into());
+            }
+            candidates.into_iter().find(|program| {
+                let mut command = Command::new(program);
+                crate::process::hide_console(&mut command);
+                command.arg("--version");
+                command_output_with_timeout(command, Duration::from_secs(2)).is_some()
+            })
+        })
+        .as_deref()
 }
 
 fn clean_gpu_name(value: &str) -> Option<String> {
@@ -205,6 +240,7 @@ fn detect_generic_gpu() -> Option<GpuInfo> {
         name,
         total_memory_mb: None,
         free_memory_mb: None,
+        device_index: None,
     })
 }
 
@@ -227,6 +263,7 @@ fn detect_generic_gpu() -> Option<GpuInfo> {
         name,
         total_memory_mb: None,
         free_memory_mb: None,
+        device_index: None,
     })
 }
 
@@ -252,6 +289,7 @@ fn detect_generic_gpu() -> Option<GpuInfo> {
             name: name.into(),
             total_memory_mb: None,
             free_memory_mb: None,
+            device_index: None,
         });
     }
     let output = command_output_with_timeout(Command::new("lspci"), Duration::from_secs(2))?;
@@ -268,6 +306,7 @@ fn detect_generic_gpu() -> Option<GpuInfo> {
             name,
             total_memory_mb: None,
             free_memory_mb: None,
+            device_index: None,
         })
 }
 
@@ -368,12 +407,16 @@ fn sample_cpu_usage(_sampler: &mut CpuSampler) -> Option<f64> {
 
 #[cfg(target_os = "windows")]
 fn sample_gpu_usage() -> Option<f64> {
-    let mut candidates = vec!["nvidia-smi".to_string()];
-    candidates.push(r"C:\Windows\System32\nvidia-smi.exe".into());
-    candidates.push(r"C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe".into());
-    for program in candidates {
+    if let Some(program) = nvidia_smi_program() {
         let mut command = Command::new(program);
         crate::process::hide_console(&mut command);
+        if let Ok(Some(index)) = NVIDIA_SELECTED_DEVICE
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .map(|value| *value)
+        {
+            command.arg(format!("--id={index}"));
+        }
         command.args([
             "--query-gpu=utilization.gpu",
             "--format=csv,noheader,nounits",
@@ -507,4 +550,26 @@ pub fn system_status(app: &AppHandle) -> Result<SystemStatus, String> {
         cuda_supported,
         accelerators: accelerators::catalog(app, gpu.is_some())?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_nvidia_gpus;
+
+    #[test]
+    fn selects_nvidia_device_with_the_most_free_memory() {
+        let output = b"0,Small GPU,4096,512\n1,Large GPU,12288,8192\n";
+        let gpu = parse_nvidia_gpus(output).expect("GPU should be parsed");
+        assert_eq!(gpu.name, "Large GPU");
+        assert_eq!(gpu.device_index, Some(1));
+        assert_eq!(gpu.free_memory_mb, Some(8192));
+    }
+
+    #[test]
+    fn keeps_first_device_when_memory_is_unavailable_or_tied() {
+        let output = b"0,First GPU,N/A,N/A\n1,Second GPU,N/A,N/A\n";
+        let gpu = parse_nvidia_gpus(output).expect("GPU should be parsed");
+        assert_eq!(gpu.name, "First GPU");
+        assert_eq!(gpu.device_index, Some(0));
+    }
 }

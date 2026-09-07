@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import {
   cancelJob as cancelJobRequest,
   checkForAppUpdate,
@@ -295,12 +295,13 @@ export function useWhisperTube() {
     setError(null);
   }
 
+  const deferredSearchQuery = useDeferredValue(searchQuery);
   const filteredSegments = useMemo(() => {
     if (!result) return [];
-    const query = searchQuery.trim().toLowerCase();
+    const query = deferredSearchQuery.trim().toLowerCase();
     if (!query) return result.segments;
     return result.segments.filter((segment) => segment.text.toLowerCase().includes(query));
-  }, [result, searchQuery]);
+  }, [deferredSearchQuery, result]);
 
   const autoAcceleratorInstalled = Boolean(system?.accelerators.some((accelerator) => accelerator.installed));
   const modelDownloadActive = Object.keys(downloadingModel).length > 0;

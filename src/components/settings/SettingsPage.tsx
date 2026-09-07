@@ -270,6 +270,7 @@ export function SettingsPage({
           options={interfaceLanguageOptions}
           onChange={(value) => setUiLanguage(value as typeof uiLanguage)}
           disabled={busy}
+          ariaLabel={t("settings.interfaceLanguage")}
         />
         <p className="settings-note">{t("settings.interfaceLanguageNote")}</p>
       </section>

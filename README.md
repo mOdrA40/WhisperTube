@@ -14,7 +14,7 @@ Other languages: [Bahasa Indonesia](README_ID.md) · [中文（普通话）](REA
 
 Supported source families include YouTube, TikTok, X/Twitter, Facebook, Instagram, Reddit, Twitch, Vimeo, Dailymotion, Pinterest, LinkedIn, Tumblr, Bilibili, and VK. Support is based on the current yt-dlp extractor and can change as each platform changes.
 
-For predictable disk and memory use, transcription is limited to on-demand media with a known duration of at most 8 hours. Live streams and upcoming streams are rejected before download.
+For predictable disk and memory use, transcription is limited to on-demand media with a known duration of at most 2 hours. The current whisper.cpp path processes one full PCM buffer; chunked transcription is not implemented yet. Live streams and upcoming streams are rejected before download.
 
 ## Features
 

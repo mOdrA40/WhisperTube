@@ -58,6 +58,8 @@ pub fn run() {
             commands::install_cuda_engine,
             commands::install_accelerator,
             commands::delete_model,
+            commands::begin_app_update,
+            commands::end_app_update,
             commands::inspect_media,
             commands::start_transcription,
             commands::cancel_job,

@@ -3,92 +3,202 @@ use std::sync::{
     Arc, Mutex,
 };
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum JobState {
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum OperationState {
     #[default]
     Idle,
-    Starting,
-    Running,
-    Cancelling,
+    Transcribing,
+    ModelDownloading(String),
+    RuntimeInstalling(String),
+    ModelDeleting(String),
+    AppUpdating,
+}
+
+pub struct OperationGuard {
+    state: Arc<Mutex<OperationState>>,
+    operation: OperationState,
+}
+
+impl OperationGuard {
+    fn reserve(
+        state: &AppState,
+        operation: OperationState,
+        cancellation: Option<&AtomicBool>,
+    ) -> Result<Self, String> {
+        let mut active = state
+            .operation
+            .lock()
+            .map_err(|_| "State operasi terkunci")?;
+        if *active != OperationState::Idle {
+            return Err(operation_conflict_message(&active));
+        }
+        *active = operation.clone();
+        if let Some(cancellation) = cancellation {
+            cancellation.store(false, Ordering::SeqCst);
+        }
+        Ok(Self {
+            state: Arc::clone(&state.operation),
+            operation,
+        })
+    }
+
+    pub fn reserve_model_download(state: &AppState, model_id: String) -> Result<Self, String> {
+        Self::reserve(
+            state,
+            OperationState::ModelDownloading(model_id),
+            Some(&state.model_cancelled),
+        )
+    }
+
+    pub fn reserve_runtime_install(state: &AppState, operation: String) -> Result<Self, String> {
+        Self::reserve(
+            state,
+            OperationState::RuntimeInstalling(operation),
+            Some(&state.runtime_cancelled),
+        )
+    }
+
+    pub fn reserve_model_delete(state: &AppState, model_id: String) -> Result<Self, String> {
+        Self::reserve(state, OperationState::ModelDeleting(model_id), None)
+    }
+
+    pub fn reserve_app_update(state: &AppState) -> Result<(), String> {
+        let mut active = state
+            .operation
+            .lock()
+            .map_err(|_| "State operasi terkunci")?;
+        if *active != OperationState::Idle {
+            return Err(operation_conflict_message(&active));
+        }
+        *active = OperationState::AppUpdating;
+        Ok(())
+    }
+
+    pub fn request_cancel(state: &AppState) -> Result<(), String> {
+        let active = state
+            .operation
+            .lock()
+            .map_err(|_| "State operasi terkunci")?;
+        let should_cancel = match &*active {
+            OperationState::Transcribing => {
+                state.cancelled.store(true, Ordering::SeqCst);
+                true
+            }
+            OperationState::ModelDownloading(_) => {
+                state.model_cancelled.store(true, Ordering::SeqCst);
+                true
+            }
+            OperationState::RuntimeInstalling(_) => {
+                state.runtime_cancelled.store(true, Ordering::SeqCst);
+                true
+            }
+            OperationState::Idle
+            | OperationState::ModelDeleting(_)
+            | OperationState::AppUpdating => false,
+        };
+        if should_cancel {
+            let pid = state
+                .active_pid
+                .lock()
+                .map_err(|_| "State process terkunci")?
+                .as_ref()
+                .copied();
+            if let Some(pid) = pid {
+                crate::process::terminate_process_tree(pid);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn release_app_update(state: &AppState) -> Result<(), String> {
+        let mut active = state
+            .operation
+            .lock()
+            .map_err(|_| "State operasi terkunci")?;
+        if *active == OperationState::AppUpdating {
+            *active = OperationState::Idle;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for OperationGuard {
+    fn drop(&mut self) {
+        if let Ok(mut active) = self.state.lock() {
+            if *active == self.operation {
+                *active = OperationState::Idle;
+            }
+        }
+    }
+}
+
+fn operation_conflict_message(operation: &OperationState) -> String {
+    match operation {
+        OperationState::Idle => "Tidak ada operasi aktif.".into(),
+        OperationState::Transcribing => {
+            "Transkripsi sedang berjalan. Tunggu sampai selesai atau batalkan terlebih dahulu."
+                .into()
+        }
+        OperationState::ModelDownloading(model_id) => {
+            format!("Download model {model_id} sedang berjalan.")
+        }
+        OperationState::RuntimeInstalling(operation) => {
+            format!("Installer runtime {operation} sedang berjalan.")
+        }
+        OperationState::ModelDeleting(model_id) => {
+            format!("Model {model_id} sedang dihapus.")
+        }
+        OperationState::AppUpdating => {
+            "Pembaruan aplikasi sedang berjalan. Tunggu sampai selesai terlebih dahulu.".into()
+        }
+    }
 }
 
 pub struct JobGuard {
-    state: Arc<Mutex<JobState>>,
+    _operation: OperationGuard,
+    cancelled: Arc<AtomicBool>,
 }
 
 impl JobGuard {
-    pub fn is_active(app_state: &AppState) -> Result<bool, String> {
-        Ok(*app_state
-            .job_state
-            .lock()
-            .map_err(|_| "State job terkunci")?
-            != JobState::Idle)
-    }
-
     pub fn reserve(app_state: &AppState) -> Result<Self, String> {
-        let mut state = app_state
-            .job_state
-            .lock()
-            .map_err(|_| "State job terkunci")?;
-        if *state != JobState::Idle {
-            return Err("Masih ada job transkripsi yang sedang berjalan.".into());
-        }
-        *state = JobState::Starting;
-        app_state.cancelled.store(false, Ordering::SeqCst);
+        let operation = OperationGuard::reserve(
+            app_state,
+            OperationState::Transcribing,
+            Some(&app_state.cancelled),
+        )?;
         Ok(Self {
-            state: Arc::clone(&app_state.job_state),
+            _operation: operation,
+            cancelled: app_state.cancelled.clone(),
         })
     }
 
     pub fn mark_running(&self) -> Result<(), String> {
-        let mut state = self.state.lock().map_err(|_| "State job terkunci")?;
-        match *state {
-            JobState::Starting => {
-                *state = JobState::Running;
-                Ok(())
-            }
-            JobState::Running => Ok(()),
-            JobState::Cancelling => Err("Job dibatalkan.".into()),
-            JobState::Idle => Err("Lifecycle job tidak valid.".into()),
-        }
-    }
-
-    pub fn request_cancel(app_state: &AppState) -> Result<bool, String> {
-        let mut state = app_state
-            .job_state
-            .lock()
-            .map_err(|_| "State job terkunci")?;
-        if *state == JobState::Idle {
-            return Ok(false);
-        }
-        *state = JobState::Cancelling;
-        app_state.cancelled.store(true, Ordering::SeqCst);
-        Ok(true)
-    }
-}
-
-impl Drop for JobGuard {
-    fn drop(&mut self) {
-        if let Ok(mut state) = self.state.lock() {
-            *state = JobState::Idle;
+        if self.cancelled.load(Ordering::SeqCst) {
+            Err("Job dibatalkan.".into())
+        } else {
+            Ok(())
         }
     }
 }
 
 #[derive(Default)]
 pub struct AppState {
-    pub job_state: Arc<Mutex<JobState>>,
+    pub operation: Arc<Mutex<OperationState>>,
     pub active_pid: Arc<Mutex<Option<u32>>>,
     pub cancelled: Arc<AtomicBool>,
     pub model_cancelled: Arc<AtomicBool>,
     pub runtime_cancelled: Arc<AtomicBool>,
-    pub model_downloading: Arc<Mutex<Option<String>>>,
-    pub runtime_installing: Arc<Mutex<Option<String>>>,
+    pub vulkan_probe: Arc<Mutex<Option<VulkanProbeResult>>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct VulkanProbeResult {
+    pub signature: String,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{AppState, JobGuard, JobState};
+    use super::{AppState, JobGuard, OperationGuard, OperationState};
     use std::sync::{mpsc, Arc, Barrier};
     use std::thread;
 
@@ -96,10 +206,9 @@ mod tests {
     fn reserves_only_one_transcription_job() {
         let state = AppState::default();
         let first = JobGuard::reserve(&state).expect("first reservation should succeed");
-        assert_eq!(*state.job_state.lock().unwrap(), JobState::Starting);
         assert!(JobGuard::reserve(&state).is_err());
         drop(first);
-        assert!(!JobGuard::is_active(&state).unwrap());
+        assert_eq!(*state.operation.lock().unwrap(), OperationState::Idle);
         let second = JobGuard::reserve(&state).expect("reservation should be released");
         drop(second);
     }
@@ -108,11 +217,11 @@ mod tests {
     fn cancellation_during_start_cannot_become_running() {
         let state = AppState::default();
         let guard = JobGuard::reserve(&state).unwrap();
-        assert!(JobGuard::request_cancel(&state).unwrap());
+        OperationGuard::request_cancel(&state).unwrap();
         assert!(guard.mark_running().is_err());
         assert!(state.cancelled.load(std::sync::atomic::Ordering::SeqCst));
         drop(guard);
-        assert!(!JobGuard::is_active(&state).unwrap());
+        assert_eq!(*state.operation.lock().unwrap(), OperationState::Idle);
     }
 
     #[test]
@@ -140,6 +249,67 @@ mod tests {
             handle.join().unwrap();
         }
         assert_eq!(winners, 1);
-        assert!(!JobGuard::is_active(&state).unwrap());
+        assert_eq!(*state.operation.lock().unwrap(), OperationState::Idle);
+    }
+
+    #[test]
+    fn all_operations_share_one_reservation() {
+        let state = AppState::default();
+        let _transcription = JobGuard::reserve(&state).unwrap();
+        assert!(OperationGuard::reserve_model_download(&state, "base".into()).is_err());
+        assert_eq!(
+            *state.operation.lock().unwrap(),
+            OperationState::Transcribing
+        );
+    }
+
+    #[test]
+    fn cancellation_after_reservation_is_not_overwritten_by_a_reset() {
+        let state = AppState::default();
+        state
+            .model_cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let guard = OperationGuard::reserve_model_download(&state, "base".into()).unwrap();
+        assert!(!state
+            .model_cancelled
+            .load(std::sync::atomic::Ordering::SeqCst));
+
+        OperationGuard::request_cancel(&state).unwrap();
+        assert!(state
+            .model_cancelled
+            .load(std::sync::atomic::Ordering::SeqCst));
+        drop(guard);
+    }
+
+    #[test]
+    fn every_operation_rejects_all_competing_reservations() {
+        let state = AppState::default();
+        let model = OperationGuard::reserve_model_download(&state, "base".into()).unwrap();
+        assert!(JobGuard::reserve(&state).is_err());
+        assert!(OperationGuard::reserve_runtime_install(&state, "cuda".into()).is_err());
+        assert!(OperationGuard::reserve_model_delete(&state, "base".into()).is_err());
+        assert!(OperationGuard::reserve_app_update(&state).is_err());
+        drop(model);
+
+        let runtime = OperationGuard::reserve_runtime_install(&state, "vulkan".into()).unwrap();
+        assert!(JobGuard::reserve(&state).is_err());
+        assert!(OperationGuard::reserve_model_download(&state, "base".into()).is_err());
+        assert!(OperationGuard::reserve_model_delete(&state, "base".into()).is_err());
+        assert!(OperationGuard::reserve_app_update(&state).is_err());
+        drop(runtime);
+
+        let model_delete = OperationGuard::reserve_model_delete(&state, "base".into()).unwrap();
+        assert!(JobGuard::reserve(&state).is_err());
+        assert!(OperationGuard::reserve_model_download(&state, "base".into()).is_err());
+        assert!(OperationGuard::reserve_runtime_install(&state, "cuda".into()).is_err());
+        assert!(OperationGuard::reserve_app_update(&state).is_err());
+        drop(model_delete);
+
+        OperationGuard::reserve_app_update(&state).unwrap();
+        assert!(JobGuard::reserve(&state).is_err());
+        assert!(OperationGuard::reserve_model_download(&state, "base".into()).is_err());
+        assert!(OperationGuard::reserve_runtime_install(&state, "cuda".into()).is_err());
+        assert!(OperationGuard::reserve_model_delete(&state, "base".into()).is_err());
+        OperationGuard::release_app_update(&state).unwrap();
     }
 }

@@ -123,8 +123,8 @@ fn source_for_host(host: &str) -> Option<SourceDefinition> {
 
 pub fn validate_media_url(raw: &str) -> Result<String, String> {
     let parsed = Url::parse(raw).map_err(|_| "URL tidak valid.".to_string())?;
-    if parsed.scheme() != "https" && parsed.scheme() != "http" {
-        return Err("URL harus menggunakan http/https.".into());
+    if parsed.scheme() != "https" {
+        return Err("URL harus menggunakan HTTPS.".into());
     }
     if !parsed.username().is_empty() || parsed.password().is_some() {
         return Err("URL dengan kredensial tidak diperbolehkan.".into());
@@ -543,12 +543,18 @@ mod tests {
     }
 
     #[test]
+    fn rejects_plaintext_http_urls() {
+        assert!(validate_media_url("http://www.youtube.com/watch?v=abc").is_err());
+    }
+
+    #[test]
     fn rejects_live_unknown_and_excessively_long_media() {
         assert!(validate_media_duration(60.0, false).is_ok());
         assert!(validate_media_duration(0.0, false).is_err());
         assert!(validate_media_duration(f64::NAN, false).is_err());
         assert!(validate_media_duration(60.0, true).is_err());
-        assert!(validate_media_duration(8.0 * 60.0 * 60.0 + 1.0, false).is_err());
+        assert!(validate_media_duration(2.0 * 60.0 * 60.0, false).is_ok());
+        assert!(validate_media_duration(2.0 * 60.0 * 60.0 + 1.0, false).is_err());
     }
 
     #[test]

@@ -5,6 +5,17 @@ src-tauri/gen/schemas/
 .DS_Store
 *.log
 
+# Local configuration and credentials must never be committed
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+credentials.local.json
+
 # Downloaded runtime binaries are intentionally not stored in source control
 src-tauri/runtime/windows/*.exe
 src-tauri/runtime/windows/cpu/*

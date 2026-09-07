@@ -26,8 +26,8 @@ export function HistoryPage({ history, hasMore, loadingMore, onRefresh, onLoadMo
   const deleteDialogRef = useRef<HTMLDivElement>(null);
   const deleteTriggerRef = useRef<HTMLButtonElement | null>(null);
   const deleteDialogWasOpen = useRef(false);
-  const selectableCount = Math.min(history.length, MAX_DELETE_SELECTION);
-  const allSelected = selectableCount > 0 && selectedIds.size === selectableCount;
+  const selectableIds = history.slice(0, MAX_DELETE_SELECTION).map((item) => item.id);
+  const allSelected = selectableIds.length > 0 && selectableIds.every((id) => selectedIds.has(id));
 
   useEffect(() => {
     setSelectedIds((previous) => {
@@ -49,7 +49,7 @@ export function HistoryPage({ history, hasMore, loadingMore, onRefresh, onLoadMo
     setSelectedIds(
       allSelected
         ? new Set()
-        : new Set(history.slice(0, MAX_DELETE_SELECTION).map((item) => item.id)),
+        : new Set(selectableIds),
     );
   }
 

@@ -1695,6 +1695,11 @@ input:focus-visible,
   line-height: 1.45;
 }
 
+.transcript-load-more {
+  align-self: center;
+  margin: 8px 0 2px;
+}
+
 .history-load-more {
   align-self: center;
   margin-top: 8px;

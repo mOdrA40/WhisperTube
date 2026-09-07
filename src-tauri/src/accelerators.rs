@@ -285,6 +285,7 @@ async fn download_archive(
     client: &Client,
     url: &str,
     destination: &Path,
+    staging: &Path,
     cancelled: &AtomicBool,
 ) -> Result<(), String> {
     let mut response = tokio::time::timeout(Duration::from_secs(30), client.get(url).send())
@@ -301,11 +302,15 @@ async fn download_archive(
     if total > MAX_ACCELERATOR_ARCHIVE_BYTES {
         return Err("Ukuran accelerator dari server melebihi batas aman.".into());
     }
-    crate::resources::require_disk(
-        destination,
-        total
-            .max(MAX_ACCELERATOR_ARCHIVE_BYTES / 4)
-            .saturating_add(MAX_EXTRACTED_BYTES),
+    let archive_bytes = total.max(MAX_ACCELERATOR_ARCHIVE_BYTES);
+    crate::resources::require_disk_allocations(
+        &[
+            (
+                destination,
+                archive_bytes.saturating_add(MAX_EXTRACTED_BYTES),
+            ),
+            (staging, MAX_EXTRACTED_BYTES),
+        ],
         "download dan ekstraksi accelerator",
     )?;
     let mut file = tokio::fs::File::create(destination)
@@ -556,7 +561,16 @@ pub async fn install(
             .map_err(|e| format!("Gagal membuat HTTP client accelerator: {e}"))?;
         let (url, expected_sha256, asset_digest) =
             release_asset(&client, spec.asset_name, &cancelled).await?;
-        download_archive(&app, spec.backend, &client, &url, &archive_path, &cancelled).await?;
+        download_archive(
+            &app,
+            spec.backend,
+            &client,
+            &url,
+            &archive_path,
+            &staging_path,
+            &cancelled,
+        )
+        .await?;
         let app_for_finalize = app.clone();
         let cancelled_for_finalize = cancelled.clone();
         let archive_for_finalize = archive_path.clone();

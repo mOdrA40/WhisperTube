@@ -409,6 +409,7 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<(), String> {
 async fn download_cuda_package(
     app: &AppHandle,
     zip_path: &Path,
+    staging_path: &Path,
     cancelled: &AtomicBool,
 ) -> Result<(), String> {
     if cancelled.load(Ordering::SeqCst) {
@@ -438,9 +439,12 @@ async fn download_cuda_package(
     if total > MAX_CUDA_ARCHIVE_BYTES {
         return Err("Ukuran CUDA package dari server melebihi batas aman.".into());
     }
-    crate::resources::require_disk(
-        zip_path,
-        total.saturating_add(2 * 1024 * 1024 * 1024),
+    let archive_bytes = total.max(MAX_CUDA_ARCHIVE_BYTES);
+    crate::resources::require_disk_allocations(
+        &[
+            (zip_path, archive_bytes.saturating_add(MAX_EXTRACTED_BYTES)),
+            (staging_path, MAX_EXTRACTED_BYTES),
+        ],
         "download dan ekstraksi CUDA runtime",
     )?;
     let mut file = tokio::fs::File::create(zip_path)
@@ -511,17 +515,11 @@ fn finalize_cuda_engine_blocking(
     emit_cuda_progress(app, 94.0, 0, 0, None);
     let mut command = Command::new(&staging_cli);
     crate::process::hide_console(&mut command);
-    let test = command
-        .arg("--version")
-        .output()
-        .map_err(|e| format!("CUDA engine tidak bisa dijalankan: {e}"))?;
-    if !test.status.success() {
-        let error = String::from_utf8_lossy(&test.stderr).trim().to_string();
-        return Err(if error.is_empty() {
-            "CUDA engine gagal melakukan self-check.".into()
-        } else {
-            format!("CUDA engine gagal melakukan self-check: {error}")
-        });
+    command.arg("--version");
+    let status = crate::process::run_with_timeout(&mut command, Duration::from_secs(10))
+        .map_err(|e| format!("CUDA engine gagal melakukan self-check: {e}"))?;
+    if !status.success() {
+        return Err("CUDA engine gagal melakukan self-check.".into());
     }
     if cancelled.load(Ordering::SeqCst) {
         return Err("Download CUDA dibatalkan.".into());
@@ -555,7 +553,7 @@ pub async fn install_cuda_engine(app: AppHandle, cancelled: Arc<AtomicBool>) -> 
         .map_err(|e| format!("Gagal membuat temporary CUDA folder: {e}"))?;
 
     let result = async {
-        download_cuda_package(&app, &zip_path, &cancelled).await?;
+        download_cuda_package(&app, &zip_path, &staging_path, &cancelled).await?;
         let app_for_finalize = app.clone();
         let cancelled_for_finalize = cancelled.clone();
         let zip_for_finalize = zip_path.clone();

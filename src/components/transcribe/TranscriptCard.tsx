@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { Check, Copy, FileText, FolderOpen, Play, Search } from "lucide-react";
 import type { Segment, TranscriptResult } from "../../types";
 import { getModelLabel, useI18n } from "../../i18n";
@@ -13,6 +14,8 @@ type TranscriptCardProps = {
   onSearchChange: (query: string) => void;
 };
 
+const SEGMENTS_PER_PAGE = 300;
+
 export function TranscriptCard({
   result,
   copied,
@@ -24,6 +27,12 @@ export function TranscriptCard({
   onSearchChange,
 }: TranscriptCardProps) {
   const { t } = useI18n();
+  const [visibleSegmentCount, setVisibleSegmentCount] = useState(SEGMENTS_PER_PAGE);
+  const visibleSegments = filteredSegments.slice(0, visibleSegmentCount);
+
+  useEffect(() => {
+    setVisibleSegmentCount(SEGMENTS_PER_PAGE);
+  }, [result.historyId, searchQuery]);
 
   return (
     <div className="transcript-card card">
@@ -70,7 +79,7 @@ export function TranscriptCard({
       </div>
 
       <div className="segments">
-        {filteredSegments.map((segment, index) => (
+        {visibleSegments.map((segment, index) => (
           <div className="segment" key={`${segment.from}-${index}`}>
             <div className="timestamp">
               <Play size={11} fill="currentColor" /> {segment.from}
@@ -80,6 +89,17 @@ export function TranscriptCard({
         ))}
         {filteredSegments.length === 0 && (
           <div className="empty-inline">{t("transcript.empty")}</div>
+        )}
+        {visibleSegmentCount < filteredSegments.length && (
+          <button
+            type="button"
+            className="secondary-button transcript-load-more"
+            onClick={() => setVisibleSegmentCount((count) => count + SEGMENTS_PER_PAGE)}
+          >
+            {t("transcript.loadMore", {
+              count: Math.min(SEGMENTS_PER_PAGE, filteredSegments.length - visibleSegmentCount),
+            })}
+          </button>
         )}
       </div>
     </div>

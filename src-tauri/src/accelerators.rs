@@ -150,6 +150,7 @@ fn emit_progress(
 async fn release_asset(
     client: &Client,
     asset_name: &str,
+    cancelled: &AtomicBool,
 ) -> Result<(String, String, Option<String>), String> {
     let api_url =
         format!("https://api.github.com/repos/{RELEASE_REPOSITORY}/releases/tags/{RELEASE_TAG}");
@@ -166,10 +167,7 @@ async fn release_asset(
             response.status()
         ));
     }
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|e| format!("Manifest accelerator tidak bisa dibaca: {e}"))?;
+    let bytes = read_small_body(response, 1024 * 1024, cancelled, "manifest").await?;
     let manifest: Value = serde_json::from_slice(&bytes)
         .map_err(|e| format!("Manifest accelerator tidak valid: {e}"))?;
     let assets = manifest
@@ -221,10 +219,9 @@ async fn release_asset(
             checksum_response.status()
         ));
     }
-    let checksum = checksum_response
-        .text()
-        .await
-        .map_err(|e| format!("Checksum accelerator tidak bisa dibaca: {e}"))?
+    let checksum_bytes = read_small_body(checksum_response, 4096, cancelled, "checksum").await?;
+    let checksum = String::from_utf8(checksum_bytes)
+        .map_err(|_| "Checksum accelerator bukan UTF-8 valid.".to_string())?
         .split_whitespace()
         .next()
         .unwrap_or_default()
@@ -237,6 +234,39 @@ async fn release_asset(
         return Err("Checksum accelerator tidak berformat SHA-256.".into());
     }
     Ok((download_url, checksum, asset_digest))
+}
+
+async fn read_small_body(
+    mut response: reqwest::Response,
+    max_bytes: usize,
+    cancelled: &AtomicBool,
+    label: &str,
+) -> Result<Vec<u8>, String> {
+    if response
+        .content_length()
+        .is_some_and(|size| size > max_bytes as u64)
+    {
+        return Err(format!("Ukuran {label} accelerator melewati batas aman."));
+    }
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let mut body = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|e| format!("{label} accelerator tidak bisa dibaca: {e}"))?
+        {
+            if cancelled.load(Ordering::SeqCst) {
+                return Err(format!("Pengambilan {label} accelerator dibatalkan."));
+            }
+            if body.len().saturating_add(chunk.len()) > max_bytes {
+                return Err(format!("Ukuran {label} accelerator melewati batas aman."));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(body)
+    })
+    .await
+    .map_err(|_| format!("Timeout saat membaca {label} accelerator."))?
 }
 
 struct FinalizePaths<'a> {
@@ -271,6 +301,13 @@ async fn download_archive(
     if total > MAX_ACCELERATOR_ARCHIVE_BYTES {
         return Err("Ukuran accelerator dari server melebihi batas aman.".into());
     }
+    crate::resources::require_disk(
+        destination,
+        total
+            .max(MAX_ACCELERATOR_ARCHIVE_BYTES / 4)
+            .saturating_add(MAX_EXTRACTED_BYTES),
+        "download dan ekstraksi accelerator",
+    )?;
     let mut file = tokio::fs::File::create(destination)
         .await
         .map_err(|e| format!("Gagal membuat file accelerator: {e}"))?;
@@ -460,17 +497,11 @@ fn finalize_blocking(
     emit_progress(app, spec.backend, 94.0, 0, 0, None);
     let mut command = std::process::Command::new(&staging_cli);
     crate::process::hide_console(&mut command);
-    let test = command
-        .arg("--version")
-        .output()
-        .map_err(|e| format!("Accelerator tidak bisa dijalankan: {e}"))?;
-    if !test.status.success() {
-        let error = String::from_utf8_lossy(&test.stderr).trim().to_string();
-        return Err(if error.is_empty() {
-            "Accelerator gagal melakukan self-check.".into()
-        } else {
-            format!("Accelerator gagal melakukan self-check: {error}")
-        });
+    command.arg("--version");
+    let status = crate::process::run_with_timeout(&mut command, Duration::from_secs(10))
+        .map_err(|e| format!("Accelerator gagal melakukan self-check: {e}"))?;
+    if !status.success() {
+        return Err("Accelerator gagal melakukan self-check.".into());
     }
     if cancelled.load(Ordering::SeqCst) {
         return Err("Download accelerator dibatalkan.".into());
@@ -523,7 +554,8 @@ pub async fn install(
             .connect_timeout(Duration::from_secs(30))
             .build()
             .map_err(|e| format!("Gagal membuat HTTP client accelerator: {e}"))?;
-        let (url, expected_sha256, asset_digest) = release_asset(&client, spec.asset_name).await?;
+        let (url, expected_sha256, asset_digest) =
+            release_asset(&client, spec.asset_name, &cancelled).await?;
         download_archive(&app, spec.backend, &client, &url, &archive_path, &cancelled).await?;
         let app_for_finalize = app.clone();
         let cancelled_for_finalize = cancelled.clone();

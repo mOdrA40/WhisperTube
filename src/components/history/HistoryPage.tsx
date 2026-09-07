@@ -15,6 +15,8 @@ type HistoryPageProps = {
   onTabChange: (tab: AppTab) => void;
 };
 
+const MAX_DELETE_SELECTION = 100;
+
 export function HistoryPage({ history, hasMore, loadingMore, onRefresh, onLoadMore, onLoad, onDelete, onTabChange }: HistoryPageProps) {
   const { language, t } = useI18n();
   const dateLocale = language === "zh" ? "zh-CN" : language === "id" ? "id-ID" : "en-US";
@@ -24,7 +26,8 @@ export function HistoryPage({ history, hasMore, loadingMore, onRefresh, onLoadMo
   const deleteDialogRef = useRef<HTMLDivElement>(null);
   const deleteTriggerRef = useRef<HTMLButtonElement | null>(null);
   const deleteDialogWasOpen = useRef(false);
-  const allSelected = history.length > 0 && selectedIds.size === history.length;
+  const selectableCount = Math.min(history.length, MAX_DELETE_SELECTION);
+  const allSelected = selectableCount > 0 && selectedIds.size === selectableCount;
 
   useEffect(() => {
     setSelectedIds((previous) => {
@@ -37,13 +40,17 @@ export function HistoryPage({ history, hasMore, loadingMore, onRefresh, onLoadMo
     setSelectedIds((previous) => {
       const next = new Set(previous);
       if (next.has(id)) next.delete(id);
-      else next.add(id);
+      else if (next.size < MAX_DELETE_SELECTION) next.add(id);
       return next;
     });
   }
 
   function toggleAll() {
-    setSelectedIds(allSelected ? new Set() : new Set(history.map((item) => item.id)));
+    setSelectedIds(
+      allSelected
+        ? new Set()
+        : new Set(history.slice(0, MAX_DELETE_SELECTION).map((item) => item.id)),
+    );
   }
 
   function handleDelete(ids: number[], trigger: HTMLButtonElement) {
@@ -127,7 +134,10 @@ export function HistoryPage({ history, hasMore, loadingMore, onRefresh, onLoadMo
 
       {selectedIds.size > 0 && (
         <div className="history-selection-bar">
-          <span>{t("history.selected", { count: selectedIds.size })}</span>
+          <span>
+            {t("history.selected", { count: selectedIds.size })}
+            {history.length > MAX_DELETE_SELECTION && ` · ${t("history.selectionLimit", { count: MAX_DELETE_SELECTION })}`}
+          </span>
           <button
             type="button"
             className="danger-ghost"
@@ -162,6 +172,7 @@ export function HistoryPage({ history, hasMore, loadingMore, onRefresh, onLoadMo
                 type="checkbox"
                 className="history-checkbox"
                 checked={selectedIds.has(item.id)}
+                disabled={!selectedIds.has(item.id) && selectedIds.size >= MAX_DELETE_SELECTION}
                 onChange={() => toggleSelection(item.id)}
                 aria-label={t("history.selectItem")}
               />

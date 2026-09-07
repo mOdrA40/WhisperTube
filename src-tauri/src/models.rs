@@ -240,6 +240,11 @@ pub async fn download_model(
     if total > max_download_bytes {
         return Err("Ukuran model dari server melebihi batas aman.".into());
     }
+    crate::resources::require_disk(
+        &dest,
+        total.saturating_add(256 * 1024 * 1024),
+        "download model",
+    )?;
     let mut file = tokio::fs::File::create(&temp)
         .await
         .map_err(|e| format!("Gagal membuat file model: {e}"))?;
@@ -433,6 +438,11 @@ async fn download_cuda_package(
     if total > MAX_CUDA_ARCHIVE_BYTES {
         return Err("Ukuran CUDA package dari server melebihi batas aman.".into());
     }
+    crate::resources::require_disk(
+        zip_path,
+        total.saturating_add(2 * 1024 * 1024 * 1024),
+        "download dan ekstraksi CUDA runtime",
+    )?;
     let mut file = tokio::fs::File::create(zip_path)
         .await
         .map_err(|e| format!("Gagal membuat file download CUDA: {e}"))?;

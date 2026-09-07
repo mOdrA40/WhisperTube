@@ -118,7 +118,7 @@ impl Drop for UsageMonitor {
 
 impl GpuInfo {
     pub fn available_memory_mb(&self) -> Option<u64> {
-        self.free_memory_mb.or(self.total_memory_mb)
+        self.free_memory_mb
     }
 }
 

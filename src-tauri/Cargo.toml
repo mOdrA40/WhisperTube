@@ -30,3 +30,5 @@ tokio = { version = "1", features = ["fs", "io-util", "rt-multi-thread", "time"]
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
 tauri-plugin-updater = "2.11.0"
 tauri-plugin-process = "2.3.1"
+tauri-plugin-single-instance = "2"
+sysinfo = "0.33"

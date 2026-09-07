@@ -304,8 +304,9 @@ export function useWhisperTube() {
 
   const autoAcceleratorInstalled = Boolean(system?.accelerators.some((accelerator) => accelerator.installed));
   const modelDownloadActive = Object.keys(downloadingModel).length > 0;
+  const appUpdateInstalling = appUpdateStatus === "installing";
   const operationActive = Boolean(
-    busy || inspecting || modelDownloadActive || installingCuda || installingAccelerator,
+    busy || inspecting || modelDownloadActive || installingCuda || installingAccelerator || appUpdateInstalling,
   );
   const cudaInstallRequired = Boolean(system?.cudaSupported && system.nvidia && backend === "auto" && !system.cudaEngine && !autoAcceleratorInstalled);
   const vramWarning = useMemo(() => {
@@ -313,18 +314,15 @@ export function useWhisperTube() {
     if (backend === "cuda" && (!system.cudaSupported || !system.nvidia)) {
       return t("error.cudaUnavailable");
     }
-    if (!system.nvidia) return null;
-    if (!system.cudaSupported) {
-      return t("error.cudaUnavailable");
-    }
+    if (!system.nvidia || !system.cudaSupported) return null;
     if (!system.cudaEngine && backend === "auto" && !system.accelerators.some((accelerator) => accelerator.installed)) {
       return t("error.cudaRequired");
     }
     if (!system.cudaEngine) return null;
-    if (backend === "cuda" && !system.gpuFreeMemoryMb && !system.gpuMemoryMb) {
+    if ((backend === "cuda" || (backend === "auto" && system.cudaEngine)) && !system.gpuFreeMemoryMb) {
       return t("error.vramUnreadable");
     }
-    const available = system.gpuFreeMemoryMb ?? system.gpuMemoryMb;
+    const available = system.gpuFreeMemoryMb;
     if (available !== null && available !== undefined && available < selectedModel.vramRequiredMb) {
       return t("error.vramTooLow", {
         model: getModelCopy(selectedModel, t).label,
@@ -344,7 +342,7 @@ export function useWhisperTube() {
     }
     return null;
   }, [backend, system, t]);
-  const canStart = Boolean(!busy && metadata && selectedModel?.installed && runtimeReady && !installingCuda && !installingAccelerator && !modelDownloadActive && !cudaInstallRequired && !vramWarning && !acceleratorWarning);
+  const canStart = Boolean(!operationActive && metadata && selectedModel?.installed && runtimeReady && !cudaInstallRequired && !vramWarning && !acceleratorWarning);
 
   async function inspectVideo() {
     if (!url.trim()) {
@@ -399,6 +397,7 @@ export function useWhisperTube() {
   }
 
   async function handleDownloadModel(id: string) {
+    if (appUpdateInstalling) return;
     setError(null);
     setDownloadingModel((previous) => ({
       ...previous,
@@ -432,6 +431,7 @@ export function useWhisperTube() {
   }
 
   async function handleInstallCuda() {
+    if (appUpdateInstalling) return;
     if (!system?.cudaSupported || !system.nvidia) {
       setError(t("error.cudaUnavailable"));
       return;
@@ -457,6 +457,7 @@ export function useWhisperTube() {
   }
 
   async function handleInstallAccelerator(backendToInstall: Exclude<BackendChoice, "auto" | "cpu" | "cuda">) {
+    if (appUpdateInstalling) return;
     if (installingCuda || installingAccelerator !== null) {
       setError(t("error.installerBusy"));
       return;
@@ -478,7 +479,7 @@ export function useWhisperTube() {
   }
 
   async function handleStartTranscription() {
-    if (busy) return;
+    if (busy || appUpdateInstalling) return;
     if (!metadata) {
       setError(t("error.videoCheckFirst"));
       return;

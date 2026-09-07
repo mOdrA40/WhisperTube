@@ -537,7 +537,7 @@ fn run_whisper(
         .arg(wav)
         .args(["-l", language, "-t"])
         .arg(threads.to_string())
-        .args(["-pp", "-ojf", "-otxt", "-osrt", "-ovtt", "-of"])
+        .args(["-pp", "-oj", "-otxt", "-osrt", "-ovtt", "-of"])
         .arg(output_prefix)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -682,6 +682,21 @@ pub fn pipeline(
         return Err("Model belum diunduh. Unduh model dari UI terlebih dahulu.".into());
     }
     let jobs_dir = jobs_dir(&app)?;
+    let duration_seconds = request.duration.max(0.0) as u64;
+    let wav_bytes = duration_seconds.saturating_mul(16_000).saturating_mul(2);
+    let inference_bytes = duration_seconds.saturating_mul(16_000).saturating_mul(4);
+    let model_bytes = model.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+    let inference_required = inference_bytes
+        .saturating_add(model_bytes)
+        .saturating_add(512 * 1024 * 1024);
+    crate::resources::require_memory(inference_required, "transkripsi")?;
+    crate::resources::require_disk(
+        &jobs_dir,
+        wav_bytes
+            .saturating_add(duration_seconds.saturating_mul(125_000))
+            .saturating_add(512 * 1024 * 1024),
+        "download dan konversi media",
+    )?;
     let job_dir = jobs_dir.join(Uuid::new_v4().to_string());
     let job_guard = JobDirectoryGuard::create(job_dir.clone())?;
     let usage_monitor = UsageMonitor::start();
@@ -721,6 +736,7 @@ pub fn pipeline(
     if context.is_cancelled() {
         return Err("Job dibatalkan.".into());
     }
+    crate::resources::require_memory(inference_required, "inference Whisper")?;
 
     let output_prefix = job_dir.join("transcript");
     context.emit(ProgressUpdate {

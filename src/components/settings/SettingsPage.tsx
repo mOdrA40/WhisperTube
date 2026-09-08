@@ -15,6 +15,7 @@ type SettingsPageProps = {
   browsers: BrowserInfo[];
   system: SystemStatus | null;
   models: ModelInfo[];
+  modelDownloadBlockReasons: Record<string, string>;
   busy: boolean;
   downloadingModel: Record<string, ModelDownloadPayload>;
   accelerators: AcceleratorInfo[];
@@ -27,6 +28,7 @@ type SettingsPageProps = {
   appUpdateStatus: AppUpdateStatus;
   appUpdateProgress: AppUpdateProgress;
   appUpdateError: string | null;
+  updateChecking: boolean;
   onSelectCookiesFile: () => void;
   onClearCookiesFile: () => void;
   onUseSafariSession: () => void;
@@ -49,6 +51,7 @@ export function SettingsPage({
   browsers,
   system,
   models,
+  modelDownloadBlockReasons,
   busy,
   downloadingModel,
   accelerators,
@@ -61,6 +64,7 @@ export function SettingsPage({
   appUpdateStatus,
   appUpdateProgress,
   appUpdateError,
+  updateChecking,
   onSelectCookiesFile,
   onClearCookiesFile,
   onUseSafariSession,
@@ -85,7 +89,6 @@ export function SettingsPage({
   const cookiesContinueRef = useRef<HTMLButtonElement>(null);
   const cookiesDialogWasOpen = useRef(false);
   const modelDownloadActive = Object.keys(downloadingModel).length > 0;
-  const updatePercent = Math.max(0, Math.min(100, Math.round(appUpdateProgress.percent)));
   const interfaceLanguageOptions: SelectOption[] = uiLanguageOptions.map((option) => ({
     value: option.value,
     label: option.label,
@@ -145,71 +148,42 @@ export function SettingsPage({
 
   return (
     <div className="settings-grid">
-      <section className="card settings-card update-settings-card">
-        <div className="card-title-row">
-          <div>
-            <span className="eyebrow">{t("update.eyebrow")}</span>
-            <h3>{t("update.title")}</h3>
-          </div>
-          <Download size={20} />
-        </div>
-        <p className="settings-note">{t("update.description")}</p>
-        {appUpdate ? (
-          <div className="update-settings-available">
+      <div className="settings-inline-toolbar">
+        <div className="settings-update-copy">
+          <span>{t("update.description")}</span>
+          {appUpdate && appUpdateStatus !== "up-to-date" && (
             <strong>{t("update.available", { version: appUpdate.version })}</strong>
-            {appUpdate.notes && (
-              <div className="update-notes">
-                <span>{t("update.releaseNotes")}</span>
-                <p>{appUpdate.notes}</p>
-              </div>
-            )}
-            {appUpdateStatus === "installing" && (
-              <div className="update-settings-progress">
-                <div
-                  className="update-progress-track"
-                  role="progressbar"
-                  aria-valuemin={0}
-                  aria-valuemax={100}
-                  aria-valuenow={updatePercent}
-                  aria-label={t("update.installing", { percent: updatePercent })}
-                >
-                  <span style={{ width: `${updatePercent}%` }} />
-                </div>
-                <small>{t("update.installing", { percent: updatePercent })}</small>
-              </div>
-            )}
-          </div>
-        ) : appUpdateStatus === "up-to-date" ? (
-          <p className="settings-success">{t("update.upToDate")}</p>
-        ) : null}
-        {appUpdateError && (
-          <p className="settings-error">{t("update.error", { error: appUpdateError })}</p>
-        )}
-        <div className="update-settings-actions">
+          )}
+          {appUpdateError && <small className="settings-error">{appUpdateError}</small>}
+        </div>
+        <div className="settings-inline-actions">
           <button
             type="button"
-            className="secondary-button"
+            className="secondary-button compact"
             onClick={onCheckForUpdate}
-            disabled={appUpdateStatus === "checking" || appUpdateStatus === "installing"}
+            disabled={updateChecking || appUpdateStatus === "installing" || busy}
           >
-            {appUpdateStatus === "checking" ? <LoaderCircle className="spin" size={15} /> : <RotateCcw size={15} />}
-            {appUpdateStatus === "checking" ? t("update.checking") : t("update.check")}
+            {updateChecking ? <LoaderCircle className="spin" size={15} /> : <RotateCcw size={15} />}
+            {updateChecking ? t("update.checking") : t("update.check")}
           </button>
-          {appUpdate && appUpdateStatus !== "installing" && (
+          {appUpdate && appUpdateStatus === "available" && (
             <button
               type="button"
-              className="primary-button"
+              className="primary-button compact"
               onClick={onInstallAppUpdate}
               disabled={busy}
             >
               <Download size={15} /> {t("update.install")}
             </button>
           )}
+          {appUpdateStatus === "installing" && (
+            <span className="settings-update-progress">
+              {t("update.installing", { percent: Math.round(appUpdateProgress.percent) })}
+            </span>
+          )}
         </div>
-        {appUpdate && <p className="settings-note">{t("update.restartHint")}</p>}
-      </section>
-
-      <section className="card settings-card">
+      </div>
+      <section className="card settings-card settings-access-card">
         <div className="card-title-row">
           <div>
             <span className="eyebrow">{t("settings.eyebrow")}</span>
@@ -360,7 +334,7 @@ export function SettingsPage({
         </div>
       )}
 
-      <section className="card settings-card">
+      <section className="card settings-card hardware-settings-card">
         <div className="card-title-row">
           <div>
             <span className="eyebrow">{t("settings.hardwareEyebrow")}</span>
@@ -494,6 +468,9 @@ export function SettingsPage({
                 <span>
                   {getModelCopy(model, t).description} • {model.sizeMb} MB • {t("controls.cudaRequirement", { memory: formatMemory(model.vramRequiredMb, t("hardware.notDetected")) })}
                 </span>
+                {modelDownloadBlockReasons[model.id] && (
+                  <small className="model-download-block-reason">{modelDownloadBlockReasons[model.id]}</small>
+                )}
               </div>
               {downloadingModel[model.id] ? (
                 <div className="model-download-status">
@@ -538,7 +515,8 @@ export function SettingsPage({
                   type="button"
                   className="secondary-button compact"
                   onClick={() => onDownloadModel(model.id)}
-                  disabled={modelDownloadActive || busy}
+                  disabled={modelDownloadActive || busy || Boolean(modelDownloadBlockReasons[model.id])}
+                  title={modelDownloadBlockReasons[model.id]}
                 >
                   <Download size={15} /> {t("settings.download")}
                 </button>
@@ -548,7 +526,7 @@ export function SettingsPage({
         </div>
       </section>
 
-      <section className="card settings-card">
+      <section className="card settings-card runtime-settings-card">
         <div className="card-title-row">
           <div>
             <span className="eyebrow">{t("settings.runtimeEyebrow")}</span>

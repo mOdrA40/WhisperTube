@@ -10,6 +10,7 @@ import {
 import type { AppTab, SystemStatus } from "../../types";
 import { useI18n } from "../../i18n";
 import { WhisperTubeLogo } from "../common/WhisperTubeLogo";
+import { WindowTitleBar } from "./WindowTitleBar";
 
 type AppShellProps = {
   tab: AppTab;
@@ -29,6 +30,7 @@ export function AppShell({
   children,
 }: AppShellProps) {
   const { t } = useI18n();
+  const customTitleBar = typeof navigator !== "undefined" && /windows|linux/i.test(navigator.userAgent);
   const pageCopy: Record<AppTab, { title: string; description: string }> = {
     transcribe: { title: t("page.transcribe.title"), description: t("page.transcribe.description") },
     history: { title: t("page.history.title"), description: t("page.history.description") },
@@ -37,8 +39,10 @@ export function AppShell({
   const copy = pageCopy[tab];
 
   return (
-    <div className="app-shell">
-      <div className="ambient-backdrop" aria-hidden="true" />
+    <div className="app-window-shell">
+      <WindowTitleBar />
+      <div className={`app-shell ${customTitleBar ? "app-shell-with-window-titlebar" : ""}`}>
+        <div className="ambient-backdrop" aria-hidden="true" />
 
       <aside className="sidebar">
         <div className="brand-header">
@@ -121,6 +125,7 @@ export function AppShell({
 
         <div className="main-content-flow">{children}</div>
       </main>
+      </div>
     </div>
   );
 }

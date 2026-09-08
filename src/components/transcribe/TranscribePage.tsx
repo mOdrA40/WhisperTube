@@ -24,7 +24,9 @@ type TranscribePageProps = {
   progress: ProgressPayload;
   selectedModel: ModelInfo | undefined;
   canStart: boolean;
+  modelDownloadBlocked: boolean;
   backend: BackendChoice;
+  computeTargetId: string;
   system: SystemStatus | null;
   models: ModelInfo[];
   modelId: string;
@@ -50,7 +52,7 @@ type TranscribePageProps = {
   onClear: () => void;
   onCancel: () => void;
   onModelChange: (id: string) => void;
-  onBackendChange: (backend: BackendChoice) => void;
+  onComputeTargetChange: (targetId: string) => void;
   onLanguageChange: (language: string) => void;
   onKeepAudioChange: (keepAudio: boolean) => void;
   onDownloadModel: (id: string) => void;
@@ -75,7 +77,9 @@ export function TranscribePage({
   progress,
   selectedModel,
   canStart,
+  modelDownloadBlocked,
   backend,
+  computeTargetId,
   system,
   models,
   modelId,
@@ -101,7 +105,7 @@ export function TranscribePage({
   onClear,
   onCancel,
   onModelChange,
-  onBackendChange,
+  onComputeTargetChange,
   onLanguageChange,
   onKeepAudioChange,
   onDownloadModel,
@@ -151,7 +155,8 @@ export function TranscribePage({
           modelId={modelId}
           selectedModel={selectedModel}
           canStart={canStart}
-          backend={backend}
+          modelDownloadBlocked={modelDownloadBlocked}
+          computeTargetId={computeTargetId}
           language={language}
           keepAudio={keepAudio}
           system={system}
@@ -167,7 +172,7 @@ export function TranscribePage({
           vramWarning={vramWarning}
           acceleratorWarning={acceleratorWarning}
           onModelChange={onModelChange}
-          onBackendChange={onBackendChange}
+          onComputeTargetChange={onComputeTargetChange}
           onLanguageChange={onLanguageChange}
           onKeepAudioChange={onKeepAudioChange}
           onDownloadModel={onDownloadModel}

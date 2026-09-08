@@ -131,6 +131,11 @@ Open **Settings → Hardware**. WhisperTube only offers an accelerator that matc
 - Windows/Linux x64 with a detected GPU: the matching Vulkan pack can be offered as an alternative accelerator.
 - A CPU-only or unsupported device does not receive an irrelevant accelerator download button.
 
+When multiple GPUs are available, the compute selector lists installed targets
+such as `CUDA · NVIDIA RTX` or `VULKAN · AMD Radeon (iGPU)`. Auto prefers a
+working CUDA target on supported Windows NVIDIA systems; manual targets let
+you choose a specific CUDA or Vulkan device.
+
 The CUDA package is large, so it is deliberately excluded from the base setup. The app downloads it into user app storage and verifies its SHA-256 before activation.
 
 ### 8. First transcription

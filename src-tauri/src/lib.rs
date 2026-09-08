@@ -49,6 +49,12 @@ pub fn run() {
                 eprintln!("WhisperTube startup cleanup warning: {error}");
             }
             paths::models_dir(&handle).map_err(std::io::Error::other)?;
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
+            if let Some(window) = app.get_webview_window("main") {
+                window
+                    .set_decorations(false)
+                    .map_err(std::io::Error::other)?;
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

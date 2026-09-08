@@ -53,6 +53,10 @@ cd D:\Projects\WhisperTube
 - Windows/Linux x64 + 检测到 GPU：可提供匹配的 Vulkan pack 作为替代加速器。
 - 只有 CPU 或不受支持的设备不会看到无关的 accelerator 下载按钮。
 
+如果设备有多个 GPU，计算目标选择器会显示已安装的目标，例如
+`CUDA · NVIDIA RTX` 或 `VULKAN · AMD Radeon (iGPU)`。在支持的 Windows NVIDIA
+设备上，自动模式优先使用可用的 CUDA；手动目标可以选择具体的 CUDA 或 Vulkan 设备。
+
 CUDA 不包含在基础安装中。应用会将其下载到用户 app storage，并在启用前验证 SHA-256。
 
 ## 转录流程

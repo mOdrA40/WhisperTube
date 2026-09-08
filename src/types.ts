@@ -53,6 +53,18 @@ export type SystemStatus = {
   recommendedModelId: string;
   recommendedBackend: BackendChoice;
   accelerators: AcceleratorInfo[];
+  computeDevices: ComputeDeviceInfo[];
+};
+
+export type ComputeDeviceInfo = {
+  id: string;
+  backend: Exclude<BackendChoice, "auto" | "cpu">;
+  name: string;
+  vendor: string;
+  deviceIndex: number | null;
+  integrated: boolean;
+  totalMemoryMb: number | null;
+  freeMemoryMb: number | null;
 };
 
 export type ModelInfo = {
@@ -168,6 +180,7 @@ export type TranscriptRequest = {
   browserProfile: string;
   cookiesPath: string;
   backend: BackendChoice;
+  computeDeviceId: string | null;
   language: string;
   modelId: string;
   keepAudio: boolean;

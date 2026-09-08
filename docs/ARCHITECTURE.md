@@ -134,10 +134,11 @@ download chunks.
 
 The system status query reads NVIDIA name, total VRAM, and free VRAM through
 `nvidia-smi`, selecting the device with the most free memory when multiple
-NVIDIA GPUs are present. The selected device index is passed to whisper.cpp for
-CUDA inference; Vulkan does not reuse the NVIDIA index and lets its own backend
-device ordering decide. It uses platform-specific graphics detection for other
-GPU vendors. Model entries expose conservative CUDA guardrails: Fast requires
+NVIDIA GPUs are present. Installed CUDA devices and Vulkan devices reported by
+the selected Vulkan engine are exposed as explicit compute targets, and the
+selected device index is passed to whisper.cpp for both CUDA and Vulkan
+inference. It uses platform-specific graphics detection for other GPU vendors.
+Model entries expose conservative CUDA guardrails: Fast requires
 about 2 GB, Balanced 4 GB, and Accurate 7 GB of free VRAM. These are
 preflight safety thresholds; actual available memory can change when other
 GPU applications are running. CUDA is offered only on supported Windows x64
@@ -147,9 +148,10 @@ kept as an explicit alternative even when CUDA is available, so NVIDIA users
 can compare backends or use Vulkan when needed.
 
 Windows CPU telemetry uses the native `GetSystemTimes` API. GPU telemetry is
-sampled every five seconds, and the resolved `nvidia-smi` executable path is
-cached to avoid repeating vendor/path discovery on every sample. External child
-processes use hidden-console creation flags on Windows.
+sampled every five seconds and follows the resolved compute target: CUDA uses
+the selected NVIDIA index, while Vulkan uses OS graphics counters as a
+best-effort/aggregate signal rather than incorrectly querying an idle NVIDIA
+device. External child processes use hidden-console creation flags on Windows.
 
 Auto Vulkan selection runs a bounded capability probe using the selected
 whisper.cpp engine, the installed model, and a generated one-second silent WAV.
@@ -157,6 +159,9 @@ Only successful results are cached for the engine/model file signatures during
 the app session; cancellation and timeout failures are retried. A failed probe
 causes Auto to fall back to CPU when the CPU engine is available; explicitly
 selected Vulkan fails closed with the diagnostic error.
+Vulkan child processes disable the optional cooperative-matrix shader path and
+flash attention for cross-vendor stability, because some AMD Windows drivers
+can expose those capabilities but fail during Whisper inference.
 The full-buffer transcription path is limited to two hours and rechecks the
 actual converted WAV size before loading inference buffers. Its initial disk
 reservation covers the maximum source download, generated WAV, and a safety

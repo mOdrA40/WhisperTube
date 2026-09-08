@@ -6,6 +6,7 @@ type AppUpdateBannerProps = {
   update: AppUpdateInfo;
   status: AppUpdateStatus;
   progress: AppUpdateProgress;
+  error: string | null;
   busy: boolean;
   onInstall: () => void;
   onDismiss: () => void;
@@ -15,6 +16,7 @@ export function AppUpdateBanner({
   update,
   status,
   progress,
+  error,
   busy,
   onInstall,
   onDismiss,
@@ -24,7 +26,7 @@ export function AppUpdateBanner({
   const percent = Math.max(0, Math.min(100, Math.round(progress.percent)));
 
   return (
-    <section className="update-banner" role="status" aria-live="polite">
+    <section className="update-banner update-toast" role="status" aria-live="polite">
       <div className="update-banner-icon" aria-hidden="true">
         <Download size={18} />
       </div>
@@ -33,10 +35,10 @@ export function AppUpdateBanner({
           <strong>{t("update.title")}</strong>
           <span>{t("update.available", { version: update.version })}</span>
         </div>
-        <p>
-          {installing
+        <p className={error ? "update-banner-error" : undefined}>
+          {error ?? (installing
             ? t("update.installing", { percent })
-            : update.notes ?? t("update.restartHint")}
+            : update.notes ?? t("update.restartHint"))}
         </p>
         {installing && (
           <div

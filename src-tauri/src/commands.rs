@@ -30,7 +30,9 @@ pub async fn download_model(
     app: AppHandle,
     state: State<'_, AppState>,
     model_id: String,
+    compute_device_id: Option<String>,
 ) -> Result<(), String> {
+    models::ensure_download_supported(&app, &model_id, compute_device_id.as_deref())?;
     let _operation = OperationGuard::reserve_model_download(&state, model_id.clone())?;
     let result = models::download_model(app, model_id, state.model_cancelled.clone()).await;
     result

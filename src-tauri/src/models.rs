@@ -20,7 +20,8 @@ use uuid::Uuid;
 use zip::ZipArchive;
 
 use crate::{
-    paths::{model_path, models_dir, user_runtime_dir},
+    paths::{engine_path, model_path, models_dir, user_runtime_dir},
+    system,
     types::{CudaDownloadPayload, ModelDownloadPayload, ModelInfo},
 };
 
@@ -170,6 +171,59 @@ pub fn ensure_vram_available(model_id: &str, available_vram_mb: Option<u64>) -> 
             available as f64 / 1024.0,
         ));
     }
+    Ok(())
+}
+
+pub fn ensure_download_supported(
+    app: &AppHandle,
+    model_id: &str,
+    compute_device_id: Option<&str>,
+) -> Result<(), String> {
+    let spec = model_spec(model_id)?;
+    let target_id = compute_device_id.unwrap_or("auto");
+
+    if target_id == "auto" && cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        let nvidia = system::detect_nvidia();
+        if engine_path(app, "cuda")?.exists() {
+            if let Some(gpu) = nvidia {
+                return ensure_vram_available(spec.id, gpu.available_memory_mb());
+            }
+        }
+    }
+
+    if let Some(index) = target_id.strip_prefix("cuda:") {
+        let index = index
+            .parse::<usize>()
+            .map_err(|_| format!("Target CUDA tidak valid: {target_id}."))?;
+        let gpu = system::detect_nvidia_device(index)
+            .ok_or_else(|| format!("NVIDIA device {index} tidak terdeteksi."))?;
+        return ensure_vram_available(spec.id, gpu.available_memory_mb());
+    }
+
+    if let Some(index) = target_id.strip_prefix("vulkan:") {
+        let index = index
+            .parse::<usize>()
+            .map_err(|_| format!("Target Vulkan tidak valid: {target_id}."))?;
+        let devices = system::detect_vulkan_devices(app);
+        if !devices
+            .iter()
+            .any(|device| device.device_index == Some(index))
+        {
+            return Err(format!("Vulkan device {index} tidak terdeteksi."));
+        }
+        return Ok(());
+    }
+
+    if target_id == "cuda" {
+        let gpu = system::detect_nvidia()
+            .ok_or_else(|| "NVIDIA GPU/driver tidak terdeteksi.".to_string())?;
+        return ensure_vram_available(spec.id, gpu.available_memory_mb());
+    }
+
+    if target_id == "vulkan" && !engine_path(app, "vulkan")?.exists() {
+        return Err("Vulkan engine belum terpasang.".into());
+    }
+
     Ok(())
 }
 

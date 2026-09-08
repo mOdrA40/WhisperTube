@@ -53,6 +53,11 @@ Buka **Settings → Hardware**. Aplikasi hanya menampilkan accelerator yang coco
 - Windows/Linux x64 + GPU terdeteksi: pack Vulkan yang sesuai dapat ditawarkan sebagai accelerator alternatif.
 - Perangkat CPU-only tidak mendapat tombol download accelerator yang tidak relevan.
 
+Jika ada beberapa GPU, selector compute menampilkan target terpasang seperti
+`CUDA · NVIDIA RTX` atau `VULKAN · AMD Radeon (iGPU)`. Mode Auto memprioritaskan
+CUDA yang siap pada Windows NVIDIA; target manual dapat memilih device CUDA atau
+Vulkan tertentu.
+
 CUDA tidak dibundel dalam setup dasar. Aplikasi mengunduhnya ke app storage user dan memvalidasi SHA-256 sebelum digunakan.
 
 ## Alur transkripsi

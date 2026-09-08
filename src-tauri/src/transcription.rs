@@ -23,7 +23,7 @@ use crate::{
     process, resources,
     sources::{js_runtime_args, validate_media_duration, validate_media_url},
     state::VulkanProbeResult,
-    system::{detect_gpu, detect_nvidia, UsageMonitor},
+    system::{detect_gpu, detect_nvidia, detect_nvidia_device, UsageMonitor},
     types::{
         ProgressPayload, Segment, TranscriptRequest, TranscriptResult, MAX_TRANSCRIPT_RESULT_BYTES,
         MAX_TRANSCRIPT_SEGMENTS, MAX_TRANSCRIPT_TEXT_BYTES,
@@ -46,6 +46,13 @@ struct ProgressUpdate<'a> {
     downloaded_bytes: Option<u64>,
     total_bytes: Option<u64>,
     network_bytes_per_second: Option<u64>,
+}
+
+struct WhisperConfig<'a> {
+    language: &'a str,
+    backend: &'a str,
+    compute_device_id: Option<&'a str>,
+    model_id: &'a str,
 }
 
 impl JobContext<'_> {
@@ -321,6 +328,14 @@ fn whisper_thread_count(available: usize, backend: &str) -> usize {
     } else {
         available.clamp(1, 12)
     }
+}
+
+fn configure_vulkan_command(command: &mut Command) {
+    // AMD Windows drivers, including Radeon 780M, can expose cooperative
+    // matrices while failing during Whisper inference through the Vulkan
+    // shader path. Keep Vulkan cross-vendor compatibility ahead of that
+    // optional optimization; the engine still uses the selected GPU.
+    command.env("GGML_VK_DISABLE_COOPMAT", "1");
 }
 
 fn run_download(
@@ -738,7 +753,12 @@ fn vulkan_probe_signature(engine: &Path, model: &Path) -> String {
     )
 }
 
-fn run_vulkan_probe(context: &JobContext, engine: &Path, model: &Path) -> Result<(), String> {
+fn run_vulkan_probe(
+    context: &JobContext,
+    engine: &Path,
+    model: &Path,
+    device_index: usize,
+) -> Result<(), String> {
     let probe_dir =
         std::env::temp_dir().join(format!("whispertube-vulkan-probe-{}", Uuid::new_v4()));
     fs::create_dir_all(&probe_dir)
@@ -749,12 +769,15 @@ fn run_vulkan_probe(context: &JobContext, engine: &Path, model: &Path) -> Result
         write_vulkan_probe_wav(&wav)?;
         let mut command = Command::new(engine);
         process::hide_console(&mut command);
+        configure_vulkan_command(&mut command);
         command
             .args(["-m"])
             .arg(model)
             .args(["-f"])
             .arg(&wav)
-            .args(["-l", "auto", "-t", "1", "-nt", "-np", "-nfa", "-of"])
+            .args(["-l", "auto", "-t", "1", "-nt", "-np", "-nfa", "-dev"])
+            .arg(device_index.to_string())
+            .args(["-of"])
             .arg(&output)
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -827,10 +850,18 @@ fn run_vulkan_probe(context: &JobContext, engine: &Path, model: &Path) -> Result
     result
 }
 
-fn ensure_vulkan_probe(context: &JobContext, engine: &Path, model: &Path) -> Result<(), String> {
-    let signature = vulkan_probe_signature(engine, model);
+fn ensure_vulkan_probe(
+    context: &JobContext,
+    engine: &Path,
+    model: &Path,
+    device_index: usize,
+) -> Result<(), String> {
+    let signature = format!(
+        "{}|device={device_index}",
+        vulkan_probe_signature(engine, model)
+    );
     run_cached_vulkan_probe(context.vulkan_probe, signature, || {
-        run_vulkan_probe(context, engine, model)
+        run_vulkan_probe(context, engine, model, device_index)
     })
 }
 
@@ -859,9 +890,30 @@ where
     result
 }
 
+fn requested_device_index(
+    requested_device_id: Option<&str>,
+    backend: &str,
+) -> Result<Option<usize>, String> {
+    let Some(requested_device_id) = requested_device_id else {
+        return Ok(None);
+    };
+    if requested_device_id == backend {
+        return Ok(None);
+    }
+    let prefix = format!("{backend}:");
+    let value = requested_device_id.strip_prefix(&prefix).ok_or_else(|| {
+        format!("Target compute {requested_device_id} tidak cocok dengan backend {backend}.")
+    })?;
+    value
+        .parse::<usize>()
+        .map(Some)
+        .map_err(|_| format!("Index device compute tidak valid: {requested_device_id}."))
+}
+
 fn choose_backend(
     context: &JobContext,
     requested: &str,
+    requested_device_id: Option<&str>,
     model: &Path,
 ) -> Result<(String, PathBuf, Option<String>, Option<usize>), String> {
     let app = context.app;
@@ -888,12 +940,14 @@ fn choose_backend(
             } else if !cuda.exists() {
                 Err("CUDA engine belum terpasang. Install CUDA acceleration dari Settings terlebih dahulu.".into())
             } else {
-                Ok((
-                    "cuda".into(),
-                    cuda,
-                    None,
-                    nvidia_gpu.as_ref().and_then(|gpu| gpu.device_index),
-                ))
+                let device_index = requested_device_index(requested_device_id, "cuda")?;
+                let gpu = match device_index {
+                    Some(index) => detect_nvidia_device(index)
+                        .ok_or_else(|| format!("NVIDIA device {index} tidak lagi terdeteksi."))?,
+                    None => detect_nvidia()
+                        .ok_or_else(|| "NVIDIA GPU/driver tidak terdeteksi.".to_string())?,
+                };
+                Ok(("cuda".into(), cuda, None, gpu.device_index))
             }
         }
         "metal" => {
@@ -916,10 +970,12 @@ fn choose_backend(
                         .into(),
                 )
             } else {
-                ensure_vulkan_probe(context, &vulkan, model).map_err(|error| {
+                let device_index =
+                    requested_device_index(requested_device_id, "vulkan")?.unwrap_or(0);
+                ensure_vulkan_probe(context, &vulkan, model, device_index).map_err(|error| {
                     format!("Vulkan dipilih tetapi capability probe gagal: {error}")
                 })?;
-                Ok(("vulkan".into(), vulkan, None, None))
+                Ok(("vulkan".into(), vulkan, None, Some(device_index)))
             }
         }
         "auto" => {
@@ -936,8 +992,8 @@ fn choose_backend(
                 && gpu_detected
                 && vulkan.exists()
             {
-                match ensure_vulkan_probe(context, &vulkan, model) {
-                    Ok(()) => Ok(("vulkan".into(), vulkan, None, None)),
+                match ensure_vulkan_probe(context, &vulkan, model, 0) {
+                    Ok(()) => Ok(("vulkan".into(), vulkan, None, Some(0))),
                     Err(error) if cpu.exists() => Ok((
                         "cpu".into(),
                         cpu,
@@ -967,12 +1023,10 @@ fn run_whisper(
     wav: &Path,
     output_prefix: &Path,
     model: &Path,
-    language: &str,
-    backend: &str,
-    model_id: &str,
+    config: WhisperConfig<'_>,
 ) -> Result<String, String> {
     let (resolved_backend, engine, fallback_message, device_index) =
-        choose_backend(context, backend, model)?;
+        choose_backend(context, config.backend, config.compute_device_id, model)?;
     if let Some(message) = fallback_message {
         context.emit(ProgressUpdate {
             stage: "transcribing",
@@ -985,11 +1039,19 @@ fn run_whisper(
         });
     }
     if resolved_backend == "cuda" {
-        let gpu = detect_nvidia().ok_or_else(|| {
-            "NVIDIA GPU tidak lagi terdeteksi. Pilih CPU atau periksa driver.".to_string()
-        })?;
-        models::ensure_vram_available(model_id, gpu.available_memory_mb())?;
+        let gpu = match device_index {
+            Some(index) => detect_nvidia_device(index).ok_or_else(|| {
+                format!(
+                    "NVIDIA device {index} tidak lagi terdeteksi. Pilih CPU atau periksa driver."
+                )
+            })?,
+            None => detect_nvidia().ok_or_else(|| {
+                "NVIDIA GPU tidak lagi terdeteksi. Pilih CPU atau periksa driver.".to_string()
+            })?,
+        };
+        models::ensure_vram_available(config.model_id, gpu.available_memory_mb())?;
     }
+    context.usage.set_target(&resolved_backend, device_index);
     let available_threads = std::thread::available_parallelism()
         .map(|value| value.get())
         .unwrap_or(4);
@@ -1001,7 +1063,7 @@ fn run_whisper(
         .arg(model)
         .args(["-f"])
         .arg(wav)
-        .args(["-l", language, "-t"])
+        .args(["-l", config.language, "-t"])
         .arg(threads.to_string())
         .args(["-pp", "-oj", "-otxt", "-osrt", "-ovtt", "-of"])
         .arg(output_prefix)
@@ -1011,6 +1073,14 @@ fn run_whisper(
     if resolved_backend == "cpu" {
         command.arg("-ng");
     } else if resolved_backend == "cuda" {
+        if let Some(device_index) = device_index {
+            command.arg("-dev").arg(device_index.to_string());
+        }
+    } else if resolved_backend == "vulkan" {
+        configure_vulkan_command(&mut command);
+        // Keep the actual job on the same conservative Vulkan path as the
+        // capability probe. Some AMD drivers are unstable with flash-attn.
+        command.arg("-nfa");
         if let Some(device_index) = device_index {
             command.arg("-dev").arg(device_index.to_string());
         }
@@ -1288,9 +1358,12 @@ pub fn pipeline(
         &wav,
         &output_prefix,
         &model,
-        &request.language,
-        &request.backend,
-        &request.model_id,
+        WhisperConfig {
+            language: &request.language,
+            backend: &request.backend,
+            compute_device_id: request.compute_device_id.as_deref(),
+            model_id: &request.model_id,
+        },
     )?;
     if context.is_cancelled() {
         return Err("Job dibatalkan.".into());

@@ -105,6 +105,7 @@ export function useWhisperTube() {
   const [cookiesPath, setCookiesPath] = useState(readStoredCookiesPath);
   const [browser, setBrowser] = useState<BrowserChoice>(readStoredBrowser);
   const [backend, setBackend] = useState<BackendChoice>("auto");
+  const [computeTargetId, setComputeTargetId] = useState("auto");
   const [language, setLanguage] = useState("auto");
   const [modelId, setModelId] = useState("large-v3-turbo-q5_0");
   const [keepAudio, setKeepAudio] = useState(false);
@@ -154,6 +155,7 @@ export function useWhisperTube() {
     if (!autoConfigured.current) {
       setModelId(nextSystem.recommendedModelId);
       setBackend(nextSystem.recommendedBackend);
+      setComputeTargetId("auto");
       autoConfigured.current = true;
     }
     setModels(nextModels);
@@ -322,10 +324,13 @@ export function useWhisperTube() {
       return t("error.cudaRequired");
     }
     if (!system.cudaEngine) return null;
-    if ((backend === "cuda" || (backend === "auto" && system.cudaEngine)) && !system.gpuFreeMemoryMb) {
+    const selectedCudaDevice = computeTargetId.startsWith("cuda:")
+      ? system.computeDevices.find((device) => device.id === computeTargetId)
+      : null;
+    const available = selectedCudaDevice?.freeMemoryMb ?? system.gpuFreeMemoryMb;
+    if ((backend === "cuda" || (backend === "auto" && system.cudaEngine)) && !available) {
       return t("error.vramUnreadable");
     }
-    const available = system.gpuFreeMemoryMb;
     if (available !== null && available !== undefined && available < selectedModel.vramRequiredMb) {
       return t("error.vramTooLow", {
         model: getModelCopy(selectedModel, t).label,
@@ -334,7 +339,7 @@ export function useWhisperTube() {
       });
     }
     return null;
-  }, [backend, selectedModel, system, t]);
+  }, [backend, computeTargetId, selectedModel, system, t]);
   const acceleratorWarning = useMemo(() => {
     if (!system || backend === "auto" || backend === "cpu" || backend === "cuda") return null;
     const accelerator = system.accelerators.find((item) => item.backend === backend);
@@ -346,6 +351,52 @@ export function useWhisperTube() {
     return null;
   }, [backend, system, t]);
   const canStart = Boolean(!operationActive && metadata && selectedModel?.installed && runtimeReady && !cudaInstallRequired && !vramWarning && !acceleratorWarning);
+  const modelDownloadBlockReasons = useMemo<Record<string, string>>(() => {
+    const reasons: Record<string, string> = {};
+    const cudaTarget = backend === "cuda" || (backend === "auto" && system?.cudaEngine);
+    if (!system || !cudaTarget) return reasons;
+    const selectedCudaDevice = computeTargetId.startsWith("cuda:")
+      ? system.computeDevices.find((device) => device.id === computeTargetId)
+      : null;
+    const available = selectedCudaDevice?.freeMemoryMb ?? system.gpuFreeMemoryMb;
+    for (const model of models) {
+      if (available === null || available === undefined) {
+        reasons[model.id] = t("error.vramUnreadable");
+      } else if (available < model.vramRequiredMb) {
+        reasons[model.id] = t("error.vramTooLow", {
+          model: getModelCopy(model, t).label,
+          required: `${(model.vramRequiredMb / 1024).toFixed(1)} GB`,
+          available: `${(available / 1024).toFixed(1)} GB`,
+        });
+      }
+    }
+    return reasons;
+  }, [backend, computeTargetId, models, system, t]);
+  const modelDownloadBlocked = Boolean(
+    selectedModel && modelDownloadBlockReasons[selectedModel.id],
+  );
+
+  function handleComputeTargetChange(targetId: string) {
+    setComputeTargetId(targetId);
+    if (targetId === "auto") {
+      setBackend("auto");
+      return;
+    }
+    if (targetId === "cpu" || targetId === "metal") {
+      setBackend(targetId);
+      return;
+    }
+    const backendFromTarget = targetId.split(":", 1)[0];
+    if (backendFromTarget === "cuda" || backendFromTarget === "vulkan") {
+      setBackend(backendFromTarget);
+      return;
+    }
+    setError(`Target compute tidak dikenal: ${targetId}`);
+  }
+
+  function clearAppUpdateError() {
+    setAppUpdateError(null);
+  }
 
   async function inspectVideo() {
     if (!url.trim()) {
@@ -407,7 +458,7 @@ export function useWhisperTube() {
       [id]: { id, downloadedBytes: 0, totalBytes: 0, percent: 0, bytesPerSecond: null },
     }));
     try {
-      await downloadModel(id);
+      await downloadModel(id, computeTargetId);
       await refreshSystem();
     } catch (cause) {
       const message = friendlyError(cause);
@@ -533,6 +584,7 @@ export function useWhisperTube() {
         browserProfile: "",
         cookiesPath,
         backend,
+        computeDeviceId: computeTargetId,
         language,
         modelId,
         keepAudio,
@@ -652,6 +704,7 @@ export function useWhisperTube() {
     clearCookiesFile: handleClearCookiesFile,
     useSafariSession: handleUseSafariSession,
     backend,
+    computeTargetId,
     setBackend,
     language,
     setLanguage,
@@ -683,6 +736,8 @@ export function useWhisperTube() {
     runtimeReady,
     filteredSegments,
     canStart,
+    modelDownloadBlocked,
+    modelDownloadBlockReasons,
     cudaInstallRequired,
     vramWarning,
     acceleratorWarning,
@@ -699,9 +754,11 @@ export function useWhisperTube() {
     appUpdateStatus,
     appUpdateProgress,
     appUpdateError,
+    clearAppUpdateError,
     checkForAppUpdate: handleCheckForAppUpdate,
     installAppUpdate: handleInstallAppUpdate,
     startTranscription: handleStartTranscription,
+    setComputeTarget: handleComputeTargetChange,
     cancelJob: handleCancelJob,
     loadHistory: handleLoadHistory,
     loadMoreHistory: handleLoadMoreHistory,

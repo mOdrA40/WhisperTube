@@ -14,7 +14,7 @@ describe("Tauri IPC contracts", () => {
   beforeEach(() => vi.clearAllMocks());
 
   it("uses the backend's camelCase argument names", async () => {
-    await downloadModel("base");
+    await downloadModel("base", null);
     await deleteModel("base");
     await listHistory(42);
     await inspectMedia("https://www.youtube.com/watch?v=test", "none", "", "");
@@ -27,13 +27,14 @@ describe("Tauri IPC contracts", () => {
       browserProfile: "",
       cookiesPath: "",
       backend: "cpu" as const,
+      computeDeviceId: null,
       language: "en",
       modelId: "base",
       keepAudio: false,
     };
     await startTranscription(request);
 
-    expect(invoke).toHaveBeenNthCalledWith(1, "download_model", { modelId: "base" });
+    expect(invoke).toHaveBeenNthCalledWith(1, "download_model", { modelId: "base", computeDeviceId: null });
     expect(invoke).toHaveBeenNthCalledWith(2, "delete_model", { modelId: "base" });
     expect(invoke).toHaveBeenNthCalledWith(3, "list_history", { beforeId: 42 });
     expect(invoke).toHaveBeenNthCalledWith(4, "inspect_media", {

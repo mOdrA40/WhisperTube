@@ -31,6 +31,20 @@ pub struct AcceleratorInfo {
     pub downloadable: bool,
     pub description: String,
 }
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputeDeviceInfo {
+    pub id: String,
+    pub backend: String,
+    pub name: String,
+    pub vendor: String,
+    pub device_index: Option<usize>,
+    pub integrated: bool,
+    pub total_memory_mb: Option<u64>,
+    pub free_memory_mb: Option<u64>,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SystemStatus {
@@ -48,6 +62,7 @@ pub struct SystemStatus {
     pub recommended_model_id: String,
     pub recommended_backend: String,
     pub accelerators: Vec<AcceleratorInfo>,
+    pub compute_devices: Vec<ComputeDeviceInfo>,
 }
 
 #[derive(Serialize)]
@@ -179,6 +194,8 @@ pub struct TranscriptRequest {
     #[serde(default)]
     pub cookies_path: Option<String>,
     pub backend: String,
+    #[serde(default)]
+    pub compute_device_id: Option<String>,
     pub language: String,
     pub model_id: String,
     pub keep_audio: bool,

@@ -20,7 +20,8 @@ type ControlsCardProps = {
   modelId: string;
   selectedModel: ModelInfo | undefined;
   canStart: boolean;
-  backend: BackendChoice;
+  modelDownloadBlocked: boolean;
+  computeTargetId: string;
   language: string;
   keepAudio: boolean;
   system: SystemStatus | null;
@@ -41,7 +42,7 @@ type ControlsCardProps = {
   onInstallAccelerator: (backend: Exclude<BackendChoice, "auto" | "cpu" | "cuda">) => void;
   onCancelAccelerator: () => void;
   onModelChange: (id: string) => void;
-  onBackendChange: (backend: BackendChoice) => void;
+  onComputeTargetChange: (targetId: string) => void;
   onLanguageChange: (language: string) => void;
   onKeepAudioChange: (keepAudio: boolean) => void;
   onDownloadModel: (id: string) => void;
@@ -53,7 +54,8 @@ export function ControlsCard({
   modelId,
   selectedModel,
   canStart,
-  backend,
+  modelDownloadBlocked,
+  computeTargetId,
   language,
   keepAudio,
   system,
@@ -74,7 +76,7 @@ export function ControlsCard({
   onInstallAccelerator,
   onCancelAccelerator,
   onModelChange,
-  onBackendChange,
+  onComputeTargetChange,
   onLanguageChange,
   onKeepAudioChange,
   onDownloadModel,
@@ -92,7 +94,7 @@ export function ControlsCard({
     { value: "ko", label: t("language.ko") },
   ];
 
-  const backendOptions: SelectOption[] = [
+  const computeTargetOptions: SelectOption[] = [
     {
       value: "auto",
       label: t("backend.auto"),
@@ -101,20 +103,23 @@ export function ControlsCard({
       value: "cpu",
       label: t("backend.cpu"),
     },
-    ...accelerators.filter((acc) => acc.supported).map((acc) => ({
-      value: acc.backend,
-      label: acc.installed
-        ? getAcceleratorCopy(acc, t).label
-        : t("backend.notInstalled", { accelerator: getAcceleratorCopy(acc, t).label }),
-      disabled: !acc.installed,
-    })),
   ];
-  if (system?.cudaSupported) {
-    backendOptions.push({
-      value: "cuda",
-      label: system.cudaEngine && system.nvidia ? t("backend.cuda") : t("backend.cudaUnavailable"),
-      disabled: !system.cudaEngine || !system.nvidia,
-    });
+  computeTargetOptions.push(
+    ...(system?.computeDevices ?? []).map((device) => ({
+      value: device.id,
+      label: `${device.backend.toUpperCase()} · ${device.name}${device.integrated ? " (iGPU)" : ""}`,
+    })),
+  );
+  for (const accelerator of accelerators.filter((item) => item.supported && item.installed)) {
+    if (accelerator.backend === "metal" && !computeTargetOptions.some((option) => option.value === "metal")) {
+      computeTargetOptions.push({ value: "metal", label: getAcceleratorCopy(accelerator, t).label });
+    }
+  }
+  if (system?.cudaEngine && system.cudaSupported && !computeTargetOptions.some((option) => option.value.startsWith("cuda:"))) {
+    computeTargetOptions.push({ value: "cuda", label: t("backend.cuda") });
+  }
+  if (accelerators.some((item) => item.backend === "vulkan" && item.installed) && !computeTargetOptions.some((option) => option.value.startsWith("vulkan:"))) {
+    computeTargetOptions.push({ value: "vulkan", label: getAcceleratorCopy(accelerators.find((item) => item.backend === "vulkan")!, t).label });
   }
 
   return (
@@ -162,7 +167,7 @@ export function ControlsCard({
           type="button"
           className="download-button"
           onClick={() => onDownloadModel(selectedModel.id)}
-          disabled={selectedDownload !== undefined || modelDownloadActive || busy}
+          disabled={selectedDownload !== undefined || modelDownloadActive || busy || modelDownloadBlocked}
         >
           {selectedDownload !== undefined ? <LoaderCircle className="spin" size={17} /> : <Download size={17} />}
           {selectedDownload !== undefined
@@ -270,9 +275,9 @@ export function ControlsCard({
 
       <label className="field-label">{t("controls.computeBackend")}</label>
       <CustomSelect
-        value={backend}
-        options={backendOptions}
-        onChange={(val) => onBackendChange(val as BackendChoice)}
+        value={computeTargetId}
+        options={computeTargetOptions}
+        onChange={onComputeTargetChange}
         disabled={busy}
         ariaLabel={t("controls.computeBackend")}
       />

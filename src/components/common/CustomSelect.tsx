@@ -37,6 +37,7 @@ export function CustomSelect({
   const [highlightedIndex, setHighlightedIndex] = useState<number>(-1);
   const containerRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
+  const shouldScrollHighlightedRef = useRef(false);
   const selectId = useId();
   const listboxId = `${selectId}-listbox`;
 
@@ -62,15 +63,23 @@ export function CustomSelect({
   useEffect(() => {
     if (isOpen) {
       const idx = options.findIndex((opt) => opt.value === value);
+      shouldScrollHighlightedRef.current = true;
       setHighlightedIndex(idx >= 0 ? idx : 0);
     }
   }, [isOpen, options, value]);
 
   // Scroll highlighted into view
   useEffect(() => {
-    if (isOpen && listRef.current && highlightedIndex >= 0) {
+    if (isOpen && shouldScrollHighlightedRef.current && listRef.current && highlightedIndex >= 0) {
       const el = listRef.current.children[highlightedIndex] as HTMLElement | undefined;
-      el?.scrollIntoView({ block: "nearest" });
+      if (el) {
+        const list = listRef.current;
+        const top = el.offsetTop;
+        const bottom = top + el.offsetHeight;
+        if (top < list.scrollTop) list.scrollTop = top;
+        else if (bottom > list.scrollTop + list.clientHeight) list.scrollTop = bottom - list.clientHeight;
+      }
+      shouldScrollHighlightedRef.current = false;
     }
   }, [highlightedIndex, isOpen]);
 
@@ -100,6 +109,7 @@ export function CustomSelect({
           nextIndex++;
         }
         if (nextIndex < options.length) {
+          shouldScrollHighlightedRef.current = true;
           setHighlightedIndex(nextIndex);
         }
         break;
@@ -111,6 +121,7 @@ export function CustomSelect({
           prevIndex--;
         }
         if (prevIndex >= 0) {
+          shouldScrollHighlightedRef.current = true;
           setHighlightedIndex(prevIndex);
         }
         break;
@@ -200,7 +211,10 @@ export function CustomSelect({
                   aria-disabled={option.disabled}
                   className={`custom-select-option ${isSelected ? "selected" : ""} ${isHighlighted ? "highlighted" : ""} ${option.disabled ? "disabled" : ""}`}
                   onClick={() => handleSelect(option)}
-                  onMouseEnter={() => !option.disabled && setHighlightedIndex(index)}
+                  onMouseEnter={() => {
+                    shouldScrollHighlightedRef.current = false;
+                    if (!option.disabled) setHighlightedIndex(index);
+                  }}
                 >
                   <div className="option-main">
                     {option.icon && <span className="option-icon">{option.icon}</span>}

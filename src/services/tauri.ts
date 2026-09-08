@@ -123,8 +123,8 @@ export function revealAudioFile(path: string) {
   return invoke("reveal_audio", { path });
 }
 
-export function downloadModel(modelId: string) {
-  return invoke("download_model", { modelId });
+export function downloadModel(modelId: string, computeDeviceId: string | null = null) {
+  return invoke("download_model", { modelId, computeDeviceId });
 }
 
 export function installCudaEngine() {

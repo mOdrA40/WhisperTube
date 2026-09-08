@@ -17,6 +17,10 @@ export default function App() {
     app.appUpdateStatus !== "up-to-date" &&
     dismissedUpdateVersion !== app.appUpdate.version,
   );
+  async function handleManualUpdateCheck() {
+    setDismissedUpdateVersion(null);
+    await app.checkForAppUpdate();
+  }
 
   return (
     <AppShell
@@ -26,12 +30,19 @@ export default function App() {
       system={app.system}
       onTabChange={app.setTab}
     >
-      <ErrorAlert message={app.error} onDismiss={() => app.setError(null)} />
+      <ErrorAlert
+        message={app.error ?? (!showUpdateBanner ? app.appUpdateError : null)}
+        onDismiss={() => {
+          app.setError(null);
+          app.clearAppUpdateError();
+        }}
+      />
       {showUpdateBanner && app.appUpdate && (
         <AppUpdateBanner
           update={app.appUpdate}
           status={app.appUpdateStatus}
           progress={app.appUpdateProgress}
+          error={app.appUpdateError}
           busy={app.operationActive}
           onInstall={app.installAppUpdate}
           onDismiss={() => setDismissedUpdateVersion(app.appUpdate?.version ?? null)}
@@ -54,7 +65,9 @@ export default function App() {
           language={app.language}
           keepAudio={app.keepAudio}
           canStart={app.canStart}
+          modelDownloadBlocked={app.modelDownloadBlocked}
           runtimeReady={app.runtimeReady}
+          computeTargetId={app.computeTargetId}
           downloadingModel={app.downloadingModel}
           accelerators={app.system?.accelerators ?? []}
           installingCuda={app.installingCuda}
@@ -74,7 +87,7 @@ export default function App() {
           onClear={app.clearTranscription}
           onCancel={app.cancelJob}
           onModelChange={app.setModelId}
-          onBackendChange={app.setBackend}
+          onComputeTargetChange={app.setComputeTarget}
           onLanguageChange={app.setLanguage}
           onKeepAudioChange={app.setKeepAudio}
           onDownloadModel={app.downloadModel}
@@ -109,6 +122,7 @@ export default function App() {
           browsers={app.browsers}
           system={app.system}
           models={app.models}
+          modelDownloadBlockReasons={app.modelDownloadBlockReasons}
           busy={app.operationActive}
           downloadingModel={app.downloadingModel}
           accelerators={app.system?.accelerators ?? []}
@@ -117,6 +131,7 @@ export default function App() {
           installingAccelerator={app.installingAccelerator}
           acceleratorDownloadPercent={app.acceleratorDownloadPercent}
           networkSpeedBytesPerSecond={app.networkSpeedBytesPerSecond}
+          updateChecking={app.appUpdateStatus === "checking"}
           appUpdate={app.appUpdate}
           appUpdateStatus={app.appUpdateStatus}
           appUpdateProgress={app.appUpdateProgress}
@@ -133,7 +148,7 @@ export default function App() {
           onCancelCuda={app.cancelJob}
           onInstallAccelerator={app.installAccelerator}
           onCancelAccelerator={app.cancelJob}
-          onCheckForUpdate={app.checkForAppUpdate}
+          onCheckForUpdate={handleManualUpdateCheck}
           onInstallAppUpdate={app.installAppUpdate}
         />
       )}

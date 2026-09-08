@@ -15,7 +15,7 @@ use tauri::AppHandle;
 use crate::{
     accelerators, models,
     paths::{engine_path, runtime_dir, tool_path},
-    types::SystemStatus,
+    types::{ComputeDeviceInfo, SystemStatus},
 };
 
 const USAGE_SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
@@ -37,8 +37,15 @@ pub struct UsageSnapshot {
     pub gpu_usage_percent: Option<f64>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct UsageTarget {
+    pub backend: String,
+    pub device_index: Option<usize>,
+}
+
 pub struct UsageMonitor {
     snapshot: Arc<Mutex<UsageSnapshot>>,
+    target: Arc<Mutex<Option<UsageTarget>>>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -77,13 +84,16 @@ unsafe extern "system" {
 impl UsageMonitor {
     pub fn start() -> Self {
         let snapshot = Arc::new(Mutex::new(UsageSnapshot::default()));
+        let target = Arc::new(Mutex::new(None));
         let stop = Arc::new(AtomicBool::new(false));
         let thread_snapshot = Arc::clone(&snapshot);
+        let thread_target = Arc::clone(&target);
         let thread_stop = Arc::clone(&stop);
         let thread = std::thread::spawn(move || {
             let mut cpu_sampler = CpuSampler::default();
             while !thread_stop.load(Ordering::SeqCst) {
-                let current = sample_usage_uncached(&mut cpu_sampler);
+                let target = thread_target.lock().ok().and_then(|value| value.clone());
+                let current = sample_usage_uncached(&mut cpu_sampler, target.as_ref());
                 if let Ok(mut cached) = thread_snapshot.lock() {
                     *cached = current;
                 }
@@ -98,6 +108,7 @@ impl UsageMonitor {
         });
         Self {
             snapshot,
+            target,
             stop,
             thread: Some(thread),
         }
@@ -108,6 +119,15 @@ impl UsageMonitor {
             .lock()
             .map(|value| value.clone())
             .unwrap_or_default()
+    }
+
+    pub fn set_target(&self, backend: &str, device_index: Option<usize>) {
+        if let Ok(mut target) = self.target.lock() {
+            *target = Some(UsageTarget {
+                backend: backend.to_string(),
+                device_index,
+            });
+        }
     }
 }
 
@@ -133,7 +153,22 @@ fn format_vram(memory_mb: Option<u64>) -> String {
 }
 
 pub fn detect_nvidia() -> Option<GpuInfo> {
-    let program = nvidia_smi_program()?;
+    let devices = detect_nvidia_devices();
+    let gpu = select_nvidia_device(&devices);
+    set_selected_nvidia_device(gpu.as_ref());
+    gpu
+}
+
+pub fn detect_nvidia_device(device_index: usize) -> Option<GpuInfo> {
+    detect_nvidia_devices()
+        .into_iter()
+        .find(|device| device.device_index == Some(device_index))
+}
+
+pub fn detect_nvidia_devices() -> Vec<GpuInfo> {
+    let Some(program) = nvidia_smi_program() else {
+        return Vec::new();
+    };
     let output = {
         let mut command = Command::new(program);
         crate::process::hide_console(&mut command);
@@ -143,17 +178,39 @@ pub fn detect_nvidia() -> Option<GpuInfo> {
         ]);
         command_output_with_timeout(command, Duration::from_secs(2))
     };
-    let gpu = output.and_then(|out| parse_nvidia_gpus(&out.stdout));
+    output
+        .map(|out| parse_nvidia_devices(&out.stdout))
+        .unwrap_or_default()
+}
+
+fn select_nvidia_device(devices: &[GpuInfo]) -> Option<GpuInfo> {
+    devices.iter().cloned().fold(None, |best, candidate| {
+        let candidate_memory = candidate
+            .free_memory_mb
+            .or(candidate.total_memory_mb)
+            .unwrap_or(0);
+        let best_memory = best
+            .as_ref()
+            .and_then(|value: &GpuInfo| value.free_memory_mb.or(value.total_memory_mb))
+            .unwrap_or(0);
+        if best.is_none() || candidate_memory > best_memory {
+            Some(candidate)
+        } else {
+            best
+        }
+    })
+}
+
+fn set_selected_nvidia_device(gpu: Option<&GpuInfo>) {
     if let Ok(mut selected) = NVIDIA_SELECTED_DEVICE
         .get_or_init(|| Mutex::new(None))
         .lock()
     {
-        *selected = gpu.as_ref().and_then(|value| value.device_index);
+        *selected = gpu.and_then(|value| value.device_index);
     }
-    gpu
 }
 
-fn parse_nvidia_gpus(output: &[u8]) -> Option<GpuInfo> {
+fn parse_nvidia_devices(output: &[u8]) -> Vec<GpuInfo> {
     String::from_utf8_lossy(output)
         .lines()
         .filter_map(|line| {
@@ -167,21 +224,12 @@ fn parse_nvidia_gpus(output: &[u8]) -> Option<GpuInfo> {
                 device_index,
             })
         })
-        .fold(None, |best: Option<GpuInfo>, candidate| {
-            let candidate_memory = candidate
-                .free_memory_mb
-                .or(candidate.total_memory_mb)
-                .unwrap_or(0);
-            let best_memory = best
-                .as_ref()
-                .and_then(|value| value.free_memory_mb.or(value.total_memory_mb))
-                .unwrap_or(0);
-            if best.is_none() || candidate_memory > best_memory {
-                Some(candidate)
-            } else {
-                best
-            }
-        })
+        .collect()
+}
+
+#[cfg(test)]
+fn parse_nvidia_gpus(output: &[u8]) -> Option<GpuInfo> {
+    select_nvidia_device(&parse_nvidia_devices(output))
 }
 
 fn nvidia_smi_program() -> Option<&'static str> {
@@ -201,6 +249,59 @@ fn nvidia_smi_program() -> Option<&'static str> {
             })
         })
         .as_deref()
+}
+
+fn vulkan_vendor(name: &str) -> &'static str {
+    let lower = name.to_ascii_lowercase();
+    if lower.contains("nvidia") {
+        "nvidia"
+    } else if lower.contains("amd") || lower.contains("radeon") {
+        "amd"
+    } else if lower.contains("intel") {
+        "intel"
+    } else {
+        "unknown"
+    }
+}
+
+fn parse_vulkan_devices(stderr: &str) -> Vec<ComputeDeviceInfo> {
+    stderr
+        .lines()
+        .filter_map(|line| {
+            let rest = line.strip_prefix("ggml_vulkan: ")?;
+            let (index, rest) = rest.split_once(" = ")?;
+            let device_index = index.trim().parse::<usize>().ok()?;
+            let (name, capabilities) = rest.split_once(" | ").unwrap_or((rest, ""));
+            let name = name.trim();
+            if name.is_empty() {
+                return None;
+            }
+            Some(ComputeDeviceInfo {
+                id: format!("vulkan:{device_index}"),
+                backend: "vulkan".into(),
+                name: name.into(),
+                vendor: vulkan_vendor(name).into(),
+                device_index: Some(device_index),
+                integrated: capabilities.contains("uma: 1"),
+                total_memory_mb: None,
+                free_memory_mb: None,
+            })
+        })
+        .collect()
+}
+
+pub fn detect_vulkan_devices(app: &AppHandle) -> Vec<ComputeDeviceInfo> {
+    let Ok(engine) = engine_path(app, "vulkan") else {
+        return Vec::new();
+    };
+    if !engine.exists() {
+        return Vec::new();
+    }
+    let mut command = Command::new(engine);
+    command.arg("--help");
+    crate::process::run_with_timeout_captured(&mut command, Duration::from_secs(3), 256 * 1024)
+        .map(|(_, stderr)| parse_vulkan_devices(&stderr))
+        .unwrap_or_default()
 }
 
 fn clean_gpu_name(value: &str) -> Option<String> {
@@ -406,25 +507,26 @@ fn sample_cpu_usage(_sampler: &mut CpuSampler) -> Option<f64> {
 }
 
 #[cfg(target_os = "windows")]
-fn sample_gpu_usage() -> Option<f64> {
-    if let Some(program) = nvidia_smi_program() {
-        let mut command = Command::new(program);
-        crate::process::hide_console(&mut command);
-        if let Ok(Some(index)) = NVIDIA_SELECTED_DEVICE
-            .get_or_init(|| Mutex::new(None))
-            .lock()
-            .map(|value| *value)
-        {
-            command.arg(format!("--id={index}"));
-        }
-        command.args([
-            "--query-gpu=utilization.gpu",
-            "--format=csv,noheader,nounits",
-        ]);
-        if let Some(value) = command_output_with_timeout(command, Duration::from_secs(2))
-            .and_then(|output| parse_percent(&output.stdout))
-        {
-            return Some(value);
+fn sample_gpu_usage(target: Option<&UsageTarget>) -> Option<f64> {
+    if target.is_none_or(|value| value.backend == "cpu") {
+        return None;
+    }
+    if target.is_some_and(|value| value.backend == "cuda") {
+        if let Some(program) = nvidia_smi_program() {
+            let mut command = Command::new(program);
+            crate::process::hide_console(&mut command);
+            if let Some(index) = target.and_then(|value| value.device_index) {
+                command.arg(format!("--id={index}"));
+            }
+            command.args([
+                "--query-gpu=utilization.gpu",
+                "--format=csv,noheader,nounits",
+            ]);
+            if let Some(value) = command_output_with_timeout(command, Duration::from_secs(2))
+                .and_then(|output| parse_percent(&output.stdout))
+            {
+                return Some(value);
+            }
         }
     }
 
@@ -441,33 +543,40 @@ fn sample_gpu_usage() -> Option<f64> {
 }
 
 #[cfg(target_os = "linux")]
-fn sample_gpu_usage() -> Option<f64> {
+fn sample_gpu_usage(target: Option<&UsageTarget>) -> Option<f64> {
+    if target.map_or(true, |value| value.backend == "cpu") {
+        return None;
+    }
     let root = fs::read_dir("/sys/class/drm").ok()?;
     root.flatten()
         .filter(|entry| {
             let name = entry.file_name().to_string_lossy().to_string();
             name.starts_with("card") && !name.contains('-')
         })
-        .find_map(|entry| {
+        .filter_map(|entry| {
             fs::read_to_string(entry.path().join("device/gpu_busy_percent"))
                 .ok()
                 .and_then(|value| value.trim().parse::<f64>().ok())
                 .map(|value| value.clamp(0.0, 100.0))
         })
+        .max_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal))
 }
 
 #[cfg(any(
     target_os = "macos",
     not(any(target_os = "windows", target_os = "linux"))
 ))]
-fn sample_gpu_usage() -> Option<f64> {
+fn sample_gpu_usage(_target: Option<&UsageTarget>) -> Option<f64> {
     None
 }
 
-fn sample_usage_uncached(cpu_sampler: &mut CpuSampler) -> UsageSnapshot {
+fn sample_usage_uncached(
+    cpu_sampler: &mut CpuSampler,
+    target: Option<&UsageTarget>,
+) -> UsageSnapshot {
     UsageSnapshot {
         cpu_usage_percent: sample_cpu_usage(cpu_sampler),
-        gpu_usage_percent: sample_gpu_usage(),
+        gpu_usage_percent: sample_gpu_usage(target),
     }
 }
 
@@ -477,7 +586,9 @@ pub fn system_status(app: &AppHandle) -> Result<SystemStatus, String> {
     let ffmpeg = tool_path(app, "ffmpeg")?.exists();
     let cpu_engine = engine_path(app, "cpu")?.exists();
     let cuda_engine = engine_path(app, "cuda")?.exists();
-    let nvidia_gpu = detect_nvidia();
+    let nvidia_devices = detect_nvidia_devices();
+    let nvidia_gpu = select_nvidia_device(&nvidia_devices);
+    set_selected_nvidia_device(nvidia_gpu.as_ref());
     let gpu = nvidia_gpu.clone().or_else(detect_generic_gpu);
     let nvidia = nvidia_gpu.is_some();
     let cuda_supported = cfg!(all(target_os = "windows", target_arch = "x86_64")) && nvidia;
@@ -489,6 +600,25 @@ pub fn system_status(app: &AppHandle) -> Result<SystemStatus, String> {
     let vulkan_installed = accelerators
         .iter()
         .any(|accelerator| accelerator.backend == "vulkan" && accelerator.installed);
+    let mut compute_devices = Vec::new();
+    if cuda_supported && cuda_engine {
+        compute_devices.extend(nvidia_devices.iter().filter_map(|device| {
+            let index = device.device_index?;
+            Some(ComputeDeviceInfo {
+                id: format!("cuda:{index}"),
+                backend: "cuda".into(),
+                name: device.name.clone(),
+                vendor: "nvidia".into(),
+                device_index: Some(index),
+                integrated: false,
+                total_memory_mb: device.total_memory_mb,
+                free_memory_mb: device.free_memory_mb,
+            })
+        }));
+    }
+    if vulkan_installed {
+        compute_devices.extend(detect_vulkan_devices(app));
+    }
     let cpu_threads = std::thread::available_parallelism()
         .map(|value| value.get())
         .unwrap_or(1);
@@ -562,12 +692,13 @@ pub fn system_status(app: &AppHandle) -> Result<SystemStatus, String> {
         recommended_backend,
         cuda_supported,
         accelerators,
+        compute_devices,
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::parse_nvidia_gpus;
+    use super::{parse_nvidia_gpus, parse_vulkan_devices};
 
     #[test]
     fn selects_nvidia_device_with_the_most_free_memory() {
@@ -584,5 +715,19 @@ mod tests {
         let gpu = parse_nvidia_gpus(output).expect("GPU should be parsed");
         assert_eq!(gpu.name, "First GPU");
         assert_eq!(gpu.device_index, Some(0));
+    }
+
+    #[test]
+    fn parses_vulkan_devices_and_marks_integrated_gpu() {
+        let output = "ggml_vulkan: Found 2 Vulkan devices:\n\
+            ggml_vulkan: 0 = AMD Radeon 780M Graphics (AMD proprietary driver) | uma: 1 | fp16: 1\n\
+            ggml_vulkan: 1 = NVIDIA GeForce RTX 4050 Laptop GPU (NVIDIA) | uma: 0 | fp16: 1\n";
+        let devices = parse_vulkan_devices(output);
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0].id, "vulkan:0");
+        assert_eq!(devices[0].vendor, "amd");
+        assert!(devices[0].integrated);
+        assert_eq!(devices[1].vendor, "nvidia");
+        assert!(!devices[1].integrated);
     }
 }

@@ -13,6 +13,7 @@ pub enum OperationState {
     ModelDeleting(String),
     Inspecting,
     AppUpdating,
+    ResettingData,
 }
 
 pub struct OperationGuard {
@@ -83,6 +84,10 @@ impl OperationGuard {
         Ok(())
     }
 
+    pub fn reserve_data_reset(state: &AppState) -> Result<Self, String> {
+        Self::reserve(state, OperationState::ResettingData, None)
+    }
+
     pub fn request_cancel(state: &AppState) -> Result<(), String> {
         let active = state
             .operation
@@ -107,7 +112,8 @@ impl OperationGuard {
             }
             OperationState::Idle
             | OperationState::ModelDeleting(_)
-            | OperationState::AppUpdating => false,
+            | OperationState::AppUpdating
+            | OperationState::ResettingData => false,
         };
         if should_cancel {
             let pid = state
@@ -164,6 +170,10 @@ fn operation_conflict_message(operation: &OperationState) -> String {
         OperationState::Inspecting => "Pemeriksaan metadata sedang berjalan.".into(),
         OperationState::AppUpdating => {
             "Pembaruan aplikasi sedang berjalan. Tunggu sampai selesai terlebih dahulu.".into()
+        }
+        OperationState::ResettingData => {
+            "Penghapusan data aplikasi sedang berjalan. Tunggu sampai selesai terlebih dahulu."
+                .into()
         }
     }
 }

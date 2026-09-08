@@ -17,6 +17,7 @@ import {
   loadHistory,
   pickCookiesFile,
   revealAudioFile,
+  resetUserData as resetUserDataRequest,
   startTranscription,
   subscribeToModelDownload,
   subscribeToAcceleratorDownload,
@@ -484,6 +485,28 @@ export function useWhisperTube() {
     }
   }
 
+  async function handleResetUserData() {
+    setError(null);
+    try {
+      await resetUserDataRequest();
+      try {
+        window.localStorage.removeItem(COOKIES_PATH_STORAGE_KEY);
+        window.localStorage.removeItem(ACCESS_BROWSER_STORAGE_KEY);
+      } catch {
+        // Backend data reset remains successful when browser storage is unavailable.
+      }
+      setCookiesPath("");
+      setBrowser("none");
+      setMetadata(null);
+      setResult(null);
+      setSearchQuery("");
+      await refreshSystem();
+    } catch (cause) {
+      setError(friendlyError(cause));
+      throw cause;
+    }
+  }
+
   async function handleInstallCuda() {
     if (appUpdateInstalling) return;
     if (!system?.cudaSupported || !system.nvidia) {
@@ -745,6 +768,7 @@ export function useWhisperTube() {
     inspectVideo,
     downloadModel: handleDownloadModel,
     removeModel: handleRemoveModel,
+    resetUserData: handleResetUserData,
     installCuda: handleInstallCuda,
     installAccelerator: handleInstallAccelerator,
     installingAccelerator,

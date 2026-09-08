@@ -138,6 +138,12 @@ you choose a specific CUDA or Vulkan device.
 
 The CUDA package is large, so it is deliberately excluded from the base setup. The app downloads it into user app storage and verifies its SHA-256 before activation.
 
+On Windows uninstall, the uninstaller removes the application by default but
+asks whether to also remove local user data. Choosing the cleanup option deletes
+WhisperTube history, models, jobs, saved audio, and downloaded runtimes. Files
+outside the app-local data directory, such as a user-selected `cookies.txt`, are
+not removed.
+
 ### 8. First transcription
 
 1. Paste a supported video link.

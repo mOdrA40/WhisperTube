@@ -44,6 +44,12 @@ fn verified_models() -> &'static Mutex<HashMap<PathBuf, ModelFingerprint>> {
     VERIFIED_MODELS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+pub fn clear_verified_models() {
+    if let Ok(mut cache) = verified_models().lock() {
+        cache.clear();
+    }
+}
+
 fn model_fingerprint(path: &Path) -> Result<ModelFingerprint, String> {
     let metadata = fs::metadata(path).map_err(|e| format!("Gagal membaca metadata model: {e}"))?;
     Ok(ModelFingerprint {

@@ -143,6 +143,7 @@ export default function App() {
           onDownloadModel={app.downloadModel}
           onCancelModel={app.cancelJob}
           onRemoveModel={app.removeModel}
+          onResetUserData={app.resetUserData}
           onRefresh={app.refreshSystem}
           onInstallCuda={app.installCuda}
           onCancelCuda={app.cancelJob}

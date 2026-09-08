@@ -11,6 +11,7 @@ mod state;
 mod system;
 mod transcription;
 mod types;
+mod user_data;
 
 use std::sync::atomic::Ordering;
 use tauri::Manager;
@@ -65,6 +66,7 @@ pub fn run() {
             commands::install_cuda_engine,
             commands::install_accelerator,
             commands::delete_model,
+            commands::reset_user_data,
             commands::begin_app_update,
             commands::end_app_update,
             commands::inspect_media,

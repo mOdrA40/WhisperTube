@@ -36,6 +36,7 @@ type SettingsPageProps = {
   onDownloadModel: (id: string) => void;
   onCancelModel: () => void;
   onRemoveModel: (id: string) => void;
+  onResetUserData: () => Promise<void>;
   onRefresh: () => void;
   onInstallCuda: () => void;
   onCancelCuda: () => void;
@@ -72,6 +73,7 @@ export function SettingsPage({
   onDownloadModel,
   onCancelModel,
   onRemoveModel,
+  onResetUserData,
   onRefresh,
   onInstallCuda,
   onCancelCuda,
@@ -84,6 +86,8 @@ export function SettingsPage({
   const [cookiesDialogOpen, setCookiesDialogOpen] = useState(false);
   const [copiedUrl, setCopiedUrl] = useState<string | null>(null);
   const [copyFailedUrl, setCopyFailedUrl] = useState<string | null>(null);
+  const [resettingData, setResettingData] = useState(false);
+  const [resetComplete, setResetComplete] = useState(false);
   const cookiesDialogRef = useRef<HTMLDivElement>(null);
   const cookiesTriggerRef = useRef<HTMLButtonElement>(null);
   const cookiesContinueRef = useRef<HTMLButtonElement>(null);
@@ -108,6 +112,21 @@ export function SettingsPage({
     } catch {
       setCopiedUrl(null);
       setCopyFailedUrl(url);
+    }
+  }
+
+  async function handleResetUserData() {
+    if (!window.confirm(t("settings.resetDataConfirm"))) return;
+    setResettingData(true);
+    setResetComplete(false);
+    try {
+      await onResetUserData();
+      setResetComplete(true);
+      window.setTimeout(() => setResetComplete(false), 2400);
+    } catch {
+      // The hook reports the failure through the shared error alert.
+    } finally {
+      setResettingData(false);
     }
   }
 
@@ -557,6 +576,27 @@ export function SettingsPage({
         <button type="button" className="secondary-button full" onClick={onRefresh}>
           <RotateCcw size={16} /> {t("settings.recheck")}
         </button>
+      </section>
+
+      <section className="card settings-card danger-settings-card">
+        <div className="card-title-row">
+          <div>
+            <span className="eyebrow">{t("settings.dataEyebrow")}</span>
+            <h3>{t("settings.resetDataTitle")}</h3>
+          </div>
+          <Trash2 size={20} />
+        </div>
+        <p className="settings-note">{t("settings.resetDataDescription")}</p>
+        <button
+          type="button"
+          className="danger-button full"
+          onClick={() => void handleResetUserData()}
+          disabled={busy || resettingData}
+        >
+          {resettingData ? <LoaderCircle className="spin" size={16} /> : <Trash2 size={16} />}
+          {resettingData ? t("settings.resetDataWorking") : t("settings.resetDataButton")}
+        </button>
+        {resetComplete && <p className="settings-success">{t("settings.resetDataComplete")}</p>}
       </section>
     </div>
   );

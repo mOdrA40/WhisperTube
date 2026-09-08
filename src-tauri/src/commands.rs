@@ -8,6 +8,7 @@ use crate::{
         HistoryPageResult, ModelInfo, SystemStatus, TranscriptRequest, TranscriptResult,
         VideoMetadata,
     },
+    user_data,
 };
 
 #[tauri::command]
@@ -72,6 +73,17 @@ pub fn delete_model(
 ) -> Result<(), String> {
     let _operation = OperationGuard::reserve_model_delete(&state, model_id.clone())?;
     models::delete_model(&app, &model_id)
+}
+
+#[tauri::command]
+pub async fn reset_user_data(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let operation = OperationGuard::reserve_data_reset(&state)?;
+    tokio::task::spawn_blocking(move || {
+        let _operation = operation;
+        user_data::reset(&app)
+    })
+    .await
+    .map_err(|error| format!("Reset data gagal dijalankan: {error}"))?
 }
 
 #[tauri::command]

@@ -60,6 +60,11 @@ Vulkan tertentu.
 
 CUDA tidak dibundel dalam setup dasar. Aplikasi mengunduhnya ke app storage user dan memvalidasi SHA-256 sebelum digunakan.
 
+Saat uninstall Windows, uninstaller secara default hanya menghapus aplikasi lalu
+menanyakan apakah data user juga ingin dihapus. Opsi cleanup menghapus history,
+model, jobs, audio tersimpan, dan runtime yang diunduh. File di luar app-local
+data, seperti `cookies.txt` yang dipilih user, tidak ikut dihapus.
+
 ## Alur transkripsi
 
 1. Tempel link video yang didukung.

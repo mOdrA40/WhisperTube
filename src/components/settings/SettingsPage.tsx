@@ -37,7 +37,7 @@ type SettingsPageProps = {
   onOpenUrl: (url: string) => void;
   onDownloadModel: (id: string) => void;
   onCancelModel: () => void;
-  onRemoveModel: (id: string) => void;
+  onRemoveModel: (id: string) => Promise<void>;
   onResetUserData: () => Promise<void>;
   onRefresh: () => void;
   onInstallCuda: () => void;
@@ -89,10 +89,12 @@ export function SettingsPage({
   const { language: uiLanguage, setLanguage: setUiLanguage, t } = useI18n();
   const [cookiesDialogOpen, setCookiesDialogOpen] = useState(false);
   const [resetDialogOpen, setResetDialogOpen] = useState(false);
+  const [pendingModelDelete, setPendingModelDelete] = useState<ModelInfo | null>(null);
   const [copiedUrl, setCopiedUrl] = useState<string | null>(null);
   const [copyFailedUrl, setCopyFailedUrl] = useState<string | null>(null);
   const [resetComplete, setResetComplete] = useState(false);
   const [resetError, setResetError] = useState<string | null>(null);
+  const [modelDeleteError, setModelDeleteError] = useState<string | null>(null);
   const cookiesDialogRef = useRef<HTMLDivElement>(null);
   const cookiesTriggerRef = useRef<HTMLButtonElement>(null);
   const cookiesContinueRef = useRef<HTMLButtonElement>(null);
@@ -101,6 +103,10 @@ export function SettingsPage({
   const resetTriggerRef = useRef<HTMLButtonElement>(null);
   const resetCancelRef = useRef<HTMLButtonElement>(null);
   const resetDialogWasOpen = useRef(false);
+  const modelDeleteDialogRef = useRef<HTMLDivElement>(null);
+  const modelDeleteTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const modelDeleteCancelRef = useRef<HTMLButtonElement>(null);
+  const modelDeleteDialogWasOpen = useRef(false);
   const modelDownloadActive = Object.keys(downloadingModel).length > 0;
   const interfaceLanguageOptions: SelectOption[] = uiLanguageOptions.map((option) => ({
     value: option.value,
@@ -214,6 +220,53 @@ export function SettingsPage({
       resetTriggerRef.current?.focus();
     }
   }, [resetDialogOpen]);
+
+  useEffect(() => {
+    if (!pendingModelDelete) return;
+    modelDeleteDialogWasOpen.current = true;
+    modelDeleteCancelRef.current?.focus();
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !busy) {
+        setPendingModelDelete(null);
+        return;
+      }
+      if (event.key !== "Tab" || !modelDeleteDialogRef.current) return;
+      const focusable = [...modelDeleteDialogRef.current.querySelectorAll<HTMLElement>(
+        "button, a[href], input, select, textarea, [tabindex]:not([tabindex='-1'])",
+      )].filter((element) => !element.hasAttribute("disabled"));
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [busy, pendingModelDelete]);
+
+  useEffect(() => {
+    if (!pendingModelDelete && modelDeleteDialogWasOpen.current) {
+      modelDeleteDialogWasOpen.current = false;
+      modelDeleteTriggerRef.current?.focus();
+    }
+  }, [pendingModelDelete]);
+
+  async function confirmModelDelete() {
+    const model = pendingModelDelete;
+    if (!model) return;
+    setModelDeleteError(null);
+    try {
+      await onRemoveModel(model.id);
+      setPendingModelDelete(null);
+    } catch (cause) {
+      setModelDeleteError(friendlyError(cause));
+    }
+  }
 
   return (
     <div className="settings-grid">
@@ -515,6 +568,61 @@ export function SettingsPage({
         </div>
       )}
 
+      {pendingModelDelete && (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !busy) setPendingModelDelete(null);
+          }}
+        >
+          <div
+            className="model-delete-modal"
+            ref={modelDeleteDialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="model-delete-title"
+            aria-describedby={modelDeleteError ? "model-delete-description model-delete-error" : "model-delete-description"}
+          >
+            <div className="model-delete-icon" aria-hidden="true">
+              <AlertTriangle size={22} />
+            </div>
+            <div className="model-delete-content">
+              <h3 id="model-delete-title">{t("settings.deleteModelTitle")}</h3>
+              <p id="model-delete-description">{t("settings.confirmDeleteModel", { model: getModelCopy(pendingModelDelete, t).label })}</p>
+              {modelDeleteError && (
+                <div id="model-delete-error" className="data-reset-error" role="alert">
+                  <AlertTriangle size={15} />
+                  <div>
+                    <strong>{t("error.title")}</strong>
+                    <p>{modelDeleteError}</p>
+                  </div>
+                </div>
+              )}
+              <div className="model-delete-actions">
+                <button
+                  ref={modelDeleteCancelRef}
+                  type="button"
+                  className="secondary-button"
+                  onClick={() => setPendingModelDelete(null)}
+                  disabled={busy}
+                >
+                  {t("settings.deleteModelCancel")}
+                </button>
+                <button
+                  type="button"
+                  className="danger-button"
+                  onClick={() => void confirmModelDelete()}
+                  disabled={busy}
+                >
+                  <Trash2 size={16} /> {t("settings.deleteModelConfirm")}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       <section className="card settings-card hardware-settings-card">
         <div className="card-title-row">
           <div>
@@ -680,10 +788,10 @@ export function SettingsPage({
                 <button
                   type="button"
                   className="icon-button danger"
-                  onClick={() => {
-                    if (window.confirm(t("settings.confirmDeleteModel", { model: getModelCopy(model, t).label }))) {
-                      onRemoveModel(model.id);
-                    }
+                  onClick={(event) => {
+                    modelDeleteTriggerRef.current = event.currentTarget;
+                    setModelDeleteError(null);
+                    setPendingModelDelete(model);
                   }}
                   disabled={busy || modelDownloadActive || installingCuda || installingAccelerator !== null}
                   title={t("settings.deleteModel")}

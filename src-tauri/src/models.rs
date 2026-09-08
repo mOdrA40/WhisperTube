@@ -1,6 +1,5 @@
 use reqwest::Client as AsyncClient;
-use sha1::{Digest, Sha1};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     fs,
@@ -99,9 +98,12 @@ pub struct ModelSpec {
     pub description: &'static str,
     pub size_mb: u64,
     pub vram_required_mb: u64,
-    pub sha1: &'static str,
+    pub sha256: &'static str,
 }
 
+// SHA-256 values are the pinned Git LFS object IDs for the matching files in
+// ggerganov/whisper.cpp on Hugging Face. The URL remains pinned to the model ID
+// and the content hash is verified before the model can be used.
 const MODELS: [ModelSpec; 3] = [
     ModelSpec {
         id: "base",
@@ -109,7 +111,7 @@ const MODELS: [ModelSpec; 3] = [
         description: "Ringan untuk CPU/laptop sederhana",
         size_mb: 142,
         vram_required_mb: 2048,
-        sha1: "465707469ff3a37a2b9b8d8f89f2f99de7299dac",
+        sha256: "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe",
     },
     ModelSpec {
         id: "large-v3-turbo-q5_0",
@@ -117,7 +119,7 @@ const MODELS: [ModelSpec; 3] = [
         description: "Default: cepat dan akurat untuk penggunaan umum",
         size_mb: 547,
         vram_required_mb: 4096,
-        sha1: "e050f7970618a659205450ad97eb95a18d69c9ee",
+        sha256: "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2",
     },
     ModelSpec {
         id: "large-v3-q5_0",
@@ -125,7 +127,7 @@ const MODELS: [ModelSpec; 3] = [
         description: "Akurasi tinggi, lebih berat dan lambat",
         size_mb: 1100,
         vram_required_mb: 7168,
-        sha1: "e6e2ed78495d403bef4b7cff42ef4aaadcfea8de",
+        sha256: "d75795ecff3f83b5faa89d1900604ad8c780abd5739fae406de19f23ecd98ad1",
     },
 ];
 
@@ -233,10 +235,10 @@ pub fn ensure_download_supported(
     Ok(())
 }
 
-fn verify_sha1(path: &Path, expected: &str) -> Result<(), String> {
+fn verify_sha256_file(path: &Path, expected: &str) -> Result<(), String> {
     let mut file =
         File::open(path).map_err(|e| format!("Gagal membuka file untuk verifikasi: {e}"))?;
-    let mut hasher = Sha1::new();
+    let mut hasher = Sha256::new();
     let mut buffer = [0u8; 1024 * 1024];
     loop {
         let read = file
@@ -250,7 +252,7 @@ fn verify_sha1(path: &Path, expected: &str) -> Result<(), String> {
     let actual = format!("{:x}", hasher.finalize());
     if actual != expected {
         return Err(format!(
-            "Checksum model tidak cocok. Expected {expected}, actual {actual}. File tidak dapat digunakan."
+            "SHA-256 model tidak cocok. Expected {expected}, actual {actual}. File tidak dapat digunakan."
         ));
     }
     Ok(())
@@ -274,7 +276,7 @@ pub fn verify_model_file(path: &Path, model_id: &str) -> Result<(), String> {
     if already_verified {
         return Ok(());
     }
-    verify_sha1(path, spec.sha1)?;
+    verify_sha256_file(path, spec.sha256)?;
     let verified_fingerprint = model_fingerprint(path)
         .map_err(|error| format!("Gagal memeriksa ulang model {}: {error}", spec.label))?;
     if verified_fingerprint != fingerprint {
@@ -408,8 +410,8 @@ pub async fn download_model(
         .map_err(|e| format!("Gagal menyelesaikan file model: {e}"))?;
     drop(file);
     let temp_for_verify = temp.clone();
-    let expected_sha1 = spec.sha1;
-    tokio::task::spawn_blocking(move || verify_sha1(&temp_for_verify, expected_sha1))
+    let expected_sha256 = spec.sha256;
+    tokio::task::spawn_blocking(move || verify_sha256_file(&temp_for_verify, expected_sha256))
         .await
         .map_err(|e| format!("Verifikasi model gagal: {e}"))??;
     if cancelled.load(Ordering::SeqCst) {

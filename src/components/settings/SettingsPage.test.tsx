@@ -14,7 +14,14 @@ describe("SettingsPage local data reset", () => {
           usingSafariSession={false}
           browsers={[]}
           system={null}
-          models={[]}
+          models={[{
+            id: "base",
+            label: "Fast",
+            description: "Lightweight",
+            sizeMb: 142,
+            vramRequiredMb: 2048,
+            installed: true,
+          }]}
           modelDownloadBlockReasons={{}}
           busy={false}
           resettingData={false}
@@ -37,7 +44,7 @@ describe("SettingsPage local data reset", () => {
           onOpenUrl={vi.fn()}
           onDownloadModel={vi.fn()}
           onCancelModel={vi.fn()}
-          onRemoveModel={vi.fn()}
+          onRemoveModel={vi.fn().mockResolvedValue(undefined)}
           onResetUserData={onResetUserData}
           onRefresh={vi.fn()}
           onInstallCuda={vi.fn()}
@@ -50,7 +57,7 @@ describe("SettingsPage local data reset", () => {
       </I18nProvider>,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Delete all local data" }));
+    fireEvent.click(screen.getByRole("button", { name: "Reset WhisperTube data" }));
     expect(screen.getByRole("dialog")).toBeTruthy();
     expect(screen.getByText("3 saved history item(s) and files in transcription jobs")).toBeTruthy();
     expect(onResetUserData).not.toHaveBeenCalled();
@@ -59,13 +66,19 @@ describe("SettingsPage local data reset", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(onResetUserData).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByRole("button", { name: "Delete all local data" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete model" }));
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    expect(screen.getByText(/Delete the Fast model\?/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Keep model" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Reset WhisperTube data" }));
     fireEvent.click(screen.getByRole("button", { name: "Delete permanently" }));
     await waitFor(() => expect(onResetUserData).toHaveBeenCalledOnce());
     expect(screen.queryByRole("dialog")).toBeNull();
 
     onResetUserData.mockRejectedValueOnce(new Error("Database sedang terkunci"));
-    fireEvent.click(screen.getByRole("button", { name: "Delete all local data" }));
+    fireEvent.click(screen.getByRole("button", { name: "Reset WhisperTube data" }));
     fireEvent.click(screen.getByRole("button", { name: "Delete permanently" }));
     await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("Database sedang terkunci"));
     expect(screen.getByRole("dialog")).toBeTruthy();

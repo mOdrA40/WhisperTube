@@ -390,6 +390,7 @@ fn run_download(
         .map_err(|e| format!("Gagal menjalankan yt-dlp: {e}"))?;
     let child_pid = child.id();
     set_active_pid(context.active_pid, Some(child_pid));
+    let _process_monitor = context.usage.track_process(child_pid);
     if context.is_cancelled() {
         process::terminate_child(&mut child);
     }
@@ -579,6 +580,7 @@ fn run_ffmpeg(
         .map_err(|e| format!("Gagal menjalankan FFmpeg: {e}"))?;
     let child_pid = child.id();
     set_active_pid(context.active_pid, Some(child_pid));
+    let _process_monitor = context.usage.track_process(child_pid);
     if context.is_cancelled() {
         process::terminate_child(&mut child);
     }
@@ -787,6 +789,7 @@ fn run_vulkan_probe(
             .map_err(|e| format!("engine Vulkan tidak bisa dijalankan: {e}"))?;
         let child_pid = child.id();
         set_active_pid(context.active_pid, Some(child_pid));
+        let _process_monitor = context.usage.track_process(child_pid);
         let stderr = match child.stderr.take() {
             Some(stderr) => drain_stderr(stderr),
             None => {
@@ -1139,6 +1142,7 @@ fn run_whisper(
         .map_err(|e| format!("Gagal menjalankan whisper.cpp: {e}"))?;
     let child_pid = child.id();
     set_active_pid(context.active_pid, Some(child_pid));
+    let _process_monitor = context.usage.track_process(child_pid);
     if context.is_cancelled() {
         process::terminate_child(&mut child);
     }
@@ -1159,6 +1163,9 @@ fn run_whisper(
     let inactivity_timeout = whisper_inactivity_timeout(&resolved_backend);
     let stderr_result = (|| -> Result<(), String> {
         loop {
+            if let Some(error) = context.usage.memory_pressure() {
+                return Err(error);
+            }
             match stderr_receiver.recv_timeout(PROCESS_POLL_INTERVAL) {
                 Ok(line) => {
                     let line = line?;

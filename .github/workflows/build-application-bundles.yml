@@ -10,8 +10,15 @@ permissions:
   contents: read
 
 jobs:
+  quality-gate:
+    name: Quality gate
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
   build-unix:
     name: ${{ matrix.package }}
+    needs: quality-gate
     runs-on: ${{ matrix.os }}
     env:
       TAURI_CREATE_UPDATER_ARTIFACTS: ${{ startsWith(github.ref, 'refs/tags/v') && 'true' || 'false' }}
@@ -173,6 +180,7 @@ jobs:
 
   build-windows:
     name: whispertube-windows-x64
+    needs: quality-gate
     runs-on: windows-2025
     env:
       TAURI_CREATE_UPDATER_ARTIFACTS: ${{ startsWith(github.ref, 'refs/tags/v') && 'true' || 'false' }}

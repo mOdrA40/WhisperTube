@@ -1,6 +1,7 @@
 use std::{
     io::Read,
     process::{Child, Command, ExitStatus, Stdio},
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
 
@@ -76,6 +77,24 @@ pub fn run_with_timeout_captured(
     timeout: Duration,
     stderr_limit: usize,
 ) -> Result<(ExitStatus, String), String> {
+    run_with_timeout_captured_inner(command, timeout, stderr_limit, None)
+}
+
+pub fn run_with_timeout_captured_cancelable(
+    command: &mut Command,
+    timeout: Duration,
+    stderr_limit: usize,
+    cancelled: &AtomicBool,
+) -> Result<(ExitStatus, String), String> {
+    run_with_timeout_captured_inner(command, timeout, stderr_limit, Some(cancelled))
+}
+
+fn run_with_timeout_captured_inner(
+    command: &mut Command,
+    timeout: Duration,
+    stderr_limit: usize,
+    cancelled: Option<&AtomicBool>,
+) -> Result<(ExitStatus, String), String> {
     command
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -115,6 +134,12 @@ pub fn run_with_timeout_captured(
                 return Err(format!("Status proses tidak bisa dibaca: {error}.{detail}"));
             }
             Ok(None) => {}
+        }
+        if cancelled.is_some_and(|token| token.load(Ordering::SeqCst)) {
+            terminate_child(&mut child);
+            let _ = child.wait();
+            let _ = stderr_reader.join();
+            return Err("Proses dibatalkan.".into());
         }
         if started.elapsed() >= timeout {
             terminate_child(&mut child);

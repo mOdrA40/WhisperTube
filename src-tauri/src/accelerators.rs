@@ -17,7 +17,8 @@ use tokio::io::AsyncWriteExt;
 use zip::ZipArchive;
 
 use crate::{
-    paths::{engine_path, user_runtime_dir},
+    paths::{engine_path, is_regular_file, model_path, user_runtime_dir},
+    process,
     types::{AcceleratorDownloadPayload, AcceleratorInfo},
 };
 
@@ -450,6 +451,131 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn write_capability_probe_wav(path: &Path) -> Result<(), String> {
+    const SAMPLE_RATE: u32 = 16_000;
+    const CHANNELS: u16 = 1;
+    const BITS_PER_SAMPLE: u16 = 16;
+    const SAMPLE_COUNT: u32 = SAMPLE_RATE;
+    let data_bytes = SAMPLE_COUNT * u32::from(CHANNELS) * u32::from(BITS_PER_SAMPLE / 8);
+    let mut wav = Vec::with_capacity((44 + data_bytes) as usize);
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + data_bytes).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&CHANNELS.to_le_bytes());
+    wav.extend_from_slice(&SAMPLE_RATE.to_le_bytes());
+    wav.extend_from_slice(
+        &(SAMPLE_RATE * u32::from(CHANNELS) * u32::from(BITS_PER_SAMPLE / 8)).to_le_bytes(),
+    );
+    wav.extend_from_slice(&(CHANNELS * (BITS_PER_SAMPLE / 8)).to_le_bytes());
+    wav.extend_from_slice(&BITS_PER_SAMPLE.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_bytes.to_le_bytes());
+    wav.resize((44 + data_bytes) as usize, 0);
+    fs::write(path, wav).map_err(|e| format!("Gagal membuat audio capability probe: {e}"))
+}
+
+fn first_installed_model(app: &AppHandle) -> Result<Option<PathBuf>, String> {
+    for model_id in ["base", "large-v3-turbo-q5_0", "large-v3-q5_0"] {
+        let path = model_path(app, model_id)?;
+        if is_regular_file(&path) {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
+
+fn validate_staged_capability(
+    app: &AppHandle,
+    backend: &str,
+    engine: &Path,
+    cancelled: &AtomicBool,
+) -> Result<(), String> {
+    let Some(model) = first_installed_model(app)? else {
+        // A real inference probe cannot run before the user has downloaded a model.
+        return Ok(());
+    };
+    let device_indices = if backend == "vulkan" {
+        let devices = crate::system::detect_vulkan_devices_from_engine(engine);
+        let indices = devices
+            .into_iter()
+            .filter_map(|device| device.device_index)
+            .collect::<Vec<_>>();
+        if indices.is_empty() {
+            return Err("Accelerator Vulkan tidak menemukan device yang dapat diuji.".into());
+        }
+        indices.into_iter().map(Some).collect::<Vec<_>>()
+    } else {
+        vec![None]
+    };
+    let probe_dir = std::env::temp_dir().join(format!(
+        "whispertube-{backend}-probe-{}",
+        uuid::Uuid::new_v4()
+    ));
+    fs::create_dir_all(&probe_dir)
+        .map_err(|e| format!("Gagal membuat folder capability probe: {e}"))?;
+    let wav = probe_dir.join("silence.wav");
+    let result = (|| -> Result<(), String> {
+        write_capability_probe_wav(&wav)?;
+        let mut failures = Vec::new();
+        for device_index in device_indices {
+            if cancelled.load(Ordering::SeqCst) {
+                return Err("Download accelerator dibatalkan.".into());
+            }
+            let candidate = device_index
+                .map(|index| format!("device {index}"))
+                .unwrap_or_else(|| "default device".into());
+            let output = probe_dir.join(format!("probe-{}", device_index.unwrap_or(0)));
+            let mut command = std::process::Command::new(engine);
+            process::hide_console(&mut command);
+            if backend == "vulkan" {
+                command.env("GGML_VK_DISABLE_COOPMAT", "1");
+                command.arg("-nfa");
+                if let Some(index) = device_index {
+                    command.arg("-dev").arg(index.to_string());
+                }
+            }
+            command
+                .args(["-m"])
+                .arg(&model)
+                .args(["-f"])
+                .arg(&wav)
+                .args(["-l", "auto", "-t", "1", "-nt", "-np", "-of"])
+                .arg(&output)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
+                .stdin(std::process::Stdio::null());
+            match process::run_with_timeout_captured_cancelable(
+                &mut command,
+                Duration::from_secs(30),
+                64 * 1024,
+                cancelled,
+            ) {
+                Ok((status, _stderr)) if status.success() => return Ok(()),
+                Ok((_, stderr)) => {
+                    let detail = if stderr.trim().is_empty() {
+                        "tanpa detail".into()
+                    } else {
+                        stderr.trim().to_string()
+                    };
+                    failures.push(format!("{candidate}: {detail}"));
+                }
+                Err(_error) if cancelled.load(Ordering::SeqCst) => {
+                    return Err("Download accelerator dibatalkan.".into());
+                }
+                Err(error) => failures.push(format!("{candidate}: {error}")),
+            }
+        }
+        Err(format!(
+            "Accelerator tidak lolos capability probe pada semua kandidat. {}",
+            failures.join(" | ")
+        ))
+    })();
+    let _ = fs::remove_dir_all(&probe_dir);
+    result
+}
+
 #[cfg(unix)]
 fn mark_executable(path: &Path) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
@@ -514,6 +640,7 @@ fn finalize_blocking(
         };
         return Err(format!("Accelerator gagal melakukan self-check.{detail}"));
     }
+    validate_staged_capability(app, spec.backend, &staging_cli, cancelled)?;
     if cancelled.load(Ordering::SeqCst) {
         return Err("Download accelerator dibatalkan.".into());
     }

@@ -1450,7 +1450,7 @@ input:focus-visible,
   -webkit-backdrop-filter: blur(8px);
 }
 
-.history-delete-modal {
+.history-delete-modal, .model-delete-modal {
   width: min(440px, 100%);
   display: flex;
   align-items: flex-start;
@@ -1585,7 +1585,7 @@ input:focus-visible,
   margin-top: 20px;
 }
 
-.history-delete-icon {
+.history-delete-icon, .model-delete-icon {
   width: 38px;
   height: 38px;
   flex: 0 0 auto;
@@ -1597,26 +1597,26 @@ input:focus-visible,
   color: #fca5a5;
 }
 
-.history-delete-content {
+.history-delete-content, .model-delete-content {
   min-width: 0;
   flex: 1;
 }
 
-.history-delete-content h3 {
+.history-delete-content h3, .model-delete-content h3 {
   margin: 1px 0 5px;
   color: #ffffff;
   font-size: 15px;
   font-weight: 750;
 }
 
-.history-delete-content p {
+.history-delete-content p, .model-delete-content p {
   margin: 0;
   color: #aab6ca;
   font-size: 11.5px;
   line-height: 1.5;
 }
 
-.history-delete-actions {
+.history-delete-actions, .model-delete-actions {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
@@ -2143,7 +2143,7 @@ input:focus-visible,
   margin-top: 20px;
 }
 
-.data-reset-actions .danger-button {
+.data-reset-actions .danger-button, .model-delete-actions .danger-button {
   width: auto;
 }
 
@@ -2585,10 +2585,10 @@ input:focus-visible,
   .data-reset-modal {
     padding: 18px;
   }
-  .data-reset-actions {
+  .data-reset-actions, .model-delete-actions {
     flex-direction: column;
   }
-  .data-reset-actions button {
+  .data-reset-actions button, .model-delete-actions button {
     width: 100%;
   }
 }

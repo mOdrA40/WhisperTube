@@ -10,8 +10,15 @@ permissions:
   contents: read
 
 jobs:
+  quality-gate:
+    name: Quality gate
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
   build:
     name: ${{ matrix.package }}
+    needs: quality-gate
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false

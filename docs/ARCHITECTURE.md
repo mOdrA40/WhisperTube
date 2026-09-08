@@ -89,6 +89,11 @@ whispertube.db
 ```
 
 Downloaded source audio and converted WAV are removed by default after a successful job.
+The Settings reset action is intentionally scoped to WhisperTube-owned app-local data:
+`models/`, `jobs/`, `runtime/`, and `whispertube.db`, plus the saved cookies/browser
+preferences in the React local storage. It does not delete the WebView profile/cache,
+the interface-language preference, external `cookies.txt` files, or exports saved
+outside WhisperTube storage.
 History creation writes `result.json` atomically inside the same logical operation
 as the SQLite insert, and the transaction commits only after the result file is
 ready. History deletion first moves job directories to a same-filesystem staging
@@ -130,7 +135,9 @@ stores the verified runtime under user app-local-data and prefers that path
 before the bundled runtime, so it does not need write access beside the EXE.
 The download is pinned to an upstream whisper.cpp release, checked with
 SHA-256, extracted with path traversal protection, and self-tested before
-activation. The request has a 30-second connection/response timeout, a
+activation. If a model is already installed, accelerator installation also runs a
+short silent-audio capability probe before activation; without a model, the full
+probe remains deferred to the first transcription. The request has a 30-second connection/response timeout, a
 30-second timeout per data chunk, and a cancellation token checked between
 download chunks.
 
@@ -146,6 +153,9 @@ preflight safety thresholds; actual available memory can change when other
 GPU applications are running. CUDA is offered only on supported Windows x64
 NVIDIA builds. Metal/Vulkan catalog entries are filtered by target platform,
 architecture, and detected GPU before they reach the UI or installer. Vulkan is
+also monitored during Whisper execution: the usage monitor samples system
+available memory and the child process RSS, aborting the job if available RAM
+drops below the conservative post-start floor.
 kept as an explicit alternative even when CUDA is available, so NVIDIA users
 can compare backends or use Vulkan when needed.
 
@@ -214,6 +224,10 @@ application releases. Each installer has a SHA-256 sidecar. These bundles are
 unsigned on Windows/Linux in v0.1. macOS uses an ad-hoc signature but is not
 Apple-notarized; official signing and broad Linux distribution QA remain
 release work.
+Both application and accelerator release workflows invoke the reusable `ci.yml`
+quality gate before their native build jobs. A tag release therefore cannot reach
+the publish job when frontend, Rust, dependency-audit, secret-scan, or parser
+checks fail.
 The bootstrap builds FFmpeg 9.0.1 from a pinned official source archive with
 `--disable-shared` and no network support, rather than copying a host package
 manager binary. Linux additionally requests static linking. This removes the

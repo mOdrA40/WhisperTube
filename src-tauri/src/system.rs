@@ -1,4 +1,5 @@
 use std::{
+    path::Path,
     process::{Command, Output, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -10,6 +11,7 @@ use std::{
 
 #[cfg(target_os = "linux")]
 use std::fs;
+use sysinfo::{Pid, ProcessesToUpdate, System};
 use tauri::AppHandle;
 
 use crate::{
@@ -19,6 +21,7 @@ use crate::{
 };
 
 const USAGE_SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
+const MIN_AVAILABLE_MEMORY_AFTER_START_BYTES: u64 = 256 * 1024 * 1024;
 
 static NVIDIA_SMI_PROGRAM: OnceLock<Option<String>> = OnceLock::new();
 static NVIDIA_SELECTED_DEVICE: OnceLock<Mutex<Option<usize>>> = OnceLock::new();
@@ -35,6 +38,8 @@ pub struct GpuInfo {
 pub struct UsageSnapshot {
     pub cpu_usage_percent: Option<f64>,
     pub gpu_usage_percent: Option<f64>,
+    pub available_memory_bytes: Option<u64>,
+    pub process_memory_bytes: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -46,8 +51,14 @@ pub struct UsageTarget {
 pub struct UsageMonitor {
     snapshot: Arc<Mutex<UsageSnapshot>>,
     target: Arc<Mutex<Option<UsageTarget>>>,
+    process_id: Arc<Mutex<Option<u32>>>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+}
+
+pub struct ProcessMonitorGuard<'a> {
+    monitor: &'a UsageMonitor,
+    process_id: u32,
 }
 
 #[derive(Default)]
@@ -85,15 +96,24 @@ impl UsageMonitor {
     pub fn start() -> Self {
         let snapshot = Arc::new(Mutex::new(UsageSnapshot::default()));
         let target = Arc::new(Mutex::new(None));
+        let process_id = Arc::new(Mutex::new(None));
         let stop = Arc::new(AtomicBool::new(false));
         let thread_snapshot = Arc::clone(&snapshot);
         let thread_target = Arc::clone(&target);
+        let thread_process_id = Arc::clone(&process_id);
         let thread_stop = Arc::clone(&stop);
         let thread = std::thread::spawn(move || {
             let mut cpu_sampler = CpuSampler::default();
+            let mut memory_sampler = System::new();
             while !thread_stop.load(Ordering::SeqCst) {
                 let target = thread_target.lock().ok().and_then(|value| value.clone());
-                let current = sample_usage_uncached(&mut cpu_sampler, target.as_ref());
+                let process_id = thread_process_id.lock().ok().and_then(|value| *value);
+                let current = sample_usage_uncached(
+                    &mut cpu_sampler,
+                    &mut memory_sampler,
+                    target.as_ref(),
+                    process_id,
+                );
                 if let Ok(mut cached) = thread_snapshot.lock() {
                     *cached = current;
                 }
@@ -109,6 +129,7 @@ impl UsageMonitor {
         Self {
             snapshot,
             target,
+            process_id,
             stop,
             thread: Some(thread),
         }
@@ -129,6 +150,51 @@ impl UsageMonitor {
             });
         }
     }
+
+    pub fn track_process(&self, process_id: u32) -> ProcessMonitorGuard<'_> {
+        if let Ok(mut current) = self.process_id.lock() {
+            *current = Some(process_id);
+        }
+        ProcessMonitorGuard {
+            monitor: self,
+            process_id,
+        }
+    }
+
+    pub fn memory_pressure(&self) -> Option<String> {
+        memory_pressure_message(&self.snapshot())
+    }
+}
+
+impl Drop for ProcessMonitorGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut current) = self.monitor.process_id.lock() {
+            if *current == Some(self.process_id) {
+                *current = None;
+            }
+        }
+    }
+}
+
+fn memory_pressure_message(snapshot: &UsageSnapshot) -> Option<String> {
+    let available = snapshot.available_memory_bytes?;
+    if available >= MIN_AVAILABLE_MEMORY_AFTER_START_BYTES {
+        return None;
+    }
+    let process_detail = snapshot
+        .process_memory_bytes
+        .map(|memory| {
+            format!(
+                " Proses Whisper memakai sekitar {:.1} MiB.",
+                memory as f64 / 1024.0 / 1024.0
+            )
+        })
+        .unwrap_or_default();
+    Some(format!(
+            "Transkripsi dihentikan karena RAM tersedia turun di bawah batas aman ({:.1} MiB tersedia).{} Tutup aplikasi lain lalu coba lagi.",
+            available as f64 / 1024.0 / 1024.0,
+            process_detail
+        ))
 }
 
 impl Drop for UsageMonitor {
@@ -290,11 +356,8 @@ fn parse_vulkan_devices(stderr: &str) -> Vec<ComputeDeviceInfo> {
         .collect()
 }
 
-pub fn detect_vulkan_devices(app: &AppHandle) -> Vec<ComputeDeviceInfo> {
-    let Ok(engine) = engine_path(app, "vulkan") else {
-        return Vec::new();
-    };
-    if !is_regular_file(&engine) {
+pub fn detect_vulkan_devices_from_engine(engine: &Path) -> Vec<ComputeDeviceInfo> {
+    if !is_regular_file(engine) {
         return Vec::new();
     }
     let mut command = Command::new(engine);
@@ -302,6 +365,13 @@ pub fn detect_vulkan_devices(app: &AppHandle) -> Vec<ComputeDeviceInfo> {
     crate::process::run_with_timeout_captured(&mut command, Duration::from_secs(3), 256 * 1024)
         .map(|(_, stderr)| parse_vulkan_devices(&stderr))
         .unwrap_or_default()
+}
+
+pub fn detect_vulkan_devices(app: &AppHandle) -> Vec<ComputeDeviceInfo> {
+    let Ok(engine) = engine_path(app, "vulkan") else {
+        return Vec::new();
+    };
+    detect_vulkan_devices_from_engine(&engine)
 }
 
 fn clean_gpu_name(value: &str) -> Option<String> {
@@ -572,11 +642,21 @@ fn sample_gpu_usage(_target: Option<&UsageTarget>) -> Option<f64> {
 
 fn sample_usage_uncached(
     cpu_sampler: &mut CpuSampler,
+    memory_sampler: &mut System,
     target: Option<&UsageTarget>,
+    process_id: Option<u32>,
 ) -> UsageSnapshot {
+    memory_sampler.refresh_memory();
+    let process_memory_bytes = process_id.and_then(|process_id| {
+        let pid = Pid::from_u32(process_id);
+        memory_sampler.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
+        memory_sampler.process(pid).map(|process| process.memory())
+    });
     UsageSnapshot {
         cpu_usage_percent: sample_cpu_usage(cpu_sampler),
         gpu_usage_percent: sample_gpu_usage(target),
+        available_memory_bytes: Some(memory_sampler.available_memory()),
+        process_memory_bytes,
     }
 }
 
@@ -698,7 +778,10 @@ pub fn system_status(app: &AppHandle) -> Result<SystemStatus, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_nvidia_gpus, parse_vulkan_devices};
+    use super::{
+        memory_pressure_message, parse_nvidia_gpus, parse_vulkan_devices, UsageMonitor,
+        UsageSnapshot,
+    };
 
     #[test]
     fn selects_nvidia_device_with_the_most_free_memory() {
@@ -729,5 +812,28 @@ mod tests {
         assert!(devices[0].integrated);
         assert_eq!(devices[1].vendor, "nvidia");
         assert!(!devices[1].integrated);
+    }
+
+    #[test]
+    fn reports_memory_pressure_below_safe_floor() {
+        let message = memory_pressure_message(&UsageSnapshot {
+            available_memory_bytes: Some(128 * 1024 * 1024),
+            process_memory_bytes: Some(512 * 1024 * 1024),
+            ..UsageSnapshot::default()
+        })
+        .expect("low available memory should be reported");
+        assert!(message.contains("RAM tersedia turun"));
+        assert!(message.contains("512.0 MiB"));
+    }
+
+    #[test]
+    fn process_monitor_guard_clears_the_tracked_pid() {
+        let monitor = UsageMonitor::start();
+        monitor.set_target("vulkan", Some(0));
+        {
+            let _guard = monitor.track_process(1234);
+            assert_eq!(*monitor.process_id.lock().unwrap(), Some(1234));
+        }
+        assert_eq!(*monitor.process_id.lock().unwrap(), None);
     }
 }

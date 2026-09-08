@@ -6,6 +6,16 @@ use std::{
 
 use crate::types::{BrowserInfo, BrowserProfile};
 
+const MAX_BROWSER_CONFIG_BYTES: u64 = 16 * 1024 * 1024;
+
+fn read_bounded_text(path: &Path) -> Option<String> {
+    let size = fs::metadata(path).ok()?.len();
+    if size > MAX_BROWSER_CONFIG_BYTES {
+        return None;
+    }
+    fs::read_to_string(path).ok()
+}
+
 #[allow(dead_code)]
 #[derive(Clone, Copy)]
 enum BrowserKind {
@@ -239,7 +249,7 @@ fn first_existing_root(definition: &BrowserDefinition) -> Option<PathBuf> {
 }
 
 fn chromium_label(root: &Path, profile_id: &str) -> Option<String> {
-    let local_state = fs::read_to_string(root.join("Local State")).ok()?;
+    let local_state = read_bounded_text(&root.join("Local State"))?;
     let value: Value = serde_json::from_str(&local_state).ok()?;
     value
         .get("profile")?
@@ -321,7 +331,7 @@ fn add_firefox_profile(
 }
 
 fn firefox_profiles(root: &Path) -> Vec<DiscoveredProfile> {
-    let contents = fs::read_to_string(root.join("profiles.ini")).unwrap_or_default();
+    let contents = read_bounded_text(&root.join("profiles.ini")).unwrap_or_default();
     let mut profiles = Vec::new();
     let mut name: Option<String> = None;
     let mut path: Option<String> = None;
@@ -476,4 +486,20 @@ pub fn cookie_args(
     }
 
     browser_args(browser, profile)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{read_bounded_text, MAX_BROWSER_CONFIG_BYTES};
+    use std::fs;
+    use uuid::Uuid;
+
+    #[test]
+    fn rejects_oversized_browser_configuration() {
+        let path =
+            std::env::temp_dir().join(format!("whispertube-browser-config-{}", Uuid::new_v4()));
+        fs::write(&path, vec![b'x'; MAX_BROWSER_CONFIG_BYTES as usize + 1]).unwrap();
+        assert!(read_bounded_text(&path).is_none());
+        fs::remove_file(path).unwrap();
+    }
 }

@@ -528,6 +528,7 @@ export function useWhisperTube() {
       await refreshAfterSuccessfulOperation();
     } catch (cause) {
       setError(friendlyError(cause));
+      throw cause;
     }
   }
 

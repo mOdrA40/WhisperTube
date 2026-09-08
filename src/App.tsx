@@ -53,6 +53,7 @@ export default function App() {
         <TranscribePage
           url={app.url}
           busy={app.busy}
+          operationActive={app.operationActive}
           inspecting={app.inspecting}
           metadata={app.metadata}
           hasResult={Boolean(app.result)}
@@ -108,6 +109,7 @@ export default function App() {
           history={app.history}
           hasMore={app.historyHasMore}
           loadingMore={app.loadingMoreHistory}
+          operationActive={app.operationActive}
           onRefresh={app.refreshSystem}
           onLoadMore={app.loadMoreHistory}
           onLoad={app.loadHistory}
@@ -124,6 +126,7 @@ export default function App() {
           models={app.models}
           modelDownloadBlockReasons={app.modelDownloadBlockReasons}
           busy={app.operationActive}
+          resettingData={app.resettingData}
           downloadingModel={app.downloadingModel}
           accelerators={app.system?.accelerators ?? []}
           installingCuda={app.installingCuda}

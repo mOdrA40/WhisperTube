@@ -18,6 +18,7 @@ import type {
 type TranscribePageProps = {
   url: string;
   busy: boolean;
+  operationActive: boolean;
   inspecting: boolean;
   metadata: VideoMetadata | null;
   hasResult: boolean;
@@ -71,6 +72,7 @@ type TranscribePageProps = {
 export function TranscribePage({
   url,
   busy,
+  operationActive,
   inspecting,
   metadata,
   hasResult,
@@ -125,7 +127,7 @@ export function TranscribePage({
       <section className="transcribe-main-stream">
         <SourceCard
           url={url}
-          busy={busy}
+          busy={busy || operationActive}
           inspecting={inspecting}
           metadata={metadata}
           hasResult={hasResult}
@@ -144,6 +146,7 @@ export function TranscribePage({
             onCopy={onCopy}
             onExport={onExport}
             onRevealAudio={onRevealAudio}
+            operationActive={operationActive}
             onSearchChange={onSearchChange}
           />
         )}
@@ -161,6 +164,7 @@ export function TranscribePage({
           keepAudio={keepAudio}
           system={system}
           busy={busy}
+          operationActive={operationActive}
           runtimeReady={runtimeReady}
           downloadingModel={downloadingModel}
           accelerators={accelerators}

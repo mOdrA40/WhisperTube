@@ -12,6 +12,10 @@ pub enum OperationState {
     RuntimeInstalling(String),
     ModelDeleting(String),
     Inspecting,
+    HistoryReading,
+    HistoryDeleting,
+    HistoryExporting,
+    HistoryRevealing,
     AppUpdating,
     ResettingData,
 }
@@ -72,6 +76,22 @@ impl OperationGuard {
         )
     }
 
+    pub fn reserve_history_read(state: &AppState) -> Result<Self, String> {
+        Self::reserve(state, OperationState::HistoryReading, None)
+    }
+
+    pub fn reserve_history_delete(state: &AppState) -> Result<Self, String> {
+        Self::reserve(state, OperationState::HistoryDeleting, None)
+    }
+
+    pub fn reserve_history_export(state: &AppState) -> Result<Self, String> {
+        Self::reserve(state, OperationState::HistoryExporting, None)
+    }
+
+    pub fn reserve_history_reveal(state: &AppState) -> Result<Self, String> {
+        Self::reserve(state, OperationState::HistoryRevealing, None)
+    }
+
     pub fn reserve_app_update(state: &AppState) -> Result<(), String> {
         let mut active = state
             .operation
@@ -86,6 +106,7 @@ impl OperationGuard {
 
     pub fn reserve_data_reset(state: &AppState) -> Result<Self, String> {
         Self::reserve(state, OperationState::ResettingData, None)
+            .map_err(|error| format!("operation_conflict:{error}"))
     }
 
     pub fn request_cancel(state: &AppState) -> Result<(), String> {
@@ -112,6 +133,10 @@ impl OperationGuard {
             }
             OperationState::Idle
             | OperationState::ModelDeleting(_)
+            | OperationState::HistoryReading
+            | OperationState::HistoryDeleting
+            | OperationState::HistoryExporting
+            | OperationState::HistoryRevealing
             | OperationState::AppUpdating
             | OperationState::ResettingData => false,
         };
@@ -168,6 +193,18 @@ fn operation_conflict_message(operation: &OperationState) -> String {
             format!("Model {model_id} sedang dihapus.")
         }
         OperationState::Inspecting => "Pemeriksaan metadata sedang berjalan.".into(),
+        OperationState::HistoryReading => {
+            "History sedang dibaca. Tunggu sampai selesai terlebih dahulu.".into()
+        }
+        OperationState::HistoryDeleting => {
+            "History sedang dihapus. Tunggu sampai selesai terlebih dahulu.".into()
+        }
+        OperationState::HistoryExporting => {
+            "Export transcript sedang berjalan. Tunggu sampai selesai terlebih dahulu.".into()
+        }
+        OperationState::HistoryRevealing => {
+            "Lokasi audio sedang dibuka. Tunggu sampai selesai terlebih dahulu.".into()
+        }
         OperationState::AppUpdating => {
             "Pembaruan aplikasi sedang berjalan. Tunggu sampai selesai terlebih dahulu.".into()
         }
@@ -286,6 +323,7 @@ mod tests {
             *state.operation.lock().unwrap(),
             OperationState::Transcribing
         );
+        assert!(OperationGuard::reserve_data_reset(&state).is_err());
     }
 
     #[test]
@@ -315,6 +353,7 @@ mod tests {
         assert!(OperationGuard::reserve_model_delete(&state, "base".into()).is_err());
         assert!(OperationGuard::reserve_inspecting(&state).is_err());
         assert!(OperationGuard::reserve_app_update(&state).is_err());
+        assert!(OperationGuard::reserve_data_reset(&state).is_err());
         drop(model);
 
         let runtime = OperationGuard::reserve_runtime_install(&state, "vulkan".into()).unwrap();
@@ -323,6 +362,7 @@ mod tests {
         assert!(OperationGuard::reserve_model_delete(&state, "base".into()).is_err());
         assert!(OperationGuard::reserve_inspecting(&state).is_err());
         assert!(OperationGuard::reserve_app_update(&state).is_err());
+        assert!(OperationGuard::reserve_data_reset(&state).is_err());
         drop(runtime);
 
         let model_delete = OperationGuard::reserve_model_delete(&state, "base".into()).unwrap();
@@ -331,6 +371,7 @@ mod tests {
         assert!(OperationGuard::reserve_runtime_install(&state, "cuda".into()).is_err());
         assert!(OperationGuard::reserve_inspecting(&state).is_err());
         assert!(OperationGuard::reserve_app_update(&state).is_err());
+        assert!(OperationGuard::reserve_data_reset(&state).is_err());
         drop(model_delete);
 
         OperationGuard::reserve_app_update(&state).unwrap();
@@ -339,6 +380,7 @@ mod tests {
         assert!(OperationGuard::reserve_runtime_install(&state, "cuda".into()).is_err());
         assert!(OperationGuard::reserve_model_delete(&state, "base".into()).is_err());
         assert!(OperationGuard::reserve_inspecting(&state).is_err());
+        assert!(OperationGuard::reserve_data_reset(&state).is_err());
         OperationGuard::release_app_update(&state).unwrap();
 
         let inspect = OperationGuard::reserve_inspecting(&state).unwrap();
@@ -347,6 +389,15 @@ mod tests {
         assert!(OperationGuard::reserve_runtime_install(&state, "cuda".into()).is_err());
         assert!(OperationGuard::reserve_model_delete(&state, "base".into()).is_err());
         assert!(OperationGuard::reserve_app_update(&state).is_err());
+        assert!(OperationGuard::reserve_data_reset(&state).is_err());
         drop(inspect);
+
+        let reset = OperationGuard::reserve_data_reset(&state).unwrap();
+        assert!(JobGuard::reserve(&state).is_err());
+        assert!(OperationGuard::reserve_model_download(&state, "base".into()).is_err());
+        assert!(OperationGuard::reserve_history_read(&state).is_err());
+        assert!(OperationGuard::reserve_history_delete(&state).is_err());
+        assert!(OperationGuard::reserve_history_export(&state).is_err());
+        drop(reset);
     }
 }

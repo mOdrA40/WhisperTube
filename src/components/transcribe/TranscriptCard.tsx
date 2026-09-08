@@ -5,6 +5,7 @@ import { getModelLabel, useI18n } from "../../i18n";
 
 type TranscriptCardProps = {
   result: TranscriptResult;
+  operationActive: boolean;
   copied: boolean;
   searchQuery: string;
   filteredSegments: Segment[];
@@ -18,6 +19,7 @@ const SEGMENTS_PER_PAGE = 300;
 
 export function TranscriptCard({
   result,
+  operationActive,
   copied,
   searchQuery,
   filteredSegments,
@@ -47,21 +49,21 @@ export function TranscriptCard({
           </p>
         </div>
         <div className="toolbar-actions">
-          <button type="button" className="secondary-button" onClick={onCopy}>
+          <button type="button" className="secondary-button" onClick={onCopy} disabled={operationActive}>
             {copied ? <Check size={16} /> : <Copy size={16} />}
             {copied ? t("transcript.copied") : t("transcript.copy")}
           </button>
-          <button type="button" className="secondary-button" onClick={() => onExport("txt")}>
+          <button type="button" className="secondary-button" onClick={() => onExport("txt")} disabled={operationActive}>
             <FileText size={16} /> TXT
           </button>
-          <button type="button" className="secondary-button" onClick={() => onExport("srt")}>
+          <button type="button" className="secondary-button" onClick={() => onExport("srt")} disabled={operationActive}>
             SRT
           </button>
-          <button type="button" className="secondary-button" onClick={() => onExport("vtt")}>
+          <button type="button" className="secondary-button" onClick={() => onExport("vtt")} disabled={operationActive}>
             VTT
           </button>
           {result.audioPath && (
-            <button type="button" className="secondary-button" onClick={onRevealAudio}>
+            <button type="button" className="secondary-button" onClick={onRevealAudio} disabled={operationActive}>
               <FolderOpen size={16} /> {t("transcript.showAudio")}
             </button>
           )}

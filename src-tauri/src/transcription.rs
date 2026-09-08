@@ -25,8 +25,8 @@ use crate::{
     state::VulkanProbeResult,
     system::{detect_gpu, detect_nvidia, detect_nvidia_device, UsageMonitor},
     types::{
-        ProgressPayload, Segment, TranscriptRequest, TranscriptResult, MAX_TRANSCRIPT_RESULT_BYTES,
-        MAX_TRANSCRIPT_SEGMENTS, MAX_TRANSCRIPT_TEXT_BYTES,
+        ComputeDeviceInfo, ProgressPayload, Segment, TranscriptRequest, TranscriptResult,
+        MAX_TRANSCRIPT_RESULT_BYTES, MAX_TRANSCRIPT_SEGMENTS, MAX_TRANSCRIPT_TEXT_BYTES,
     },
 };
 
@@ -910,6 +910,44 @@ fn requested_device_index(
         .map_err(|_| format!("Index device compute tidak valid: {requested_device_id}."))
 }
 
+fn vulkan_device_indices(devices: &[ComputeDeviceInfo]) -> Vec<usize> {
+    let mut indexed = devices
+        .iter()
+        .filter_map(|device| device.device_index.map(|index| (device.integrated, index)))
+        .collect::<Vec<_>>();
+    indexed.sort_by_key(|(integrated, _)| *integrated);
+
+    let indices = indexed
+        .into_iter()
+        .map(|(_, index)| index)
+        .collect::<Vec<_>>();
+    if indices.is_empty() {
+        vec![0]
+    } else {
+        indices
+    }
+}
+
+fn available_vulkan_device_indices(app: &AppHandle) -> Vec<usize> {
+    vulkan_device_indices(&crate::system::detect_vulkan_devices(app))
+}
+
+fn probe_vulkan_devices(
+    context: &JobContext,
+    engine: &Path,
+    model: &Path,
+    device_indices: &[usize],
+) -> Result<usize, String> {
+    let mut errors = Vec::new();
+    for device_index in device_indices {
+        match ensure_vulkan_probe(context, engine, model, *device_index) {
+            Ok(()) => return Ok(*device_index),
+            Err(error) => errors.push(format!("device {device_index}: {error}")),
+        }
+    }
+    Err(errors.join("; "))
+}
+
 fn choose_backend(
     context: &JobContext,
     requested: &str,
@@ -970,9 +1008,12 @@ fn choose_backend(
                         .into(),
                 )
             } else {
-                let device_index =
-                    requested_device_index(requested_device_id, "vulkan")?.unwrap_or(0);
-                ensure_vulkan_probe(context, &vulkan, model, device_index).map_err(|error| {
+                let requested_device_index = requested_device_index(requested_device_id, "vulkan")?;
+                let device_indices = requested_device_index
+                    .map(|index| vec![index])
+                    .unwrap_or_else(|| available_vulkan_device_indices(app));
+                let device_index = probe_vulkan_devices(context, &vulkan, model, &device_indices)
+                    .map_err(|error| {
                     format!("Vulkan dipilih tetapi capability probe gagal: {error}")
                 })?;
                 Ok(("vulkan".into(), vulkan, None, Some(device_index)))
@@ -992,8 +1033,13 @@ fn choose_backend(
                 && gpu_detected
                 && vulkan.exists()
             {
-                match ensure_vulkan_probe(context, &vulkan, model, 0) {
-                    Ok(()) => Ok(("vulkan".into(), vulkan, None, Some(0))),
+                match probe_vulkan_devices(
+                    context,
+                    &vulkan,
+                    model,
+                    &available_vulkan_device_indices(app),
+                ) {
+                    Ok(device_index) => Ok(("vulkan".into(), vulkan, None, Some(device_index))),
                     Err(error) if cpu.exists() => Ok((
                         "cpu".into(),
                         cpu,
@@ -1446,9 +1492,9 @@ pub fn pipeline(
 mod tests {
     use super::{
         capture_stderr, ffmpeg_target_duration, normalize_utf8_bytes, remaining_disk_reservation,
-        run_cached_vulkan_probe, whisper_inactivity_timeout, whisper_thread_count,
-        JobDirectoryGuard, CPU_INACTIVITY_TIMEOUT, DISK_SAFETY_BUFFER_BYTES,
-        MAX_CAPTURED_STDERR_BYTES, PROCESS_INACTIVITY_TIMEOUT,
+        run_cached_vulkan_probe, vulkan_device_indices, whisper_inactivity_timeout,
+        whisper_thread_count, ComputeDeviceInfo, JobDirectoryGuard, CPU_INACTIVITY_TIMEOUT,
+        DISK_SAFETY_BUFFER_BYTES, MAX_CAPTURED_STDERR_BYTES, PROCESS_INACTIVITY_TIMEOUT,
     };
     use std::{
         io::Cursor,
@@ -1476,6 +1522,34 @@ mod tests {
             drop(guard);
         }
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn vulkan_auto_prefers_discrete_devices_before_integrated_devices() {
+        let devices = vec![
+            ComputeDeviceInfo {
+                id: "vulkan:0".into(),
+                backend: "vulkan".into(),
+                name: "AMD iGPU".into(),
+                vendor: "amd".into(),
+                device_index: Some(0),
+                integrated: true,
+                total_memory_mb: None,
+                free_memory_mb: None,
+            },
+            ComputeDeviceInfo {
+                id: "vulkan:1".into(),
+                backend: "vulkan".into(),
+                name: "NVIDIA dGPU".into(),
+                vendor: "nvidia".into(),
+                device_index: Some(1),
+                integrated: false,
+                total_memory_mb: None,
+                free_memory_mb: None,
+            },
+        ];
+
+        assert_eq!(vulkan_device_indices(&devices), vec![1, 0]);
     }
 
     #[test]

@@ -8,6 +8,7 @@ type HistoryPageProps = {
   history: HistoryItem[];
   hasMore: boolean;
   loadingMore: boolean;
+  operationActive: boolean;
   onRefresh: () => void;
   onLoadMore: () => void;
   onLoad: (id: number) => void;
@@ -17,7 +18,7 @@ type HistoryPageProps = {
 
 const MAX_DELETE_SELECTION = 100;
 
-export function HistoryPage({ history, hasMore, loadingMore, onRefresh, onLoadMore, onLoad, onDelete, onTabChange }: HistoryPageProps) {
+export function HistoryPage({ history, hasMore, loadingMore, operationActive, onRefresh, onLoadMore, onLoad, onDelete, onTabChange }: HistoryPageProps) {
   const { language, t } = useI18n();
   const dateLocale = language === "zh" ? "zh-CN" : language === "id" ? "id-ID" : "en-US";
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
@@ -120,11 +121,11 @@ export function HistoryPage({ history, hasMore, loadingMore, onRefresh, onLoadMo
           <p>{t("history.description")}</p>
         </div>
         <div className="history-actions">
-          <button type="button" className="secondary-button" onClick={onRefresh}>
+          <button type="button" className="secondary-button" onClick={onRefresh} disabled={operationActive}>
             <RotateCcw size={16} /> {t("history.refresh")}
           </button>
           {history.length > 0 && (
-            <button type="button" className="secondary-button" onClick={toggleAll} aria-pressed={allSelected}>
+            <button type="button" className="secondary-button" onClick={toggleAll} disabled={operationActive} aria-pressed={allSelected}>
               {allSelected ? <CheckSquare size={16} /> : <Square size={16} />}
               {allSelected ? t("history.clearSelection") : t("history.selectAll")}
             </button>
@@ -142,6 +143,7 @@ export function HistoryPage({ history, hasMore, loadingMore, onRefresh, onLoadMo
             type="button"
             className="danger-ghost"
             onClick={(event) => void handleDelete([...selectedIds], event.currentTarget)}
+            disabled={operationActive}
           >
             <Trash2 size={16} /> {t("history.deleteSelected")}
           </button>
@@ -172,11 +174,11 @@ export function HistoryPage({ history, hasMore, loadingMore, onRefresh, onLoadMo
                 type="checkbox"
                 className="history-checkbox"
                 checked={selectedIds.has(item.id)}
-                disabled={!selectedIds.has(item.id) && selectedIds.size >= MAX_DELETE_SELECTION}
+                disabled={operationActive || (!selectedIds.has(item.id) && selectedIds.size >= MAX_DELETE_SELECTION)}
                 onChange={() => toggleSelection(item.id)}
                 aria-label={t("history.selectItem", { title: item.title })}
               />
-              <button type="button" className="history-item-main" onClick={() => onLoad(item.id)}>
+              <button type="button" className="history-item-main" onClick={() => onLoad(item.id)} disabled={operationActive}>
               <div className="history-icon">
                 <FileText size={19} />
               </div>
@@ -196,6 +198,7 @@ export function HistoryPage({ history, hasMore, loadingMore, onRefresh, onLoadMo
                 type="button"
                 className="icon-button danger history-delete-button"
                 onClick={(event) => void handleDelete([item.id], event.currentTarget)}
+                disabled={operationActive}
                 title={t("history.deleteOne", { title: item.title })}
                 aria-label={t("history.deleteOne", { title: item.title })}
               >
@@ -208,7 +211,7 @@ export function HistoryPage({ history, hasMore, loadingMore, onRefresh, onLoadMo
               type="button"
               className="secondary-button history-load-more"
               onClick={onLoadMore}
-              disabled={loadingMore}
+              disabled={loadingMore || operationActive}
             >
               {loadingMore ? t("history.loadingMore") : t("history.loadMore")}
             </button>
@@ -244,6 +247,7 @@ export function HistoryPage({ history, hasMore, loadingMore, onRefresh, onLoadMo
                   type="button"
                   className="danger-button"
                   onClick={() => void confirmDelete()}
+                  disabled={operationActive}
                 >
                   <Trash2 size={16} /> {t("history.confirmOk")}
                 </button>

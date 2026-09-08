@@ -20,7 +20,12 @@ export function formatDuration(totalSeconds: number) {
 
 export function friendlyError(error: unknown) {
   const raw = String(error ?? "Terjadi kesalahan yang tidak diketahui");
-  return raw.replace(/^Error:\s*/i, "");
+  return raw.replace(/^Error:\s*/i, "").replace(/^operation_conflict:\s*/i, "");
+}
+
+export function isOperationConflict(error: unknown) {
+  const raw = String(error ?? "");
+  return /^Error:\s*operation_conflict:/i.test(raw) || /^operation_conflict:/i.test(raw);
 }
 
 export function formatMemory(megabytes: number | null | undefined, notDetected = "Not detected") {

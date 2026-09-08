@@ -24,7 +24,7 @@ import {
   subscribeToCudaDownload,
   subscribeToProgress,
 } from "../services/tauri";
-import { friendlyError } from "../lib/format";
+import { friendlyError, isOperationConflict } from "../lib/format";
 import { getAcceleratorCopy, getModelCopy, useI18n } from "../i18n";
 import type {
   AppUpdateInfo,
@@ -123,6 +123,8 @@ export function useWhisperTube() {
   const [progress, setProgress] = useState<ProgressPayload>(initialProgress);
   const [busy, setBusy] = useState(false);
   const [inspecting, setInspecting] = useState(false);
+  const [resettingData, setResettingData] = useState(false);
+  const [historyOperation, setHistoryOperation] = useState<"reading" | "deleting" | "exporting" | "revealing" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [downloadingModel, setDownloadingModel] = useState<Record<string, ModelDownloadPayload>>({});
   const [copied, setCopied] = useState(false);
@@ -312,7 +314,7 @@ export function useWhisperTube() {
   const modelDownloadActive = Object.keys(downloadingModel).length > 0;
   const appUpdateInstalling = appUpdateStatus === "installing";
   const operationActive = Boolean(
-    busy || inspecting || modelDownloadActive || installingCuda || installingAccelerator || appUpdateInstalling,
+    busy || inspecting || resettingData || historyOperation || modelDownloadActive || installingCuda || installingAccelerator || appUpdateInstalling,
   );
   const cudaInstallRequired = Boolean(system?.cudaSupported && system.nvidia && backend === "auto" && !system.cudaEngine && !autoAcceleratorInstalled);
   const vramWarning = useMemo(() => {
@@ -400,6 +402,7 @@ export function useWhisperTube() {
   }
 
   async function inspectVideo() {
+    if (operationActive) return;
     if (!url.trim()) {
       setError(t("error.emptyUrl"));
       return;
@@ -452,7 +455,7 @@ export function useWhisperTube() {
   }
 
   async function handleDownloadModel(id: string) {
-    if (appUpdateInstalling) return;
+    if (operationActive) return;
     setError(null);
     setDownloadingModel((previous) => ({
       ...previous,
@@ -475,6 +478,7 @@ export function useWhisperTube() {
   }
 
   async function handleRemoveModel(id: string) {
+    if (operationActive) return;
     setError(null);
     try {
       await deleteModel(id);
@@ -486,9 +490,23 @@ export function useWhisperTube() {
   }
 
   async function handleResetUserData() {
+    if (operationActive) return;
     setError(null);
+    setResettingData(true);
+    let failure: unknown = null;
     try {
       await resetUserDataRequest();
+    } catch (cause) {
+      if (isOperationConflict(cause)) {
+        setError(friendlyError(cause));
+        setResettingData(false);
+        throw cause;
+      }
+      failure = cause;
+      setError(friendlyError(cause));
+    }
+
+    try {
       try {
         window.localStorage.removeItem(COOKIES_PATH_STORAGE_KEY);
         window.localStorage.removeItem(ACCESS_BROWSER_STORAGE_KEY);
@@ -500,15 +518,25 @@ export function useWhisperTube() {
       setMetadata(null);
       setResult(null);
       setSearchQuery("");
+    } catch (cause) {
+      if (!failure) failure = cause;
+      setError(friendlyError(cause));
+    }
+
+    try {
       await refreshSystem();
     } catch (cause) {
+      if (!failure) failure = cause;
       setError(friendlyError(cause));
-      throw cause;
+    } finally {
+      setResettingData(false);
     }
+
+    if (failure) throw failure;
   }
 
   async function handleInstallCuda() {
-    if (appUpdateInstalling) return;
+    if (operationActive) return;
     if (!system?.cudaSupported || !system.nvidia) {
       setError(t("error.cudaUnavailable"));
       return;
@@ -534,7 +562,7 @@ export function useWhisperTube() {
   }
 
   async function handleInstallAccelerator(backendToInstall: Exclude<BackendChoice, "auto" | "cpu" | "cuda">) {
-    if (appUpdateInstalling) return;
+    if (operationActive) return;
     if (installingCuda || installingAccelerator !== null) {
       setError(t("error.installerBusy"));
       return;
@@ -556,7 +584,7 @@ export function useWhisperTube() {
   }
 
   async function handleStartTranscription() {
-    if (busy || appUpdateInstalling) return;
+    if (operationActive) return;
     if (!metadata) {
       setError(t("error.videoCheckFirst"));
       return;
@@ -638,6 +666,8 @@ export function useWhisperTube() {
   }
 
   async function handleLoadHistory(id: number) {
+    if (operationActive) return;
+    setHistoryOperation("reading");
     setError(null);
     try {
       setResult(await loadHistory(id));
@@ -645,11 +675,14 @@ export function useWhisperTube() {
       setSearchQuery("");
     } catch (cause) {
       setError(friendlyError(cause));
+    } finally {
+      setHistoryOperation(null);
     }
   }
 
   async function handleDeleteHistory(ids: number[]) {
-    if (ids.length === 0) return;
+    if (operationActive || ids.length === 0) return;
+    setHistoryOperation("deleting");
     setError(null);
     try {
       await deleteHistoryRequest(ids);
@@ -663,20 +696,26 @@ export function useWhisperTube() {
       setError(friendlyError(cause));
       await refreshSystem().catch((refreshCause) => setError(friendlyError(refreshCause)));
       throw cause;
+    } finally {
+      setHistoryOperation(null);
     }
   }
 
   async function handleExport(kind: "txt" | "srt" | "vtt") {
-    if (!result) return;
+    if (operationActive || !result) return;
+    setHistoryOperation("exporting");
     try {
       await exportTranscriptFile(result, kind);
     } catch (cause) {
       setError(friendlyError(cause));
+    } finally {
+      setHistoryOperation(null);
     }
   }
 
   async function handleLoadMoreHistory() {
-    if (loadingMoreHistory || !historyHasMore) return;
+    if (operationActive || loadingMoreHistory || !historyHasMore) return;
+    setHistoryOperation("reading");
     setLoadingMoreHistory(true);
     setError(null);
     try {
@@ -691,20 +730,24 @@ export function useWhisperTube() {
       setError(friendlyError(cause));
     } finally {
       setLoadingMoreHistory(false);
+      setHistoryOperation(null);
     }
   }
 
   async function handleRevealAudio() {
-    if (!result?.audioPath) return;
+    if (operationActive || !result?.audioPath) return;
+    setHistoryOperation("revealing");
     try {
       await revealAudioFile(result.audioPath);
     } catch (cause) {
       setError(friendlyError(cause));
+    } finally {
+      setHistoryOperation(null);
     }
   }
 
   async function copyTranscript() {
-    if (!result) return;
+    if (operationActive || !result) return;
     try {
       await navigator.clipboard.writeText(result.text);
       setCopied(true);
@@ -748,6 +791,8 @@ export function useWhisperTube() {
     progress,
     busy,
     operationActive,
+    resettingData,
+    historyOperation,
     inspecting,
     error,
     setError,

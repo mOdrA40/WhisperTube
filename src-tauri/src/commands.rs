@@ -143,26 +143,52 @@ pub fn cancel_job(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn list_history(app: AppHandle, before_id: Option<i64>) -> Result<HistoryPageResult, String> {
+pub fn list_history(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    before_id: Option<i64>,
+) -> Result<HistoryPageResult, String> {
+    let _operation = OperationGuard::reserve_history_read(&state)?;
     history::list_history(&app, before_id)
 }
 
 #[tauri::command]
-pub fn load_history(app: AppHandle, id: i64) -> Result<TranscriptResult, String> {
+pub fn load_history(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<TranscriptResult, String> {
+    let _operation = OperationGuard::reserve_history_read(&state)?;
     history::load_history(&app, id)
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn delete_history(app: AppHandle, ids: Vec<i64>) -> Result<(), String> {
+pub fn delete_history(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    ids: Vec<i64>,
+) -> Result<(), String> {
+    let _operation = OperationGuard::reserve_history_delete(&state)?;
     history::delete_history(&app, &ids)
 }
 
 #[tauri::command]
-pub fn copy_export(app: AppHandle, source: String, target: String) -> Result<(), String> {
+pub fn copy_export(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    source: String,
+    target: String,
+) -> Result<(), String> {
+    let _operation = OperationGuard::reserve_history_export(&state)?;
     history::copy_export(&app, &source, &target)
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn reveal_audio(app: AppHandle, path: String) -> Result<(), String> {
+pub fn reveal_audio(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<(), String> {
+    let _operation = OperationGuard::reserve_history_reveal(&state)?;
     history::reveal_audio(&app, &path)
 }

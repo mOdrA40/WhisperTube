@@ -26,6 +26,7 @@ type ControlsCardProps = {
   keepAudio: boolean;
   system: SystemStatus | null;
   busy: boolean;
+  operationActive: boolean;
   runtimeReady: boolean;
   downloadingModel: Record<string, ModelDownloadPayload>;
   accelerators: AcceleratorInfo[];
@@ -60,6 +61,7 @@ export function ControlsCard({
   keepAudio,
   system,
   busy,
+  operationActive,
   runtimeReady,
   downloadingModel,
   accelerators,
@@ -83,6 +85,7 @@ export function ControlsCard({
   onStart,
 }: ControlsCardProps) {
   const { t } = useI18n();
+  const controlsDisabled = busy || operationActive;
   const selectedDownload = selectedModel && downloadingModel[selectedModel.id];
   const modelDownloadActive = Object.keys(downloadingModel).length > 0;
   const languageOptions: SelectOption[] = [
@@ -133,7 +136,7 @@ export function ControlsCard({
       </div>
 
       <label className="field-label">{t("controls.model")}</label>
-      <div className="model-options">
+      <div className="model-options" role="radiogroup" aria-label={t("controls.model")}>
         {models.map((model) => {
           const isSelected = modelId === model.id;
 
@@ -141,9 +144,11 @@ export function ControlsCard({
             <button
               key={model.id}
               type="button"
+              role="radio"
+              aria-checked={isSelected}
               className={isSelected ? "model-option selected" : "model-option"}
               onClick={() => onModelChange(model.id)}
-              disabled={busy || modelDownloadActive}
+              disabled={controlsDisabled || modelDownloadActive}
             >
               <div className="radio-dot">
                 <span />
@@ -167,7 +172,7 @@ export function ControlsCard({
           type="button"
           className="download-button"
           onClick={() => onDownloadModel(selectedModel.id)}
-          disabled={selectedDownload !== undefined || modelDownloadActive || busy || modelDownloadBlocked}
+          disabled={selectedDownload !== undefined || modelDownloadActive || controlsDisabled || modelDownloadBlocked}
         >
           {selectedDownload !== undefined ? <LoaderCircle className="spin" size={17} /> : <Download size={17} />}
           {selectedDownload !== undefined
@@ -201,7 +206,7 @@ export function ControlsCard({
             type="button"
             className="download-button"
             onClick={onInstallCuda}
-            disabled={installingCuda || installingAccelerator !== null || modelDownloadActive || busy}
+            disabled={installingCuda || installingAccelerator !== null || modelDownloadActive || controlsDisabled}
           >
             {installingCuda ? <LoaderCircle className="spin" size={17} /> : <Download size={17} />}
             {installingCuda
@@ -237,7 +242,7 @@ export function ControlsCard({
                   accelerator.backend as Exclude<BackendChoice, "auto" | "cpu" | "cuda">
                 )
               }
-              disabled={installingAccelerator !== null || installingCuda || modelDownloadActive || busy}
+              disabled={installingAccelerator !== null || installingCuda || modelDownloadActive || controlsDisabled}
             >
               {installingAccelerator === accelerator.backend ? <LoaderCircle className="spin" size={17} /> : <Download size={17} />}
               {installingAccelerator === accelerator.backend
@@ -269,7 +274,7 @@ export function ControlsCard({
         value={language}
         options={languageOptions}
         onChange={onLanguageChange}
-        disabled={busy}
+        disabled={controlsDisabled}
         ariaLabel={t("controls.language")}
       />
 
@@ -278,7 +283,7 @@ export function ControlsCard({
         value={computeTargetId}
         options={computeTargetOptions}
         onChange={onComputeTargetChange}
-        disabled={busy}
+        disabled={controlsDisabled}
         ariaLabel={t("controls.computeBackend")}
       />
       <div className="recommendation">
@@ -295,7 +300,7 @@ export function ControlsCard({
           type="checkbox"
           checked={keepAudio}
           onChange={(event) => onKeepAudioChange(event.target.checked)}
-          disabled={busy}
+          disabled={controlsDisabled}
         />
       </label>
 

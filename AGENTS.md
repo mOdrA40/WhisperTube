@@ -220,6 +220,11 @@ Perbaiki masalah yang ditemukan sebelum memberikan hasil akhir.
 
 ## Git
 
+Staging is user-controlled. The agent must not run `git add`, `git restore --staged`,
+`git reset`, or otherwise change the Git index unless the user explicitly requests
+that exact staging/index operation. Code edits and verification must leave changes
+in the working tree for the user to review and stage manually.
+
 Hormati perubahan pengguna yang sudah ada di working tree.
 
 Jangan menghapus atau me-revert perubahan yang tidak dibuat oleh Anda kecuali pengguna

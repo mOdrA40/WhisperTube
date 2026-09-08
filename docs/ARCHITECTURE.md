@@ -56,10 +56,12 @@ DONE
 
 Any external stage can terminate in `FAILED` or `CANCELLED`.
 
-The backend reserves the job lifecycle before spawning the blocking pipeline:
-`Idle → Starting → Running → Cancelling`. A guard releases the reservation on
-every return path, so a process PID is only used for process termination, not
-as the job's sole concurrency lock.
+The backend uses one exclusive `OperationGuard` for destructive and long-running
+operations. A transcription reserves `Transcribing` before spawning the blocking
+pipeline; model/runtime downloads, model deletion, history access, app updates,
+and data reset use their corresponding operation state as well. The guard
+releases its reservation on every return path, so a process PID is only used for
+process termination, not as the job's sole concurrency lock.
 
 `job-progress` carries stage progress, transferred bytes, network speed, and
 best-effort CPU/GPU utilization samples. GPU utilization is shown when the

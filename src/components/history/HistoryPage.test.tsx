@@ -27,6 +27,7 @@ describe("HistoryPage", () => {
           history={makeHistory(101)}
           hasMore={false}
           loadingMore={false}
+          operationActive={false}
           onRefresh={vi.fn()}
           onLoadMore={vi.fn()}
           onLoad={vi.fn()}

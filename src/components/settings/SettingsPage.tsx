@@ -1,6 +1,6 @@
-import { Check, CircleStop, Copy, Cpu, Download, ExternalLink, FileKey, Globe2, LockKeyhole, LoaderCircle, MonitorCog, RotateCcw, Trash2 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
-import { formatBytes, formatMemory } from "../../lib/format";
+import { AlertTriangle, Check, CircleStop, Copy, Cpu, Database, Download, ExternalLink, FileKey, Globe2, HardDrive, KeyRound, Languages, LockKeyhole, LoaderCircle, MonitorCog, RotateCcw, Trash2 } from "lucide-react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { formatBytes, formatMemory, friendlyError } from "../../lib/format";
 import { getAcceleratorCopy, getModelCopy, uiLanguageOptions, useI18n } from "../../i18n";
 import type { AcceleratorInfo, AppUpdateInfo, AppUpdateProgress, AppUpdateStatus, BackendChoice, BrowserInfo, ModelDownloadPayload, ModelInfo, SystemStatus } from "../../types";
 import { CustomSelect, type SelectOption } from "../common/CustomSelect";
@@ -18,6 +18,7 @@ type SettingsPageProps = {
   modelDownloadBlockReasons: Record<string, string>;
   busy: boolean;
   resettingData: boolean;
+  historyTotalCount: number;
   downloadingModel: Record<string, ModelDownloadPayload>;
   accelerators: AcceleratorInfo[];
   installingCuda: boolean;
@@ -56,6 +57,7 @@ export function SettingsPage({
   modelDownloadBlockReasons,
   busy,
   resettingData,
+  historyTotalCount,
   downloadingModel,
   accelerators,
   installingCuda,
@@ -86,13 +88,19 @@ export function SettingsPage({
 }: SettingsPageProps) {
   const { language: uiLanguage, setLanguage: setUiLanguage, t } = useI18n();
   const [cookiesDialogOpen, setCookiesDialogOpen] = useState(false);
+  const [resetDialogOpen, setResetDialogOpen] = useState(false);
   const [copiedUrl, setCopiedUrl] = useState<string | null>(null);
   const [copyFailedUrl, setCopyFailedUrl] = useState<string | null>(null);
   const [resetComplete, setResetComplete] = useState(false);
+  const [resetError, setResetError] = useState<string | null>(null);
   const cookiesDialogRef = useRef<HTMLDivElement>(null);
   const cookiesTriggerRef = useRef<HTMLButtonElement>(null);
   const cookiesContinueRef = useRef<HTMLButtonElement>(null);
   const cookiesDialogWasOpen = useRef(false);
+  const resetDialogRef = useRef<HTMLDivElement>(null);
+  const resetTriggerRef = useRef<HTMLButtonElement>(null);
+  const resetCancelRef = useRef<HTMLButtonElement>(null);
+  const resetDialogWasOpen = useRef(false);
   const modelDownloadActive = Object.keys(downloadingModel).length > 0;
   const interfaceLanguageOptions: SelectOption[] = uiLanguageOptions.map((option) => ({
     value: option.value,
@@ -116,15 +124,24 @@ export function SettingsPage({
     }
   }
 
+  const installedModels = models.filter((model) => model.installed);
+  const installedAccelerators = accelerators.filter((accelerator) => accelerator.installed);
+  const installedRuntimes = [
+    ...(system?.cudaEngine ? [t("settings.cudaEngine")] : []),
+    ...installedAccelerators.map((accelerator) => getAcceleratorCopy(accelerator, t).label),
+  ];
+  const hasSavedAccessPreference = Boolean(cookiesPath || usingSafariSession);
+
   async function handleResetUserData() {
-    if (!window.confirm(t("settings.resetDataConfirm"))) return;
     setResetComplete(false);
+    setResetError(null);
     try {
       await onResetUserData();
+      setResetDialogOpen(false);
       setResetComplete(true);
       window.setTimeout(() => setResetComplete(false), 2400);
-    } catch {
-      // The hook reports the failure through the shared error alert.
+    } catch (cause) {
+      setResetError(friendlyError(cause));
     }
   }
 
@@ -162,6 +179,41 @@ export function SettingsPage({
       cookiesTriggerRef.current?.focus();
     }
   }, [cookiesDialogOpen]);
+
+  useEffect(() => {
+    if (!resetDialogOpen) return;
+    resetDialogWasOpen.current = true;
+    resetCancelRef.current?.focus();
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !resettingData) {
+        setResetDialogOpen(false);
+        return;
+      }
+      if (event.key !== "Tab" || !resetDialogRef.current) return;
+      const focusable = [...resetDialogRef.current.querySelectorAll<HTMLElement>(
+        "button, a[href], input, select, textarea, [tabindex]:not([tabindex='-1'])",
+      )].filter((element) => !element.hasAttribute("disabled"));
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [resetDialogOpen, resettingData]);
+
+  useEffect(() => {
+    if (!resetDialogOpen && resetDialogWasOpen.current) {
+      resetDialogWasOpen.current = false;
+      resetTriggerRef.current?.focus();
+    }
+  }, [resetDialogOpen]);
 
   return (
     <div className="settings-grid">
@@ -344,6 +396,118 @@ export function SettingsPage({
                 >
                   <FileKey size={15} />
                   {t("settings.cookiesGuideContinue")}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {resetDialogOpen && (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !resettingData) setResetDialogOpen(false);
+          }}
+        >
+          <div
+            className="data-reset-modal"
+            ref={resetDialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="data-reset-title"
+            aria-describedby={resetError ? "data-reset-description data-reset-error" : "data-reset-description"}
+          >
+            <div className="data-reset-icon" aria-hidden="true">
+              <AlertTriangle size={22} />
+            </div>
+            <div className="data-reset-content">
+              <span className="eyebrow">{t("settings.dataEyebrow")}</span>
+              <h3 id="data-reset-title">{t("settings.resetDataDialogTitle")}</h3>
+              <p id="data-reset-description">{t("settings.resetDataDialogIntro")}</p>
+
+              <div className="data-reset-section">
+                <strong className="data-reset-section-title">{t("settings.resetDataWillDelete")}</strong>
+                <div className="data-reset-list">
+                  <ResetDataItem
+                    icon={<Database size={16} />}
+                    title={t("settings.resetDataHistory")}
+                    detail={t("settings.resetDataHistoryDetail", { count: historyTotalCount })}
+                  />
+                  <ResetDataItem
+                    icon={<HardDrive size={16} />}
+                    title={t("settings.resetDataModels")}
+                    detail={
+                      installedModels.length > 0
+                        ? installedModels.map((model) => getModelCopy(model, t).label).join(", ")
+                        : t("settings.resetDataNoneInstalled")
+                    }
+                  />
+                  <ResetDataItem
+                    icon={<HardDrive size={16} />}
+                    title={t("settings.resetDataRuntimes")}
+                    detail={
+                      system
+                        ? installedRuntimes.length > 0
+                          ? installedRuntimes.join(", ")
+                          : t("settings.resetDataNoneInstalled")
+                        : t("settings.resetDataStatusUnknown")
+                    }
+                  />
+                  <ResetDataItem
+                    icon={<KeyRound size={16} />}
+                    title={t("settings.resetDataAccess")}
+                    detail={
+                      hasSavedAccessPreference
+                        ? t("settings.resetDataAccessDetail")
+                        : t("settings.resetDataAccessNone")
+                    }
+                  />
+                </div>
+              </div>
+
+              <div className="data-reset-keep">
+                <div className="data-reset-keep-heading">
+                  <Languages size={15} />
+                  <strong>{t("settings.resetDataWillKeep")}</strong>
+                </div>
+                <p>{t("settings.resetDataKeepDetail")}</p>
+              </div>
+
+              <div className="data-reset-warning">
+                <AlertTriangle size={15} />
+                <span>{t("settings.resetDataWarning")}</span>
+              </div>
+
+              {resetError && (
+                <div id="data-reset-error" className="data-reset-error" role="alert">
+                  <AlertTriangle size={15} />
+                  <div>
+                    <strong>{t("error.title")}</strong>
+                    <p>{resetError}</p>
+                  </div>
+                </div>
+              )}
+
+              <div className="data-reset-actions">
+                <button
+                  ref={resetCancelRef}
+                  type="button"
+                  className="secondary-button"
+                  onClick={() => setResetDialogOpen(false)}
+                  disabled={resettingData}
+                >
+                  {t("settings.resetDataCancel")}
+                </button>
+                <button
+                  type="button"
+                  className="danger-button"
+                  onClick={() => void handleResetUserData()}
+                  disabled={busy || resettingData}
+                >
+                  {resettingData ? <LoaderCircle className="spin" size={16} /> : <Trash2 size={16} />}
+                  {resettingData ? t("settings.resetDataWorking") : t("settings.resetDataConfirmButton")}
                 </button>
               </div>
             </div>
@@ -588,7 +752,12 @@ export function SettingsPage({
         <button
           type="button"
           className="danger-button full"
-          onClick={() => void handleResetUserData()}
+          ref={resetTriggerRef}
+          onClick={() => {
+            setResetComplete(false);
+            setResetError(null);
+            setResetDialogOpen(true);
+          }}
           disabled={busy || resettingData}
         >
           {resettingData ? <LoaderCircle className="spin" size={16} /> : <Trash2 size={16} />}
@@ -596,6 +765,18 @@ export function SettingsPage({
         </button>
         {resetComplete && <p className="settings-success">{t("settings.resetDataComplete")}</p>}
       </section>
+    </div>
+  );
+}
+
+function ResetDataItem({ icon, title, detail }: { icon: ReactNode; title: string; detail: string }) {
+  return (
+    <div className="data-reset-item">
+      <span className="data-reset-item-icon" aria-hidden="true">{icon}</span>
+      <span className="data-reset-item-copy">
+        <strong>{title}</strong>
+        <span>{detail}</span>
+      </span>
     </div>
   );
 }

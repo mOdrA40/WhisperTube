@@ -129,6 +129,7 @@ export default function App() {
           modelDownloadBlockReasons={app.modelDownloadBlockReasons}
           busy={app.operationActive}
           resettingData={app.resettingData}
+          historyTotalCount={app.historyTotalCount}
           downloadingModel={app.downloadingModel}
           accelerators={app.system?.accelerators ?? []}
           installingCuda={app.installingCuda}

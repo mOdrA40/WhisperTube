@@ -1,248 +1,267 @@
-# WhisperTube architecture
+# WhisperTube Architecture
 
-## Trust boundary
+## Product boundary
 
-The React WebView never receives arbitrary shell access. It can only call the Rust commands explicitly registered by Tauri.
+WhisperTube is a local-first Tauri desktop application. The React WebView
+does not receive arbitrary shell access. It can invoke only the Rust commands
+explicitly registered by Tauri.
 
-```text
-React UI
-  │ typed invoke/event payloads
-  ▼
-Tauri IPC
-  ▼
-Rust orchestration
-  ├─ validates supported video URL and local cookies file
-  ├─ owns process lifecycle / cancellation
-  ├─ owns model paths and checksum validation
-  ├─ owns SQLite history
-  └─ owns export file copying
-       │
-       ├─ yt-dlp
-       ├─ FFmpeg
-       └─ whisper.cpp CPU/CUDA
-```
+    React UI
+      │ typed invoke/event payloads
+      ▼
+    Tauri IPC
+      ▼
+    Rust orchestration
+      ├─ validates supported video URLs and local cookie paths
+      ├─ owns child-process lifecycle and cancellation
+      ├─ owns model paths and checksum verification
+      ├─ owns SQLite history
+      └─ owns transcript export copying
+           │
+           ├─ yt-dlp
+           ├─ FFmpeg
+           └─ whisper.cpp CPU/CUDA/Metal/Vulkan engines
+
+Audio and transcript processing remain on the user's device. Network access is
+used for source inspection, media downloads, model downloads, accelerator
+downloads, and updater checks.
 
 ## Source layout
 
-Frontend mengikuti alur satu arah: `App.tsx` menyusun halaman, `useWhisperTube`
-memegang state dan side effect, `services/tauri.ts` menjadi adapter IPC,
-`i18n.tsx` menyediakan English/Indonesia/Mandarin, dan komponen di
-`components/` hanya menangani tampilan serta callback pengguna.
+The frontend follows a one-way state flow:
 
-Backend memakai boundary serupa: `commands.rs` hanya adapter command Tauri,
-`types.rs` menyimpan DTO IPC, `state.rs` menyimpan state job runtime,
-`paths.rs` menangani lokasi storage/runtime, `browsers.rs` menangani kompatibilitas argumen cookie
-tanpa membaca cookies saat discovery, memilih file-cookie args, dan menyediakan sesi Safari langsung di macOS, sedangkan `models.rs`, `sources.rs`,
-`transcription.rs`, dan `history.rs` menangani domain masing-masing. `lib.rs`
-hanya melakukan bootstrap aplikasi dan registrasi command.
+- App.tsx assembles the application shell and pages;
+- useWhisperTube owns state, side effects, operation coordination, and event
+  subscriptions;
+- services/tauri.ts is the typed IPC adapter;
+- i18n.tsx provides English, Indonesian, and Simplified Chinese strings;
+- components/ owns presentation and user callbacks.
 
-## Transcription state machine
+The Rust backend uses similar boundaries:
 
-```text
-READY
-  ↓
-METADATA
-  ↓
-DOWNLOADING
-  ↓
-CONVERTING
-  ↓
-TRANSCRIBING
-  ↓
-FINALIZING
-  ↓
-DONE
-```
+- commands.rs contains Tauri command adapters;
+- types.rs contains IPC DTOs and transcript limits;
+- state.rs contains runtime operation state, cancellation flags, and guards;
+- paths.rs resolves application-data, resource, model, job, and runtime paths;
+- browsers.rs discovers browser metadata and profiles without reading cookie
+  contents during discovery;
+- models.rs manages model and optional CUDA downloads;
+- sources.rs validates source URLs and performs metadata inspection;
+- process.rs provides platform-specific child-process setup and termination;
+- resources.rs performs memory, disk, and per-mount allocation checks;
+- transcription.rs owns the media-to-transcript pipeline;
+- history.rs owns SQLite history, result files, and exports;
+- accelerators.rs downloads and activates Metal/Vulkan packs;
+- system.rs detects hardware and collects telemetry;
+- user_data.rs implements the application-data reset;
+- lib.rs bootstraps Tauri and registers the commands.
 
-Any external stage can terminate in `FAILED` or `CANCELLED`.
+## Transcription pipeline
 
-The backend uses one exclusive `OperationGuard` for destructive and long-running
-operations. A transcription reserves `Transcribing` before spawning the blocking
-pipeline; model/runtime downloads, model deletion, history access, app updates,
-and data reset use their corresponding operation state as well. The guard
-releases its reservation on every return path, so a process PID is only used for
-process termination, not as the job's sole concurrency lock.
+Metadata inspection is a bounded operation that runs before a transcription.
+The transcription state machine is:
 
-`job-progress` carries stage progress, transferred bytes, network speed, and
-best-effort CPU/GPU utilization samples. GPU utilization is shown when the
-platform exposes a supported metric; unavailable metrics are reported as such
-instead of being guessed.
+    READY
+      ↓
+    DOWNLOADING
+      ↓
+    CONVERTING
+      ↓
+    TRANSCRIBING
+      ↓
+    FINALIZING
+      ↓
+    DONE
 
-## Storage
+An external stage can terminate in FAILED or CANCELLED.
 
-App-local-data:
+The pipeline downloads bestaudio/best through yt-dlp, converts it with FFmpeg
+to signed 16-bit PCM WAV, mono, 16 kHz, and passes the WAV to the selected
+whisper.cpp engine. Results contain timestamped segments and are written as
+JSON, TXT, SRT, VTT, and a SQLite history row.
 
-```text
-models/
-  ggml-base.bin
-  ggml-large-v3-turbo-q5_0.bin
-  ggml-large-v3-q5_0.bin
-jobs/
-  <uuid>/
-    audio.wav             # only when Keep processed audio is enabled
-    transcript.json
-    transcript.txt
-    transcript.srt
-    transcript.vtt
-    result.json
-whispertube.db
-```
+The current full-buffer path accepts on-demand media with a known duration of
+at most two hours and a source download limit of 4 GiB. Chunked transcription
+is not implemented. The converted WAV size is checked again before inference,
+and transcript text, segment count, serialized result size, and output files
+have hard limits.
 
-Downloaded source audio and converted WAV are removed by default after a successful job.
-The Settings reset action is intentionally scoped to WhisperTube-owned app-local data:
-`models/`, `jobs/`, `runtime/`, and `whispertube.db`, plus the saved cookies/browser
-preferences in the React local storage. It does not delete the WebView profile/cache,
-the interface-language preference, external `cookies.txt` files, or exports saved
-outside WhisperTube storage.
-History creation writes `result.json` atomically inside the same logical operation
-as the SQLite insert, and the transaction commits only after the result file is
-ready. History deletion first moves job directories to a same-filesystem staging
-name, commits the SQLite deletion, then removes the staged folders; failed
-database operations attempt to restore the original directories.
+## Operation coordination
 
-Each new job has an `.in-progress` marker. A failed or cancelled pipeline guard
-removes its folder, while startup removes stale orphan/staging folders after a
-24-hour grace period without touching rows that still reference a valid result.
-When `Keep processed audio` is enabled, the processed WAV path is returned and
-the UI can reveal it in the system file manager.
+AppState exposes one exclusive OperationGuard for destructive and long-running
+operations. The guard covers:
 
-## Runtime packs
+- metadata inspection;
+- transcription;
+- model download and deletion;
+- runtime installation;
+- history reads, deletion, export, and audio reveal;
+- application update;
+- application-data reset.
 
-Development runtime binaries live under `src-tauri/runtime/<platform>` so Tauri can bundle them as resources.
-The Windows bootstrap pins yt-dlp 2026.08.19, FFmpeg 9.0.1, and the
-whisper.cpp v1.9.1 CPU asset by checksum. Unix source builds and accelerator
-packs pin whisper.cpp v1.9.1 to commit
-`f049fff95a089aa9969deb009cdd4892b3e74916`; archives are downloaded to unique temporary staging paths, checksum
-verified, self-tested, and activated only after validation succeeds.
+A transcription reserves the Transcribing state before spawning the blocking
+pipeline. Each other operation reserves its own state. The guard releases its
+reservation on every return path, so an active child-process PID is used for
+termination, not as the sole concurrency lock.
 
-Windows:
+The cancellation path sets the relevant cancellation flag and terminates the
+active process tree where supported. Child processes are also cleaned up during
+application shutdown.
 
-```text
-runtime/windows/
-  yt-dlp.exe
-  ffmpeg.exe
-  cpu/
-    whisper-cli.exe
-    ggml*.dll
-  cuda/                  # optional
-    whisper-cli.exe
-    ggml*.dll
-    CUDA runtime DLLs...
-```
+job-progress events carry the current stage, progress percentage, transferred
+bytes, network speed, and best-effort CPU/GPU utilization. Unavailable metrics
+are reported as unavailable instead of being guessed.
 
-The packaged application can download the optional CUDA pack from the UI. It
-stores the verified runtime under user app-local-data and prefers that path
-before the bundled runtime, so it does not need write access beside the EXE.
-The download is pinned to an upstream whisper.cpp release, checked with
-SHA-256, extracted with path traversal protection, and self-tested before
-activation. If a model is already installed, accelerator installation also runs a
-short silent-audio capability probe before activation; without a model, the full
-probe remains deferred to the first transcription. The request has a 30-second connection/response timeout, a
-30-second timeout per data chunk, and a cancellation token checked between
-download chunks.
+Metadata inspection has a bounded 45-second process timeout and bounded output
+retention. Download and inference paths use inactivity watchdogs; CPU
+inference receives a longer allowance than downloads, conversion, and
+accelerated inference.
 
-The system status query reads NVIDIA name, total VRAM, and free VRAM through
-`nvidia-smi`, selecting the device with the most free memory when multiple
-NVIDIA GPUs are present. Installed CUDA devices and Vulkan devices reported by
-the selected Vulkan engine are exposed as explicit compute targets, and the
-selected device index is passed to whisper.cpp for both CUDA and Vulkan
-inference. It uses platform-specific graphics detection for other GPU vendors.
-Model entries expose conservative CUDA guardrails: Fast requires
-about 2 GB, Balanced 4 GB, and Accurate 7 GB of free VRAM. These are
-preflight safety thresholds; actual available memory can change when other
-GPU applications are running. CUDA is offered only on supported Windows x64
-NVIDIA builds. Metal/Vulkan catalog entries are filtered by target platform,
-architecture, and detected GPU before they reach the UI or installer. Vulkan is
-also monitored during Whisper execution: the usage monitor samples system
-available memory and the child process RSS, aborting the job if available RAM
-drops below the conservative post-start floor.
-kept as an explicit alternative even when CUDA is available, so NVIDIA users
-can compare backends or use Vulkan when needed.
+## Storage model
 
-Windows CPU telemetry uses the native `GetSystemTimes` API. GPU telemetry is
-sampled every five seconds and follows the resolved compute target: CUDA uses
-the selected NVIDIA index, while Vulkan uses OS graphics counters as a
-best-effort/aggregate signal rather than incorrectly querying an idle NVIDIA
-device. External child processes use hidden-console creation flags on Windows.
+WhisperTube-owned application data is stored under the platform-specific
+Tauri application-local-data directory:
 
-Auto Vulkan selection runs a bounded capability probe using the selected
-whisper.cpp engine, the installed model, and a generated one-second silent WAV.
-Only successful results are cached for the engine/model file signatures during
-the app session; cancellation and timeout failures are retried. A failed probe
-causes Auto to fall back to CPU when the CPU engine is available; explicitly
-selected Vulkan fails closed with the diagnostic error.
-Vulkan child processes disable the optional cooperative-matrix shader path and
-flash attention for cross-vendor stability, because some AMD Windows drivers
-can expose those capabilities but fail during Whisper inference.
-The full-buffer transcription path is limited to two hours and rechecks the
-actual converted WAV size before loading inference buffers. Its initial disk
-reservation covers the maximum source download, generated WAV, and a safety
-buffer; periodic checks count only bytes that still need to be written so
-existing partial files are not double-counted. Output files and stored result
-JSON also have hard byte, segment-count, and transcript-text limits.
+    models/
+      ggml-base.bin
+      ggml-large-v3-turbo-q5_0.bin
+      ggml-large-v3-q5_0.bin
+    jobs/
+      <uuid>/
+        audio.wav
+        transcript.json
+        transcript.txt
+        transcript.srt
+        transcript.vtt
+        result.json
+    runtime/
+    whispertube.db
 
-Metadata inspection, transcription, model download/delete, runtime
-installation, and app update share one atomic operation reservation in
-`AppState`, so separate IPC calls cannot pass independent preflight checks and
-overlap during the mutation window. Metadata and transcription child processes
-are registered for cancellation and shutdown cleanup. Pipeline subprocesses
-also use inactivity watchdogs; CPU inference receives a longer allowance than
-download, conversion, and accelerated inference.
+audio.wav is retained only when Keep processed audio is enabled. Source audio
+and converted WAV files are removed after processing by default.
 
-Installed models are checksum-verified before use. A successful verification
-is cached only for the current file size and modification timestamp, avoiding a
-full model hash on every subsequent job while invalidating the cache when the
-file changes. CPU inference can use up to 16 logical threads; accelerated
-backends remain capped at 12 to keep host work responsive.
+Each job receives an .in-progress marker. A failed or cancelled pipeline
+cleans up its job directory. At startup, orphaned or staging directories older
+than the 24-hour grace period are removed unless a valid result file still
+belongs to a history row.
 
-The repository also contains `.github/workflows/build-accelerator-packs.yml`.
-It builds Metal packs for macOS Intel/Apple Silicon and Vulkan packs for Linux
-and Windows x64 from a pinned official whisper.cpp tag, then publishes ZIP
-assets and SHA-256 sidecars on an `accelerators-v*` GitHub Release. The source
-repository may remain private during development; those release assets must be
-public before a shipped EXE can download them without a GitHub credential. A
-pack remains non-downloadable until its final SHA-256 is copied into the
-application catalog and a new application build is produced; the release
-sidecar and GitHub digest are only secondary consistency checks.
-ROCm and OpenVINO remain separate targets because they require specialized
-toolchains or hardware runners.
+History creation writes result.json atomically and commits the SQLite row only
+after the result file is ready. History deletion first renames job directories
+to same-filesystem staging names, commits the database deletion, and then
+removes the staged directories. If the database operation fails, the code
+attempts to restore the original directories.
 
-The hash synchronization helper is `scripts/sync-accelerator-hashes.ps1`. It
-first reads the four public release assets without changing source; its
-`-Apply` mode writes the checked hashes into the target-specific catalog
-constants. A release build must be produced after that change, and the
-published assets must remain immutable for the lifetime of that application
-build.
+The Settings reset operation is intentionally limited to WhisperTube-owned
+application data: models, jobs, runtime, and whispertube.db. The frontend also
+clears its saved cookie-path and browser-session preference from local storage.
+It does not delete the WebView profile/cache, interface-language preference,
+external cookies.txt files, or exports saved outside WhisperTube storage.
 
-Native application bundles use `scripts/setup-macos.sh` plus
-`scripts/build-macos.sh` on macOS and `scripts/setup-linux.sh` plus
-`scripts/build-linux.sh` on Linux. The corresponding
-`.github/workflows/build-application-bundles.yml` runs those scripts plus the
-Windows bootstrap/build scripts on native GitHub-hosted runners and publishes
-the NSIS, DMG, Debian, and AppImage installers directly for tagged `v*`
-application releases. Each installer has a SHA-256 sidecar. These bundles are
-unsigned on Windows/Linux in v0.1. macOS uses an ad-hoc signature but is not
-Apple-notarized; official signing and broad Linux distribution QA remain
-release work.
-Both application and accelerator release workflows invoke the reusable `ci.yml`
-quality gate before their native build jobs. A tag release therefore cannot reach
-the publish job when frontend, Rust, dependency-audit, secret-scan, or parser
-checks fail.
-The bootstrap builds FFmpeg 9.0.1 from a pinned official source archive with
-`--disable-shared` and no network support, rather than copying a host package
-manager binary. Linux additionally requests static linking. This removes the
-Homebrew/distro FFmpeg library dependency, although clean-machine and license
-QA are still required.
+## Runtime layout and verification
 
-## Next production milestones
+Development runtime binaries live under src-tauri/runtime/<platform> so Tauri
+can bundle them as resources. In packaged builds, the bundled runtime is
+resolved from the application resource directory. An installed user runtime
+under application-local-data takes precedence over the bundled engine.
 
-1. Sign runtime/model manifests and release assets.
-2. Add ROCm/OpenVINO packs with dedicated compatible runners.
-3. Persist job queue and crash recovery.
-4. Add playlist/batch processing.
-5. Add local file drag-and-drop.
+Windows bootstrap:
+
+- yt-dlp 2026.08.19;
+- FFmpeg 9.0.1 from the pinned Gyan.dev essentials archive;
+- whisper.cpp v1.9.1 CPU binaries from the pinned upstream release;
+- optional CUDA runtime installed on demand.
+
+macOS bootstrap builds pinned FFmpeg and both CPU and Apple Metal whisper.cpp
+engines. Linux bootstrap builds pinned static FFmpeg and a CPU whisper.cpp
+engine. The Unix scripts pin whisper.cpp v1.9.1 to commit
+f049fff95a089aa9969deb009cdd4892b3e74916.
+
+Downloaded model files are SHA-256 verified before use. The verification cache
+is valid only for the current file size and modification timestamp and is
+cleared by a data reset.
+
+Archives are downloaded to unique temporary staging paths, checked for size
+and checksum limits, extracted with path-traversal protection, self-tested,
+and activated only after validation succeeds.
+
+## Hardware and backend selection
+
+The application distinguishes execution backends from models:
+
+- CPU is the baseline fallback;
+- CUDA is supported on Windows x64 with a detected NVIDIA GPU and an installed
+  CUDA engine;
+- Metal is supported on macOS with the matching Metal runtime;
+- Vulkan is supported on Windows/Linux x64 with a matching Vulkan runtime.
+
+NVIDIA device discovery uses nvidia-smi and preserves the selected device
+index. Vulkan devices are enumerated by the selected whisper.cpp engine. The
+compute selector exposes explicit targets such as cuda:<index> and
+vulkan:<index> when available.
+
+CUDA model guardrails use free NVIDIA VRAM as a conservative preflight:
+approximately 2 GiB for Fast, 4 GiB for Balanced, and 7 GiB for Accurate.
+These thresholds are not a universal guarantee because other GPU processes
+can consume memory.
+
+GPU telemetry follows the resolved target. CUDA uses the selected NVIDIA
+device index. Vulkan uses best-effort operating-system graphics counters
+instead of incorrectly querying an unrelated NVIDIA device. The Vulkan
+execution monitor also checks available system memory and child-process RSS.
+
+Auto Vulkan selection runs a bounded capability probe with the installed
+engine, model, and a generated one-second silent WAV. Only successful probes
+are cached for the engine/model file signatures during the application
+session. Cancellation and timeout failures are retried. If Auto Vulkan fails
+and the CPU engine is available, the application falls back to CPU. An
+explicitly selected Vulkan target fails closed with a diagnostic error.
+
+For cross-vendor stability, Vulkan child processes disable the optional
+cooperative-matrix shader path and flash attention. This avoids known driver
+paths that can be exposed by some AMD devices but fail during inference.
+
+## Browser and cookie handling
+
+Browser discovery reads bounded local profile metadata and exposes supported
+browser families and profiles. It does not read cookie contents during
+discovery.
+
+The user can provide a Netscape-format cookies.txt file. On macOS, the
+application can also pass a detected Safari session to yt-dlp. Browser
+encryption, OS permissions, extractor changes, and platform anti-bot behavior
+can still prevent protected downloads.
+
+## Release workflows
+
+The repository has two separate release paths:
+
+1. build-application-bundles.yml builds Windows NSIS, macOS DMG, Linux Debian,
+   and Linux AppImage installers for v* application tags. It also generates
+   updater artifacts, SHA-256 sidecars, and latest.json for a tagged release.
+2. build-accelerator-packs.yml builds macOS Metal and Windows/Linux Vulkan
+   packs from pinned whisper.cpp source and publishes ZIP files with SHA-256
+   sidecars for accelerators-v* tags.
+
+Both release workflows call the reusable CI quality gate before native build
+jobs. Accelerator assets must be public before a shipped application can
+download them without a GitHub credential.
+
+The accelerator hash helper reads the four public release assets without
+changing source by default. Its Apply mode writes verified hashes into the
+application catalog. The application must be rebuilt after that change, and
+published accelerator assets must remain immutable for the lifetime of the
+application build that references them.
+
+## Known production work
+
+1. Sign runtime and model manifests and release assets where appropriate.
+2. Add dedicated ROCm and OpenVINO packs with compatible build runners.
+3. Persist the job queue and crash recovery state.
+4. Add playlist and batch processing.
+5. Add local-file drag and drop.
 6. Add VAD model management and VAD-specific controls.
-7. Add optional diarization.
-8. Add timestamp seek with embedded audio player.
-9. Sign Windows/macOS builds and notarize macOS.
-10. Replace development runtime bundling with per-platform release manifests so installers do not contain unnecessary engines.
+7. Add optional speaker diarization.
+8. Add timestamp seeking with an embedded audio player.
+9. Configure Windows/macOS signing and macOS notarization.
+10. Replace development runtime bundling with per-platform release manifests
+    so installers do not contain unnecessary engines.

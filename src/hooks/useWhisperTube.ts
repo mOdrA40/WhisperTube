@@ -24,7 +24,7 @@ import {
   subscribeToCudaDownload,
   subscribeToProgress,
 } from "../services/tauri";
-import { friendlyError, isOperationConflict } from "../lib/format";
+import { friendlyError } from "../lib/format";
 import { getAcceleratorCopy, getModelCopy, useI18n } from "../i18n";
 import type {
   AppUpdateInfo,
@@ -123,6 +123,7 @@ export function useWhisperTube() {
   const [progress, setProgress] = useState<ProgressPayload>(initialProgress);
   const [busy, setBusy] = useState(false);
   const [inspecting, setInspecting] = useState(false);
+  const [cancellingInspection, setCancellingInspection] = useState(false);
   const [resettingData, setResettingData] = useState(false);
   const [historyOperation, setHistoryOperation] = useState<"reading" | "deleting" | "exporting" | "revealing" | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -147,25 +148,63 @@ export function useWhisperTube() {
   const runtimeReady = Boolean(system?.ytDlp && system?.ffmpeg && system?.cpuEngine);
 
   const refreshSystem = useCallback(async () => {
-    const [nextSystem, nextModels, nextHistory, nextBrowsers] = await Promise.all([
+    const [systemResult, modelsResult, historyResult, browsersResult] = await Promise.allSettled([
       getSystemStatus(),
       listModels(),
       listHistory(),
       listBrowsers(),
     ]);
-    setSystem(nextSystem);
-    setBrowsers(nextBrowsers);
-    if (!autoConfigured.current) {
-      setModelId(nextSystem.recommendedModelId);
-      setBackend(nextSystem.recommendedBackend);
-      setComputeTargetId("auto");
-      autoConfigured.current = true;
+
+    if (systemResult.status === "fulfilled") {
+      const nextSystem = systemResult.value;
+      setSystem(nextSystem);
+      if (!autoConfigured.current) {
+        setModelId(nextSystem.recommendedModelId);
+        setBackend(nextSystem.recommendedBackend);
+        setComputeTargetId("auto");
+        autoConfigured.current = true;
+      }
     }
-    setModels(nextModels);
-    setHistory(nextHistory.items);
-    setHistoryHasMore(nextHistory.hasMore);
-    setHistoryTotalCount(nextHistory.totalCount);
+    if (modelsResult.status === "fulfilled") setModels(modelsResult.value);
+    if (browsersResult.status === "fulfilled") setBrowsers(browsersResult.value);
+    if (historyResult.status === "fulfilled") {
+      setHistory(historyResult.value.items);
+      setHistoryHasMore(historyResult.value.hasMore);
+      setHistoryTotalCount(historyResult.value.totalCount);
+    }
+
+    const failures = [systemResult, modelsResult, historyResult, browsersResult]
+      .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+      .map((result) => friendlyError(result.reason));
+    if (failures.length > 0) throw new Error(failures.join(" "));
   }, []);
+
+  const refreshAfterSuccessfulOperation = useCallback(async () => {
+    try {
+      await refreshSystem();
+    } catch (cause) {
+      setError(t("error.operationSucceededRefreshFailed", { detail: friendlyError(cause) }));
+    }
+  }, [refreshSystem, t]);
+
+  const refreshHistoryAfterMutationFailure = useCallback(async () => {
+    try {
+      const page = await listHistory();
+      setHistory(page.items);
+      setHistoryHasMore(page.hasMore);
+      setHistoryTotalCount(page.totalCount);
+    } catch {
+      // Preserve the mutation error: a failed reconciliation must not hide its cause.
+    }
+  }, []);
+
+  const refreshAfterMutationFailure = useCallback(async () => {
+    try {
+      await refreshSystem();
+    } catch {
+      // Preserve the mutation error: refreshSystem already applied every fulfilled result.
+    }
+  }, [refreshSystem]);
 
   useEffect(() => {
     if (browser === "safari" && browsers.length > 0 && !browsers.some((item) => item.id === "safari")) {
@@ -408,6 +447,7 @@ export function useWhisperTube() {
       return;
     }
     setInspecting(true);
+    setCancellingInspection(false);
     setError(null);
     setResult(null);
     try {
@@ -416,6 +456,7 @@ export function useWhisperTube() {
       setMetadata(null);
       const message = friendlyError(cause);
       const normalizedMessage = message.toLowerCase();
+      if (normalizedMessage.includes("dibatalkan")) return;
       setError(
         normalizedMessage.startsWith("media_tiktok_transient:")
           ? t("error.tiktokMetadataRetry")
@@ -451,6 +492,7 @@ export function useWhisperTube() {
       );
     } finally {
       setInspecting(false);
+      setCancellingInspection(false);
     }
   }
 
@@ -463,7 +505,7 @@ export function useWhisperTube() {
     }));
     try {
       await downloadModel(id, computeTargetId);
-      await refreshSystem();
+      await refreshAfterSuccessfulOperation();
     } catch (cause) {
       const message = friendlyError(cause);
       if (!message.toLowerCase().includes("dibatalkan")) setError(message);
@@ -483,7 +525,7 @@ export function useWhisperTube() {
     try {
       await deleteModel(id);
       if (modelId === id) setModelId("base");
-      await refreshSystem();
+      await refreshAfterSuccessfulOperation();
     } catch (cause) {
       setError(friendlyError(cause));
     }
@@ -493,20 +535,8 @@ export function useWhisperTube() {
     if (operationActive) return;
     setError(null);
     setResettingData(true);
-    let failure: unknown = null;
     try {
       await resetUserDataRequest();
-    } catch (cause) {
-      if (isOperationConflict(cause)) {
-        setError(friendlyError(cause));
-        setResettingData(false);
-        throw cause;
-      }
-      failure = cause;
-      setError(friendlyError(cause));
-    }
-
-    try {
       try {
         window.localStorage.removeItem(COOKIES_PATH_STORAGE_KEY);
         window.localStorage.removeItem(ACCESS_BROWSER_STORAGE_KEY);
@@ -519,20 +549,14 @@ export function useWhisperTube() {
       setResult(null);
       setSearchQuery("");
     } catch (cause) {
-      if (!failure) failure = cause;
-      setError(friendlyError(cause));
-    }
-
-    try {
-      await refreshSystem();
-    } catch (cause) {
-      if (!failure) failure = cause;
-      setError(friendlyError(cause));
+      const message = friendlyError(cause);
+      await refreshAfterMutationFailure();
+      setError(message);
+      throw cause;
     } finally {
       setResettingData(false);
     }
-
-    if (failure) throw failure;
+    await refreshAfterSuccessfulOperation();
   }
 
   async function handleInstallCuda() {
@@ -551,7 +575,7 @@ export function useWhisperTube() {
     setNetworkSpeedBytesPerSecond(null);
     try {
       await installCudaEngine();
-      await refreshSystem();
+      await refreshAfterSuccessfulOperation();
     } catch (cause) {
       const message = friendlyError(cause);
       if (!message.toLowerCase().includes("dibatalkan")) setError(message);
@@ -573,7 +597,7 @@ export function useWhisperTube() {
     setNetworkSpeedBytesPerSecond(null);
     try {
       await installAccelerator(backendToInstall);
-      await refreshSystem();
+      await refreshAfterSuccessfulOperation();
     } catch (cause) {
       const message = friendlyError(cause);
       if (!message.toLowerCase().includes("dibatalkan")) setError(message);
@@ -626,7 +650,7 @@ export function useWhisperTube() {
       gpuUsagePercent: null,
     });
     try {
-      setResult(await startTranscription({
+      const completedResult = await startTranscription({
         url: metadata.webpageUrl,
         title: metadata.title,
         channel: metadata.channel,
@@ -639,9 +663,10 @@ export function useWhisperTube() {
         language,
         modelId,
         keepAudio,
-      }));
+      });
+      setResult(completedResult);
       setSearchQuery("");
-      await refreshSystem();
+      await refreshAfterSuccessfulOperation();
     } catch (cause) {
       const message = friendlyError(cause);
       const normalizedMessage = message.toLowerCase();
@@ -680,6 +705,17 @@ export function useWhisperTube() {
     }
   }
 
+  async function handleCancelInspection() {
+    if (!inspecting || cancellingInspection) return;
+    setCancellingInspection(true);
+    try {
+      await cancelJobRequest();
+    } catch (cause) {
+      setCancellingInspection(false);
+      setError(friendlyError(cause));
+    }
+  }
+
   async function handleDeleteHistory(ids: number[]) {
     if (operationActive || ids.length === 0) return;
     setHistoryOperation("deleting");
@@ -691,10 +727,11 @@ export function useWhisperTube() {
         setSearchQuery("");
         setCopied(false);
       }
-      await refreshSystem();
+      await refreshAfterSuccessfulOperation();
     } catch (cause) {
-      setError(friendlyError(cause));
-      await refreshSystem().catch((refreshCause) => setError(friendlyError(refreshCause)));
+      const message = friendlyError(cause);
+      await refreshHistoryAfterMutationFailure();
+      setError(message);
       throw cause;
     } finally {
       setHistoryOperation(null);
@@ -794,6 +831,7 @@ export function useWhisperTube() {
     resettingData,
     historyOperation,
     inspecting,
+    cancellingInspection,
     error,
     setError,
     downloadingModel,
@@ -811,6 +849,7 @@ export function useWhisperTube() {
     acceleratorWarning,
     refreshSystem,
     inspectVideo,
+    cancelInspection: handleCancelInspection,
     downloadModel: handleDownloadModel,
     removeModel: handleRemoveModel,
     resetUserData: handleResetUserData,

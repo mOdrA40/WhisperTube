@@ -76,6 +76,7 @@ export function TranscriptCard({
           value={searchQuery}
           onChange={(event) => onSearchChange(event.target.value)}
           placeholder={t("transcript.search")}
+          aria-label={t("transcript.search")}
         />
         <span>{filteredSegments.length} {t("transcript.segments")}</span>
       </div>

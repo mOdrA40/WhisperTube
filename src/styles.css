@@ -618,7 +618,7 @@ input.url-text-input:focus-visible {
   gap: 12px;
   align-items: center;
   margin-top: 14px;
-  color: #637189;
+  color: #8092ad;
   font-size: 11.5px;
 }
 
@@ -1343,7 +1343,7 @@ input:focus-visible,
 
 .transcript-search span {
   font-family: "JetBrains Mono", monospace;
-  color: #637189;
+  color: #8092ad;
   font-size: 10px;
 }
 

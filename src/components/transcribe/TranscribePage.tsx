@@ -20,6 +20,7 @@ type TranscribePageProps = {
   busy: boolean;
   operationActive: boolean;
   inspecting: boolean;
+  cancellingInspection: boolean;
   metadata: VideoMetadata | null;
   hasResult: boolean;
   progress: ProgressPayload;
@@ -51,7 +52,8 @@ type TranscribePageProps = {
   onUrlChange: (url: string) => void;
   onInspect: () => void;
   onClear: () => void;
-  onCancel: () => void;
+  onCancelInspection: () => void;
+  onCancelTranscription: () => void;
   onModelChange: (id: string) => void;
   onComputeTargetChange: (targetId: string) => void;
   onLanguageChange: (language: string) => void;
@@ -74,6 +76,7 @@ export function TranscribePage({
   busy,
   operationActive,
   inspecting,
+  cancellingInspection,
   metadata,
   hasResult,
   progress,
@@ -105,7 +108,8 @@ export function TranscribePage({
   onUrlChange,
   onInspect,
   onClear,
-  onCancel,
+  onCancelInspection,
+  onCancelTranscription,
   onModelChange,
   onComputeTargetChange,
   onLanguageChange,
@@ -129,14 +133,16 @@ export function TranscribePage({
           url={url}
           busy={busy || operationActive}
           inspecting={inspecting}
+          cancelling={cancellingInspection}
           metadata={metadata}
           hasResult={hasResult}
           onUrlChange={onUrlChange}
           onInspect={onInspect}
+          onCancel={onCancelInspection}
           onClear={onClear}
           onOpenSettings={() => onTabChange("settings")}
         />
-        {busy && <ProgressCard progress={progress} selectedModel={selectedModel} backend={backend} networkSpeedBytesPerSecond={networkSpeedBytesPerSecond} onCancel={onCancel} />}
+        {busy && <ProgressCard progress={progress} selectedModel={selectedModel} backend={backend} networkSpeedBytesPerSecond={networkSpeedBytesPerSecond} onCancel={onCancelTranscription} />}
         {result && !busy && (
           <TranscriptCard
             result={result}

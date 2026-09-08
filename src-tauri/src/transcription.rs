@@ -19,7 +19,7 @@ use uuid::Uuid;
 use crate::{
     browsers::cookie_args,
     history, models,
-    paths::{engine_path, jobs_dir, model_path, tool_path},
+    paths::{engine_path, is_regular_file, jobs_dir, model_path, tool_path},
     process, resources,
     sources::{js_runtime_args, validate_media_duration, validate_media_url},
     state::VulkanProbeResult,
@@ -964,7 +964,7 @@ fn choose_backend(
     let gpu_detected = nvidia || detect_gpu().is_some();
     match requested {
         "cpu" => {
-            if !cpu.exists() {
+            if !is_regular_file(&cpu) {
                 Err("CPU whisper engine belum terpasang.".into())
             } else {
                 Ok(("cpu".into(), cpu, None, None))
@@ -975,7 +975,7 @@ fn choose_backend(
                 Err("CUDA hanya tersedia pada build Windows yang didukung.".into())
             } else if !nvidia {
                 Err("CUDA dipilih tetapi NVIDIA GPU/driver tidak terdeteksi.".into())
-            } else if !cuda.exists() {
+            } else if !is_regular_file(&cuda) {
                 Err("CUDA engine belum terpasang. Install CUDA acceleration dari Settings terlebih dahulu.".into())
             } else {
                 let device_index = requested_device_index(requested_device_id, "cuda")?;
@@ -991,7 +991,7 @@ fn choose_backend(
         "metal" => {
             if !cfg!(target_os = "macos") {
                 Err("Apple Metal hanya tersedia di macOS.".into())
-            } else if !metal.exists() {
+            } else if !is_regular_file(&metal) {
                 Err("Metal engine belum terpasang. Install Apple Metal dari Settings terlebih dahulu.".into())
             } else {
                 Ok(("metal".into(), metal, None, None))
@@ -1002,7 +1002,7 @@ fn choose_backend(
                 Err("Vulkan accelerator saat ini tersedia di Windows/Linux.".into())
             } else if !gpu_detected {
                 Err("Vulkan dipilih tetapi GPU tidak terdeteksi pada perangkat ini.".into())
-            } else if !vulkan.exists() {
+            } else if !is_regular_file(&vulkan) {
                 Err(
                     "Vulkan engine belum terpasang. Install Vulkan dari Settings terlebih dahulu."
                         .into(),
@@ -1020,18 +1020,21 @@ fn choose_backend(
             }
         }
         "auto" => {
-            if nvidia && cfg!(all(target_os = "windows", target_arch = "x86_64")) && cuda.exists() {
+            if nvidia
+                && cfg!(all(target_os = "windows", target_arch = "x86_64"))
+                && is_regular_file(&cuda)
+            {
                 Ok((
                     "cuda".into(),
                     cuda,
                     None,
                     nvidia_gpu.as_ref().and_then(|gpu| gpu.device_index),
                 ))
-            } else if cfg!(target_os = "macos") && metal.exists() {
+            } else if cfg!(target_os = "macos") && is_regular_file(&metal) {
                 Ok(("metal".into(), metal, None, None))
             } else if cfg!(any(target_os = "windows", target_os = "linux"))
                 && gpu_detected
-                && vulkan.exists()
+                && is_regular_file(&vulkan)
             {
                 match probe_vulkan_devices(
                     context,
@@ -1040,7 +1043,7 @@ fn choose_backend(
                     &available_vulkan_device_indices(app),
                 ) {
                     Ok(device_index) => Ok(("vulkan".into(), vulkan, None, Some(device_index))),
-                    Err(error) if cpu.exists() => Ok((
+                    Err(error) if is_regular_file(&cpu) => Ok((
                         "cpu".into(),
                         cpu,
                         Some(format!(
@@ -1054,7 +1057,7 @@ fn choose_backend(
                 }
             } else if nvidia && cfg!(all(target_os = "windows", target_arch = "x86_64")) {
                 Err("NVIDIA GPU terdeteksi tetapi CUDA engine belum terpasang. Pasang CUDA acceleration terlebih dahulu.".into())
-            } else if cpu.exists() {
+            } else if is_regular_file(&cpu) {
                 Ok(("cpu".into(), cpu, None, None))
             } else {
                 Err("Tidak ada whisper engine yang siap digunakan.".into())
@@ -1316,11 +1319,11 @@ pub fn pipeline(
     validate_media_duration(request.duration, false)?;
     let yt_dlp = tool_path(&app, "yt-dlp")?;
     let ffmpeg = tool_path(&app, "ffmpeg")?;
-    if !yt_dlp.exists() || !ffmpeg.exists() {
+    if !is_regular_file(&yt_dlp) || !is_regular_file(&ffmpeg) {
         return Err("Runtime belum lengkap. Jalankan scripts/setup-windows.ps1.".into());
     }
     let model = model_path(&app, &request.model_id)?;
-    if !model.exists() {
+    if !is_regular_file(&model) {
         return Err("Model belum diunduh. Unduh model dari UI terlebih dahulu.".into());
     }
     models::verify_model_file(&model, &request.model_id)?;

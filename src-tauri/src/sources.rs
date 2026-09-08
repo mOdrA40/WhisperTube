@@ -12,7 +12,9 @@ use tauri::AppHandle;
 use url::Url;
 
 use crate::{
-    browsers::cookie_args, paths::tool_path, transcription::MAX_MEDIA_DURATION_SECONDS,
+    browsers::cookie_args,
+    paths::{is_regular_file, tool_path},
+    transcription::MAX_MEDIA_DURATION_SECONDS,
     types::VideoMetadata,
 };
 
@@ -477,7 +479,7 @@ pub async fn inspect_media(
     let safe_url =
         validate_media_url(&url).map_err(|error| format!("{SOURCE_INPUT_ERROR_PREFIX}{error}"))?;
     let yt_dlp = tool_path(&app, "yt-dlp")?;
-    if !yt_dlp.exists() {
+    if !is_regular_file(&yt_dlp) {
         return Err(format!(
             "{SOURCE_RUNTIME_ERROR_PREFIX}yt-dlp belum terpasang. Jalankan scripts/setup-windows.ps1."
         ));

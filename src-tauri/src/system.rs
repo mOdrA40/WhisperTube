@@ -14,7 +14,7 @@ use tauri::AppHandle;
 
 use crate::{
     accelerators, models,
-    paths::{engine_path, runtime_dir, tool_path},
+    paths::{engine_path, is_regular_file, runtime_dir, tool_path},
     types::{ComputeDeviceInfo, SystemStatus},
 };
 
@@ -294,7 +294,7 @@ pub fn detect_vulkan_devices(app: &AppHandle) -> Vec<ComputeDeviceInfo> {
     let Ok(engine) = engine_path(app, "vulkan") else {
         return Vec::new();
     };
-    if !engine.exists() {
+    if !is_regular_file(&engine) {
         return Vec::new();
     }
     let mut command = Command::new(engine);
@@ -582,10 +582,10 @@ fn sample_usage_uncached(
 
 pub fn system_status(app: &AppHandle) -> Result<SystemStatus, String> {
     let runtime = runtime_dir(app)?;
-    let yt_dlp = tool_path(app, "yt-dlp")?.exists();
-    let ffmpeg = tool_path(app, "ffmpeg")?.exists();
-    let cpu_engine = engine_path(app, "cpu")?.exists();
-    let cuda_engine = engine_path(app, "cuda")?.exists();
+    let yt_dlp = crate::paths::is_regular_file(&tool_path(app, "yt-dlp")?);
+    let ffmpeg = crate::paths::is_regular_file(&tool_path(app, "ffmpeg")?);
+    let cpu_engine = crate::paths::is_regular_file(&engine_path(app, "cpu")?);
+    let cuda_engine = crate::paths::is_regular_file(&engine_path(app, "cuda")?);
     let nvidia_devices = detect_nvidia_devices();
     let nvidia_gpu = select_nvidia_device(&nvidia_devices);
     set_selected_nvidia_device(nvidia_gpu.as_ref());

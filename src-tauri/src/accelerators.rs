@@ -119,7 +119,7 @@ pub fn catalog(app: &AppHandle, gpu_detected: bool) -> Result<Vec<AcceleratorInf
             backend: spec.backend.into(),
             supported: true,
             installed: engine_path(app, spec.backend)
-                .map(|path| path.exists())
+                .map(|path| crate::paths::is_regular_file(&path))
                 .unwrap_or(false),
             downloadable: spec.trusted_sha256.is_some(),
             description: spec.description.into(),
@@ -496,7 +496,7 @@ fn finalize_blocking(
     let staging_cli = paths.staging.join(executable_name());
     #[cfg(unix)]
     mark_executable(&staging_cli)?;
-    if !staging_cli.exists() {
+    if !crate::paths::is_regular_file(&staging_cli) {
         return Err("Accelerator gagal dipasang ke staging.".into());
     }
     emit_progress(app, spec.backend, 94.0, 0, 0, None);
@@ -517,11 +517,7 @@ fn finalize_blocking(
     if cancelled.load(Ordering::SeqCst) {
         return Err("Download accelerator dibatalkan.".into());
     }
-    if paths.destination.exists() {
-        return Err(
-            "Accelerator baru saja dipasang oleh proses lain. Klik Re-check components.".into(),
-        );
-    }
+    crate::paths::clear_invalid_runtime_destination(paths.destination, executable_name())?;
     fs::rename(paths.staging, paths.destination)
         .map_err(|e| format!("Gagal mengaktifkan accelerator: {e}"))?;
     emit_progress(app, spec.backend, 100.0, 0, 0, None);
@@ -545,7 +541,7 @@ pub async fn install(
     })?;
     let runtime_root = user_runtime_dir(&app)?;
     let destination = runtime_root.join(spec.backend);
-    if destination.join(executable_name()).exists() {
+    if crate::paths::is_regular_file(&destination.join(executable_name())) {
         return Ok(());
     }
     let temp_root =

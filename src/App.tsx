@@ -86,7 +86,9 @@ export default function App() {
           onUrlChange={app.setUrl}
           onInspect={app.inspectVideo}
           onClear={app.clearTranscription}
-          onCancel={app.cancelJob}
+          onCancelInspection={app.cancelInspection}
+          onCancelTranscription={app.cancelJob}
+          cancellingInspection={app.cancellingInspection}
           onModelChange={app.setModelId}
           onComputeTargetChange={app.setComputeTarget}
           onLanguageChange={app.setLanguage}

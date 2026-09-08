@@ -15,7 +15,7 @@
         "title": "WhisperTube",
         "width": 1280,
         "height": 820,
-        "minWidth": 920,
+        "minWidth": 760,
         "minHeight": 650,
         "resizable": true,
         "fullscreen": false,

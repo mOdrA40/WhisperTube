@@ -1,6 +1,7 @@
 import {
   Check,
   ChevronRight,
+  CircleStop,
   Clock3,
   LoaderCircle,
   Search,
@@ -15,10 +16,12 @@ type SourceCardProps = {
   url: string;
   busy: boolean;
   inspecting: boolean;
+  cancelling: boolean;
   metadata: VideoMetadata | null;
   hasResult: boolean;
   onUrlChange: (url: string) => void;
   onInspect: () => void;
+  onCancel: () => void;
   onClear: () => void;
   onOpenSettings: () => void;
 };
@@ -27,10 +30,12 @@ export function SourceCard({
   url,
   busy,
   inspecting,
+  cancelling,
   metadata,
   hasResult,
   onUrlChange,
   onInspect,
+  onCancel,
   onClear,
   onOpenSettings,
 }: SourceCardProps) {
@@ -61,6 +66,7 @@ export function SourceCard({
                 onChange={(event) => onUrlChange(event.target.value)}
                 onKeyDown={(event) => event.key === "Enter" && !busy && !inspecting && onInspect()}
                 placeholder={t("source.placeholder")}
+                aria-label={t("source.urlLabel")}
                 disabled={busy || inspecting}
                 className="url-text-input"
               />
@@ -81,13 +87,13 @@ export function SourceCard({
             <button
               type="button"
               className="inspect-action-btn"
-              onClick={onInspect}
-              disabled={busy || inspecting || !url.trim()}
+              onClick={inspecting ? onCancel : onInspect}
+              disabled={cancelling || (!inspecting && (busy || !url.trim()))}
             >
               {inspecting ? (
                 <>
-                  <LoaderCircle className="spin" size={17} />
-                  <span>{t("source.checking")}</span>
+                  {cancelling ? <LoaderCircle className="spin" size={17} /> : <CircleStop size={17} />}
+                  <span>{cancelling ? t("source.cancelling") : t("source.cancelChecking")}</span>
                 </>
               ) : (
                 <>

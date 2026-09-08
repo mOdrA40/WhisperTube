@@ -12,18 +12,24 @@ use crate::{
 };
 
 #[tauri::command]
-pub fn system_status(app: AppHandle) -> Result<SystemStatus, String> {
-    system::system_status(&app)
+pub async fn system_status(app: AppHandle) -> Result<SystemStatus, String> {
+    tokio::task::spawn_blocking(move || system::system_status(&app))
+        .await
+        .map_err(|error| format!("Pemeriksaan sistem gagal dijalankan: {error}"))?
 }
 
 #[tauri::command]
-pub fn list_browsers() -> Vec<crate::types::BrowserInfo> {
-    browsers::discover_browsers()
+pub async fn list_browsers() -> Result<Vec<crate::types::BrowserInfo>, String> {
+    tokio::task::spawn_blocking(browsers::discover_browsers)
+        .await
+        .map_err(|error| format!("Pencarian browser gagal dijalankan: {error}"))
 }
 
 #[tauri::command]
-pub fn list_models(app: AppHandle) -> Result<Vec<ModelInfo>, String> {
-    models::list_models(&app)
+pub async fn list_models(app: AppHandle) -> Result<Vec<ModelInfo>, String> {
+    tokio::task::spawn_blocking(move || models::list_models(&app))
+        .await
+        .map_err(|error| format!("Pembacaan model gagal dijalankan: {error}"))?
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -66,13 +72,18 @@ pub async fn install_accelerator(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn delete_model(
+pub async fn delete_model(
     app: AppHandle,
     state: State<'_, AppState>,
     model_id: String,
 ) -> Result<(), String> {
-    let _operation = OperationGuard::reserve_model_delete(&state, model_id.clone())?;
-    models::delete_model(&app, &model_id)
+    let operation = OperationGuard::reserve_model_delete(&state, model_id.clone())?;
+    tokio::task::spawn_blocking(move || {
+        let _operation = operation;
+        models::delete_model(&app, &model_id)
+    })
+    .await
+    .map_err(|error| format!("Penghapusan model gagal dijalankan: {error}"))?
 }
 
 #[tauri::command]
@@ -143,44 +154,64 @@ pub fn cancel_job(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn list_history(
+pub async fn list_history(
     app: AppHandle,
     state: State<'_, AppState>,
     before_id: Option<i64>,
 ) -> Result<HistoryPageResult, String> {
-    let _operation = OperationGuard::reserve_history_read(&state)?;
-    history::list_history(&app, before_id)
+    let operation = OperationGuard::reserve_history_read(&state)?;
+    tokio::task::spawn_blocking(move || {
+        let _operation = operation;
+        history::list_history(&app, before_id)
+    })
+    .await
+    .map_err(|error| format!("Pembacaan history gagal dijalankan: {error}"))?
 }
 
 #[tauri::command]
-pub fn load_history(
+pub async fn load_history(
     app: AppHandle,
     state: State<'_, AppState>,
     id: i64,
 ) -> Result<TranscriptResult, String> {
-    let _operation = OperationGuard::reserve_history_read(&state)?;
-    history::load_history(&app, id)
+    let operation = OperationGuard::reserve_history_read(&state)?;
+    tokio::task::spawn_blocking(move || {
+        let _operation = operation;
+        history::load_history(&app, id)
+    })
+    .await
+    .map_err(|error| format!("Pemuatan history gagal dijalankan: {error}"))?
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn delete_history(
+pub async fn delete_history(
     app: AppHandle,
     state: State<'_, AppState>,
     ids: Vec<i64>,
 ) -> Result<(), String> {
-    let _operation = OperationGuard::reserve_history_delete(&state)?;
-    history::delete_history(&app, &ids)
+    let operation = OperationGuard::reserve_history_delete(&state)?;
+    tokio::task::spawn_blocking(move || {
+        let _operation = operation;
+        history::delete_history(&app, &ids)
+    })
+    .await
+    .map_err(|error| format!("Penghapusan history gagal dijalankan: {error}"))?
 }
 
 #[tauri::command]
-pub fn copy_export(
+pub async fn copy_export(
     app: AppHandle,
     state: State<'_, AppState>,
     source: String,
     target: String,
 ) -> Result<(), String> {
-    let _operation = OperationGuard::reserve_history_export(&state)?;
-    history::copy_export(&app, &source, &target)
+    let operation = OperationGuard::reserve_history_export(&state)?;
+    tokio::task::spawn_blocking(move || {
+        let _operation = operation;
+        history::copy_export(&app, &source, &target)
+    })
+    .await
+    .map_err(|error| format!("Export history gagal dijalankan: {error}"))?
 }
 
 #[tauri::command(rename_all = "camelCase")]

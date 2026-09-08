@@ -147,7 +147,7 @@ pub fn list_models(app: &AppHandle) -> Result<Vec<ModelInfo>, String> {
             description: model.description.into(),
             size_mb: model.size_mb,
             vram_required_mb: model.vram_required_mb,
-            installed: dir.join(format!("ggml-{}.bin", model.id)).exists(),
+            installed: crate::paths::is_regular_file(&dir.join(format!("ggml-{}.bin", model.id))),
         })
         .collect())
 }
@@ -190,7 +190,7 @@ pub fn ensure_download_supported(
 
     if target_id == "auto" && cfg!(all(target_os = "windows", target_arch = "x86_64")) {
         let nvidia = system::detect_nvidia();
-        if engine_path(app, "cuda")?.exists() {
+        if crate::paths::is_regular_file(&engine_path(app, "cuda")?) {
             if let Some(gpu) = nvidia {
                 return ensure_vram_available(spec.id, gpu.available_memory_mb());
             }
@@ -226,7 +226,7 @@ pub fn ensure_download_supported(
         return ensure_vram_available(spec.id, gpu.available_memory_mb());
     }
 
-    if target_id == "vulkan" && !engine_path(app, "vulkan")?.exists() {
+    if target_id == "vulkan" && !crate::paths::is_regular_file(&engine_path(app, "vulkan")?) {
         return Err("Vulkan engine belum terpasang.".into());
     }
 
@@ -328,12 +328,18 @@ pub async fn download_model(
             .await
             .map_err(|e| format!("Gagal membersihkan download model lama: {e}"))?;
     }
-    if dest.exists() {
+    if dest.exists() && crate::paths::is_regular_file(&dest) {
         let dest_for_verify = dest.clone();
         tokio::task::spawn_blocking(move || verify_model_file(&dest_for_verify, &model_id))
             .await
             .map_err(|e| format!("Verifikasi model gagal: {e}"))??;
         return Ok(());
+    }
+    if dest.exists() {
+        let invalid_dest = dest.clone();
+        tokio::task::spawn_blocking(move || clear_invalid_model_destination(&invalid_dest))
+            .await
+            .map_err(|e| format!("Pembersihan model invalid gagal dijalankan: {e}"))??;
     }
     let url = format!(
         "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-{}.bin?download=true",
@@ -415,6 +421,21 @@ pub async fn download_model(
     temp_guard.commit();
     emit_model_progress(&app, spec.id, total, total, None);
     Ok(())
+}
+
+fn clear_invalid_model_destination(path: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("Gagal memeriksa model invalid: {error}"))?;
+    if metadata.file_type().is_symlink() {
+        return Err("Model invalid berupa symbolic link dan tidak dapat diganti otomatis.".into());
+    }
+    if metadata.is_dir() {
+        fs::remove_dir_all(path)
+            .map_err(|error| format!("Gagal membersihkan folder model invalid: {error}"))
+    } else {
+        fs::remove_file(path)
+            .map_err(|error| format!("Gagal membersihkan file model invalid: {error}"))
+    }
 }
 
 fn emit_cuda_progress(
@@ -630,7 +651,7 @@ fn finalize_cuda_engine_blocking(
         .ok_or_else(|| "Folder CUDA tidak valid.".to_string())?;
     copy_tree(release_dir, staging_path)?;
     let staging_cli = staging_path.join("whisper-cli.exe");
-    if !staging_cli.exists() {
+    if !crate::paths::is_regular_file(&staging_cli) {
         return Err("CUDA engine gagal dipasang ke staging.".into());
     }
     emit_cuda_progress(app, 94.0, 0, 0, None);
@@ -651,11 +672,7 @@ fn finalize_cuda_engine_blocking(
     if cancelled.load(Ordering::SeqCst) {
         return Err("Download CUDA dibatalkan.".into());
     }
-    if destination.exists() {
-        return Err(
-            "CUDA engine baru saja dipasang oleh proses lain. Klik Re-check components.".into(),
-        );
-    }
+    crate::paths::clear_invalid_runtime_destination(destination, "whisper-cli.exe")?;
     fs::rename(staging_path, destination)
         .map_err(|e| format!("Gagal mengaktifkan CUDA engine: {e}"))?;
     emit_cuda_progress(app, 100.0, 0, 0, None);
@@ -668,7 +685,7 @@ pub async fn install_cuda_engine(app: AppHandle, cancelled: Arc<AtomicBool>) -> 
     }
     let runtime_root = user_runtime_dir(&app)?;
     let destination = runtime_root.join("cuda");
-    if destination.join("whisper-cli.exe").exists() {
+    if crate::paths::is_regular_file(&destination.join("whisper-cli.exe")) {
         return Ok(());
     }
 
@@ -723,7 +740,8 @@ pub fn delete_model(app: &AppHandle, model_id: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ensure_vram_available, recommended_model_id, verify_model_file, TemporaryFileGuard,
+        clear_invalid_model_destination, ensure_vram_available, recommended_model_id,
+        verify_model_file, TemporaryFileGuard,
     };
     use std::{fs, path::PathBuf};
     use uuid::Uuid;
@@ -761,5 +779,23 @@ mod tests {
         let error = verify_model_file(&path, "base").unwrap_err();
         assert!(error.contains("kosong"));
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn removes_empty_file_or_directory_before_redownloading_model() {
+        for invalid_kind in ["empty", "directory"] {
+            let path = std::env::temp_dir().join(format!(
+                "whispertube-invalid-model-{invalid_kind}-{}.bin",
+                Uuid::new_v4()
+            ));
+            if invalid_kind == "empty" {
+                fs::write(&path, []).unwrap();
+            } else {
+                fs::create_dir_all(&path).unwrap();
+            }
+
+            clear_invalid_model_destination(&path).unwrap();
+            assert!(!path.exists());
+        }
     }
 }

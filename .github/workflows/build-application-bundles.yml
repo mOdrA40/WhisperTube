@@ -23,7 +23,6 @@ jobs:
     env:
       TAURI_CREATE_UPDATER_ARTIFACTS: ${{ startsWith(github.ref, 'refs/tags/v') && 'true' || 'false' }}
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
       UPDATE_ARCH: ${{ matrix.architecture }}
     strategy:
       fail-fast: false
@@ -185,7 +184,6 @@ jobs:
     env:
       TAURI_CREATE_UPDATER_ARTIFACTS: ${{ startsWith(github.ref, 'refs/tags/v') && 'true' || 'false' }}
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     steps:
       - name: Checkout source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

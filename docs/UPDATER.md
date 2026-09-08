@@ -16,10 +16,11 @@ Workflow memakai format updater native Tauri v2: Windows memakai `.exe` dengan s
 
 Updater Tauri harus menggunakan keypair yang sama sepanjang umur instalasi aplikasi. Private key tidak boleh masuk Git.
 
-Tambahkan repository secrets berikut:
+Tambahkan repository secret wajib berikut:
 
 - `TAURI_SIGNING_PRIVATE_KEY`: isi lengkap file private key yang dibuat oleh Tauri signer.
-- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`: hanya jika private key memakai password.
+
+Key saat ini dibuat tanpa password, jadi workflow tidak membutuhkan `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. Jika key diganti menjadi password-protected, tambahkan secret tersebut dan mapping env-nya ke kedua job build sebelum release.
 
 Key lokal yang dibuat untuk checkout ini berada di luar repository:
 

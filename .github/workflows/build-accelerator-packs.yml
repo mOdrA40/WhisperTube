@@ -62,8 +62,8 @@ jobs:
       - name: Build whisper.cpp backend
         shell: bash
         env:
-          WHISPER_VERSION: v1.9.1
-          WHISPER_COMMIT: f049fff95a089aa9969deb009cdd4892b3e74916
+          WHISPER_VERSION: v1.9.2
+          WHISPER_COMMIT: 306c88f4d1286aec1bf96e544632897886af5501
           BACKEND: ${{ matrix.backend }}
           PACKAGE_NAME: ${{ matrix.package }}
         run: |

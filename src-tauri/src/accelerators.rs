@@ -23,7 +23,7 @@ use crate::{
 };
 
 const RELEASE_REPOSITORY: &str = "mOdrA40/WhisperTube";
-const RELEASE_TAG: &str = "accelerators-v0.1.0";
+const RELEASE_TAG: &str = "accelerators-v0.1.2";
 const MAX_ACCELERATOR_ARCHIVE_BYTES: u64 = 1024 * 1024 * 1024;
 
 // These values are filled by scripts/sync-accelerator-hashes.ps1 after the
@@ -32,19 +32,19 @@ const MAX_ACCELERATOR_ARCHIVE_BYTES: u64 = 1024 * 1024 * 1024;
 // silently accepted by a shipped build.
 #[allow(dead_code)]
 const METAL_MACOS_ARM64_SHA256: Option<&str> =
-    Some("a48c3a9b7243f0c9707c2d24aa04c8f7ac17bf7af52dd6847af608014f5070d5");
+    Some("67e5c54b591fe3ddcc6818a5a8f1fa4f330a184ef10c00bf1403fe7cff3ea276");
 
 #[allow(dead_code)]
 const METAL_MACOS_X64_SHA256: Option<&str> =
-    Some("11c527f865f2077a1579b17362c9dac177f02e62943177eb5c4076a29c3bd08f");
+    Some("3c19d59d8933f8264efd6a37507595858223c12ac70c85011bf8c815f6b64aa3");
 
 #[allow(dead_code)]
 const VULKAN_WINDOWS_X64_SHA256: Option<&str> =
-    Some("a8f8e2d0808c48154ab113fe456695218fbb2e2d74e1be5444b340f176f869e8");
+    Some("e10c8238e23f60b611006d6dc0d53b7b18d4b70cc62232cfd6419cb9678430b1");
 
 #[allow(dead_code)]
 const VULKAN_LINUX_X64_SHA256: Option<&str> =
-    Some("98f291d42b1e02ea71f9cc6acfa53d5ec5207a9bb67fcd34beb251682f59c07d");
+    Some("5fa88c7d584c626c47d3d27a96baf88cad4b971290992745ecb8d34d9c464671");
 
 struct PackSpec {
     backend: &'static str,

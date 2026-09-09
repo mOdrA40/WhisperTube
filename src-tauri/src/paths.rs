@@ -13,7 +13,7 @@ use crate::models::model_spec;
 
 const RUNTIME_MANIFEST_NAME: &str = "runtime-manifest.json";
 const CORE_RUNTIME_MANIFEST_VERSION: &str = "whisper.cpp-v1.9.2";
-const LEGACY_ACCELERATOR_MANIFEST_VERSION: &str = "whisper.cpp-v1.9.1";
+const ACCELERATOR_RUNTIME_MANIFEST_VERSION: &str = "whisper.cpp-v1.9.2";
 const MAX_RUNTIME_MANIFEST_BYTES: u64 = 64 * 1024;
 const MAX_RUNTIME_FILES: usize = 256;
 const TRANSIENT_STORAGE_GRACE: Duration = Duration::from_secs(24 * 60 * 60);
@@ -123,7 +123,7 @@ pub fn core_runtime_manifest_version() -> &'static str {
 }
 
 pub fn accelerator_runtime_manifest_version() -> &'static str {
-    LEGACY_ACCELERATOR_MANIFEST_VERSION
+    ACCELERATOR_RUNTIME_MANIFEST_VERSION
 }
 
 pub fn write_runtime_manifest(
@@ -385,7 +385,7 @@ pub fn engine_path(app: &AppHandle, backend: &str) -> Result<PathBuf, String> {
     let user_backend_dir = user_runtime_dir(app)?.join(backend);
     let user_path = user_backend_dir.join(exe_name("whisper-cli"));
     let expected_version = if matches!(backend, "metal" | "vulkan") {
-        LEGACY_ACCELERATOR_MANIFEST_VERSION
+        ACCELERATOR_RUNTIME_MANIFEST_VERSION
     } else {
         CORE_RUNTIME_MANIFEST_VERSION
     };

@@ -187,9 +187,9 @@ Windows bootstrap:
 macOS bootstrap builds pinned FFmpeg and both CPU and Apple Metal whisper.cpp
 engines. Linux bootstrap builds pinned static FFmpeg and a CPU whisper.cpp
 engine. The Unix scripts pin whisper.cpp v1.9.2 to commit
-306c88f4d1286aec1bf96e544632897886af5501. The currently published accelerator
-pack remains a legacy v1.9.1 pack and is validated with its own manifest version
-until a replacement accelerator release is published.
+306c88f4d1286aec1bf96e544632897886af5501. The published accelerator pack is
+released separately as accelerators-v0.1.2 and uses the same whisper.cpp v1.9.2
+runtime generation.
 
 Downloaded model files are SHA-256 verified before use. The verification cache
 is valid only for the current file size and modification timestamp and is

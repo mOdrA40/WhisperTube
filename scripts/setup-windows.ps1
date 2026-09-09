@@ -12,9 +12,9 @@ $YtDlpVersion = "2026.08.19"
 $YtDlpSha256 = "66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c0562af101dd3e7a"
 $FfmpegVersion = "9.0.1"
 $FfmpegSha256 = "fec81ae03971d9dd4be3ebe02e263bd2ec1d789483f931bdba5f5715e65da2e9"
-$WhisperVersion = "v1.9.1"
-# Matches the official whisper.cpp v1.9.1 asset and the ScoopInstaller manifest.
-$WhisperCpuSha256 = "7d8be46ecd31828e1eb7a2ecdd0d6b314feafd82163038ab6092594b0a063539"
+$WhisperVersion = "v1.9.2"
+# Matches the official whisper.cpp v1.9.2 asset.
+$WhisperCpuSha256 = "49dcc16de826f20bd53d44f947a1ae49dfa81f86cad67a64d80820cb192d674a"
 
 function Write-Step($Text) {
     Write-Host "`n==> $Text" -ForegroundColor Cyan

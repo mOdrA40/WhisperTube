@@ -166,4 +166,16 @@ describe("useWhisperTube", () => {
     expect(result.current.history).toEqual([]);
     expect(result.current.error).toContain("History sudah dihapus dari database");
   });
+
+  it("surfaces a manual refresh failure instead of leaking an unhandled rejection", async () => {
+    const { result } = renderHook(() => useWhisperTube(), { wrapper });
+    await waitFor(() => expect(result.current.system).toEqual(system));
+    services.listHistory.mockRejectedValueOnce(new Error("History sedang dikunci"));
+
+    await act(async () => {
+      await result.current.refreshSystem();
+    });
+
+    expect(result.current.error).toContain("History sedang dikunci");
+  });
 });

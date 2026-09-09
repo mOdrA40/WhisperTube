@@ -576,8 +576,16 @@ fn finalize_blocking(
     if cancelled.load(Ordering::SeqCst) {
         return Err("Download accelerator dibatalkan.".into());
     }
-    crate::paths::write_runtime_manifest(paths.staging, executable_name())?;
-    crate::paths::clear_invalid_runtime_destination(paths.destination, executable_name())?;
+    crate::paths::write_runtime_manifest(
+        paths.staging,
+        executable_name(),
+        crate::paths::accelerator_runtime_manifest_version(),
+    )?;
+    crate::paths::clear_invalid_runtime_destination(
+        paths.destination,
+        executable_name(),
+        crate::paths::accelerator_runtime_manifest_version(),
+    )?;
     fs::rename(paths.staging, paths.destination)
         .map_err(|e| format!("Gagal mengaktifkan accelerator: {e}"))?;
     emit_progress(app, spec.backend, 100.0, 0, 0, None);

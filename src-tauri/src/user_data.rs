@@ -49,6 +49,7 @@ pub fn reset(app: &AppHandle) -> Result<(), String> {
         errors.push(error);
     }
     models::clear_verified_models();
+    history::invalidate_job_storage_cache();
 
     if errors.is_empty() {
         Ok(())

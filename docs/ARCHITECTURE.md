@@ -170,17 +170,26 @@ when its runtime manifest matches the expected whisper.cpp version and
 executable SHA-256. Modified or legacy user runtimes are ignored until
 reinstalled.
 
+The Windows developer-only CUDA helper stores its optional engine under
+runtime-dev/windows/cuda. This directory is intentionally outside the bundled
+runtime staging tree, so installing CUDA for local development cannot silently
+inflate a release installer or disable the application's download-on-demand
+behavior. Packaged applications install CUDA into application-local-data via
+the UI instead.
+
 Windows bootstrap:
 
 - yt-dlp 2026.08.19;
 - FFmpeg 9.0.1 from the pinned Gyan.dev essentials archive;
-- whisper.cpp v1.9.1 CPU binaries from the pinned upstream release;
+- whisper.cpp v1.9.2 CPU binaries from the pinned upstream release;
 - optional CUDA runtime installed on demand.
 
 macOS bootstrap builds pinned FFmpeg and both CPU and Apple Metal whisper.cpp
 engines. Linux bootstrap builds pinned static FFmpeg and a CPU whisper.cpp
-engine. The Unix scripts pin whisper.cpp v1.9.1 to commit
-f049fff95a089aa9969deb009cdd4892b3e74916.
+engine. The Unix scripts pin whisper.cpp v1.9.2 to commit
+306c88f4d1286aec1bf96e544632897886af5501. The currently published accelerator
+pack remains a legacy v1.9.1 pack and is validated with its own manifest version
+until a replacement accelerator release is published.
 
 Downloaded model files are SHA-256 verified before use. The verification cache
 is valid only for the current file size and modification timestamp and is

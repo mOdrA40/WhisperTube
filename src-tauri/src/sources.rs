@@ -95,6 +95,35 @@ const MAX_METADATA_CHANNEL_BYTES: usize = 2 * 1024;
 const MAX_METADATA_SOURCE_BYTES: usize = 512;
 const MAX_METADATA_AVAILABILITY_BYTES: usize = 512;
 const MAX_METADATA_THUMBNAIL_URL_BYTES: usize = 4 * 1024;
+const THUMBNAIL_HOSTS: &[&str] = &[
+    "ytimg.com",
+    "youtube.com",
+    "googleusercontent.com",
+    "tiktokcdn.com",
+    "tiktok.com",
+    "fbcdn.net",
+    "facebook.com",
+    "cdninstagram.com",
+    "instagram.com",
+    "twimg.com",
+    "twitter.com",
+    "x.com",
+    "redditmedia.com",
+    "redd.it",
+    "reddit.com",
+    "vimeocdn.com",
+    "vimeo.com",
+    "dmcdn.net",
+    "dailymotion.com",
+    "pinimg.com",
+    "pinterest.com",
+    "licdn.com",
+    "linkedin.com",
+    "tumblr.com",
+    "bilibili.com",
+    "b23.tv",
+    "vk.com",
+];
 const TIKTOK_REHYDRATION_ERROR: &str = "unable to extract universal data for rehydration";
 const TIKTOK_TRANSIENT_ERROR_PREFIX: &str = "media_tiktok_transient:";
 const SOURCE_TRANSIENT_ERROR_PREFIX: &str = "media_source_transient:";
@@ -215,7 +244,14 @@ fn safe_thumbnail(value: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .filter(|thumbnail| thumbnail.len() <= MAX_METADATA_THUMBNAIL_URL_BYTES)?;
     let parsed = Url::parse(thumbnail).ok()?;
-    if parsed.scheme() != "https" || !parsed.username().is_empty() || parsed.password().is_some() {
+    let host = parsed.host_str()?.to_ascii_lowercase();
+    if parsed.scheme() != "https"
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || !THUMBNAIL_HOSTS
+            .iter()
+            .any(|domain| host_matches(&host, domain))
+    {
         return None;
     }
     Some(parsed.to_string())
@@ -616,9 +652,10 @@ pub async fn inspect_media(
 #[cfg(test)]
 mod tests {
     use super::{
-        drain_bounded, metadata_error_prefix, metadata_retry_reason, source_for_host,
-        validate_media_duration, validate_media_url, MetadataRetryReason,
+        drain_bounded, metadata_error_prefix, metadata_retry_reason, safe_thumbnail,
+        source_for_host, validate_media_duration, validate_media_url, MetadataRetryReason,
     };
+    use serde_json::json;
     use std::io::Cursor;
 
     #[test]
@@ -673,6 +710,18 @@ mod tests {
         assert!(validate_media_url("https://youtube.com.evil.example/video").is_err());
         assert!(validate_media_url("https://example.com/video").is_err());
         assert!(source_for_host("cdn.tiktok.com").is_some());
+    }
+
+    #[test]
+    fn thumbnail_policy_allows_platform_cdn_and_rejects_arbitrary_https_hosts() {
+        assert!(safe_thumbnail(&json!({
+            "thumbnail": "https://i.ytimg.com/vi/video-id/maxresdefault.jpg"
+        }))
+        .is_some());
+        assert!(safe_thumbnail(&json!({
+            "thumbnail": "https://tracking.example.test/thumb.jpg"
+        }))
+        .is_none());
     }
 
     #[test]

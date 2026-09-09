@@ -606,6 +606,16 @@ export function SettingsPage({
             <strong>{system?.gpuName ?? t("hardware.notDetected")}</strong>
           </div>
           <div>
+            <span>{t("settings.computeDevices")}</span>
+            <strong
+              title={system?.computeDevices.map((device) => `${device.id}: ${device.name}`).join(" • ")}
+            >
+              {system?.computeDevices.length
+                ? system.computeDevices.map((device) => `${device.id}: ${device.name}`).join(" • ")
+                : t("hardware.notDetected")}
+            </strong>
+          </div>
+          <div>
             <span>{t("settings.totalVram")}</span>
             <strong>{formatMemory(system?.gpuMemoryMb, t("hardware.notDetected"))}</strong>
           </div>
@@ -726,7 +736,7 @@ export function SettingsPage({
               <div>
                 <strong>{getModelCopy(model, t).label}</strong>
                 <span>
-                  {getModelCopy(model, t).description} • {model.sizeMb} MB • {t("controls.cudaRequirement", { memory: formatMemory(model.vramRequiredMb, t("hardware.notDetected")) })}
+                  {getModelCopy(model, t).description} • {model.sizeMb} MB • {t("controls.memoryEstimate", { memory: formatMemory(model.vramRequiredMb, t("hardware.notDetected")) })}
                 </span>
                 {modelDownloadBlockReasons[model.id] && (
                   <small className="model-download-block-reason">{modelDownloadBlockReasons[model.id]}</small>
@@ -814,7 +824,7 @@ export function SettingsPage({
             </strong>
           </div>
         </div>
-        <button type="button" className="secondary-button full" onClick={onRefresh}>
+        <button type="button" className="secondary-button full" onClick={onRefresh} disabled={busy}>
           <RotateCcw size={16} /> {t("settings.recheck")}
         </button>
       </section>

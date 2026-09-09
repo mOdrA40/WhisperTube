@@ -12,7 +12,8 @@ use tauri::{AppHandle, Manager};
 use crate::models::model_spec;
 
 const RUNTIME_MANIFEST_NAME: &str = "runtime-manifest.json";
-const RUNTIME_MANIFEST_VERSION: &str = "whisper.cpp-v1.9.1";
+const CORE_RUNTIME_MANIFEST_VERSION: &str = "whisper.cpp-v1.9.2";
+const LEGACY_ACCELERATOR_MANIFEST_VERSION: &str = "whisper.cpp-v1.9.1";
 const MAX_RUNTIME_MANIFEST_BYTES: u64 = 64 * 1024;
 const MAX_RUNTIME_FILES: usize = 256;
 const TRANSIENT_STORAGE_GRACE: Duration = Duration::from_secs(24 * 60 * 60);
@@ -117,7 +118,19 @@ fn file_sha256(path: &Path) -> Result<String, String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-pub fn write_runtime_manifest(staging: &Path, executable: &str) -> Result<(), String> {
+pub fn core_runtime_manifest_version() -> &'static str {
+    CORE_RUNTIME_MANIFEST_VERSION
+}
+
+pub fn accelerator_runtime_manifest_version() -> &'static str {
+    LEGACY_ACCELERATOR_MANIFEST_VERSION
+}
+
+pub fn write_runtime_manifest(
+    staging: &Path,
+    executable: &str,
+    version: &str,
+) -> Result<(), String> {
     if !is_regular_file(&staging.join(executable)) {
         return Err("Executable runtime tidak ditemukan.".into());
     }
@@ -128,7 +141,7 @@ pub fn write_runtime_manifest(staging: &Path, executable: &str) -> Result<(), St
     }
     files.sort_unstable_by(|left, right| left.path.cmp(&right.path));
     let manifest = RuntimeManifest {
-        version: RUNTIME_MANIFEST_VERSION.into(),
+        version: version.into(),
         executable: executable.into(),
         files,
     };
@@ -188,7 +201,7 @@ fn collect_runtime_files(
     Ok(())
 }
 
-fn runtime_manifest_matches(runtime_dir: &Path, executable: &Path) -> bool {
+fn runtime_manifest_matches(runtime_dir: &Path, executable: &Path, expected_version: &str) -> bool {
     let Ok(runtime_metadata) = fs::symlink_metadata(runtime_dir) else {
         return false;
     };
@@ -220,7 +233,7 @@ fn runtime_manifest_matches(runtime_dir: &Path, executable: &Path) -> bool {
     let Some(name) = executable.file_name().and_then(|name| name.to_str()) else {
         return false;
     };
-    if manifest.version != RUNTIME_MANIFEST_VERSION
+    if manifest.version != expected_version
         || manifest.executable != name
         || manifest.files.len() > MAX_RUNTIME_FILES
     {
@@ -335,12 +348,13 @@ pub fn cleanup_stale_transient_storage(app: &AppHandle) -> Result<(), String> {
 pub fn clear_invalid_runtime_destination(
     destination: &Path,
     executable: &str,
+    expected_version: &str,
 ) -> Result<(), String> {
     if !destination.exists() {
         return Ok(());
     }
     if is_regular_file(&destination.join(executable))
-        && runtime_manifest_matches(destination, &destination.join(executable))
+        && runtime_manifest_matches(destination, &destination.join(executable), expected_version)
     {
         return Err(
             "Runtime baru saja dipasang oleh proses lain. Klik Re-check components.".into(),
@@ -370,8 +384,26 @@ pub fn clear_invalid_runtime_destination(
 pub fn engine_path(app: &AppHandle, backend: &str) -> Result<PathBuf, String> {
     let user_backend_dir = user_runtime_dir(app)?.join(backend);
     let user_path = user_backend_dir.join(exe_name("whisper-cli"));
-    if is_regular_file(&user_path) && runtime_manifest_matches(&user_backend_dir, &user_path) {
+    let expected_version = if matches!(backend, "metal" | "vulkan") {
+        LEGACY_ACCELERATOR_MANIFEST_VERSION
+    } else {
+        CORE_RUNTIME_MANIFEST_VERSION
+    };
+    if is_regular_file(&user_path)
+        && runtime_manifest_matches(&user_backend_dir, &user_path, expected_version)
+    {
         return Ok(user_path);
+    }
+    #[cfg(debug_assertions)]
+    {
+        let development_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("runtime-dev")
+            .join(runtime_platform())
+            .join(backend)
+            .join(exe_name("whisper-cli"));
+        if is_regular_file(&development_path) {
+            return Ok(development_path);
+        }
     }
     Ok(runtime_dir(app)?
         .join(backend)
@@ -413,16 +445,24 @@ mod tests {
             .expect("test runtime directory should be created");
 
         assert!(!is_regular_file(&destination.join("whisper-cli.exe")));
-        clear_invalid_runtime_destination(&destination, "whisper-cli.exe")
-            .expect("invalid runtime directory should be removable");
+        clear_invalid_runtime_destination(
+            &destination,
+            "whisper-cli.exe",
+            super::core_runtime_manifest_version(),
+        )
+        .expect("invalid runtime directory should be removable");
         assert!(!destination.exists());
 
         fs::create_dir_all(&destination).expect("test runtime directory should be created");
         fs::write(destination.join("whisper-cli.exe"), [])
             .expect("empty test runtime should be created");
         assert!(!is_regular_file(&destination.join("whisper-cli.exe")));
-        clear_invalid_runtime_destination(&destination, "whisper-cli.exe")
-            .expect("empty runtime should be removable");
+        clear_invalid_runtime_destination(
+            &destination,
+            "whisper-cli.exe",
+            super::core_runtime_manifest_version(),
+        )
+        .expect("empty runtime should be removable");
         assert!(!destination.exists());
 
         fs::remove_dir_all(root).expect("test directory should be removed");
@@ -434,13 +474,30 @@ mod tests {
         fs::create_dir_all(&root).expect("runtime directory should be created");
         let executable = root.join("whisper-cli.exe");
         fs::write(&executable, b"trusted runtime").expect("runtime should be written");
-        write_runtime_manifest(&root, "whisper-cli.exe").expect("manifest should be written");
-        assert!(runtime_manifest_matches(&root, &executable));
+        write_runtime_manifest(
+            &root,
+            "whisper-cli.exe",
+            super::core_runtime_manifest_version(),
+        )
+        .expect("manifest should be written");
+        assert!(runtime_manifest_matches(
+            &root,
+            &executable,
+            super::core_runtime_manifest_version()
+        ));
 
         fs::write(&executable, b"modified runtime").expect("runtime should be modified");
-        assert!(!runtime_manifest_matches(&root, &executable));
-        clear_invalid_runtime_destination(&root, "whisper-cli.exe")
-            .expect("modified runtime should be replaceable");
+        assert!(!runtime_manifest_matches(
+            &root,
+            &executable,
+            super::core_runtime_manifest_version()
+        ));
+        clear_invalid_runtime_destination(
+            &root,
+            "whisper-cli.exe",
+            super::core_runtime_manifest_version(),
+        )
+        .expect("modified runtime should be replaceable");
         assert!(!root.exists());
     }
 
@@ -450,10 +507,19 @@ mod tests {
         fs::create_dir_all(&root).expect("runtime directory should be created");
         let executable = root.join("whisper-cli.exe");
         fs::write(&executable, b"trusted runtime").expect("runtime should be written");
-        write_runtime_manifest(&root, "whisper-cli.exe").expect("manifest should be written");
+        write_runtime_manifest(
+            &root,
+            "whisper-cli.exe",
+            super::core_runtime_manifest_version(),
+        )
+        .expect("manifest should be written");
         fs::write(root.join("unexpected.dll"), b"unlisted file")
             .expect("extra runtime file should be written");
-        assert!(!runtime_manifest_matches(&root, &executable));
+        assert!(!runtime_manifest_matches(
+            &root,
+            &executable,
+            super::core_runtime_manifest_version()
+        ));
         fs::remove_dir_all(root).expect("runtime directory should be removed");
     }
 }

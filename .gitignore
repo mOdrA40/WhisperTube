@@ -24,4 +24,11 @@ src-tauri/runtime/macos/*
 src-tauri/runtime/linux/*
 !src-tauri/runtime/**/.gitkeep
 
+# Developer-only runtime downloads are kept outside the bundled runtime tree.
+# Ignore binaries while retaining directory placeholders.
+src-tauri/runtime-dev/**
+!src-tauri/runtime-dev/
+!src-tauri/runtime-dev/**/
+!src-tauri/runtime-dev/**/.gitkeep
+
 skills

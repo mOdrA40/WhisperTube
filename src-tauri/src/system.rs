@@ -794,7 +794,18 @@ pub fn system_status(app: &AppHandle) -> Result<SystemStatus, String> {
     let cpu_threads = std::thread::available_parallelism()
         .map(|value| value.get())
         .unwrap_or(1);
-    let recommended_id = models::recommended_model_id(available_vram_mb);
+    let has_discrete_vulkan = compute_devices
+        .iter()
+        .any(|device| device.backend == "vulkan" && !device.integrated);
+    let recommended_id = models::recommended_model_id_for_system(
+        available_vram_mb,
+        nvidia && cuda_supported && cuda_engine,
+        has_discrete_vulkan,
+        accelerators
+            .iter()
+            .any(|accelerator| accelerator.backend == "metal" && accelerator.installed),
+        cpu_threads,
+    );
 
     let (recommendation, recommended_model_id, recommended_backend) = if nvidia
         && cuda_supported

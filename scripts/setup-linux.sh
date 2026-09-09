@@ -108,8 +108,8 @@ fi
 mv "$YT_DLP_TMP" "$RUNTIME/yt-dlp"
 chmod +x "$RUNTIME/yt-dlp"
 
-WHISPER_VERSION="v1.9.1"
-WHISPER_COMMIT="f049fff95a089aa9969deb009cdd4892b3e74916"
+WHISPER_VERSION="v1.9.2"
+WHISPER_COMMIT="306c88f4d1286aec1bf96e544632897886af5501"
 git clone --depth 1 --branch "$WHISPER_VERSION" https://github.com/ggml-org/whisper.cpp.git "$WORK/whisper.cpp"
 actual_whisper_commit="$(git -C "$WORK/whisper.cpp" rev-parse HEAD)"
 if [[ "$actual_whisper_commit" != "$WHISPER_COMMIT" ]]; then

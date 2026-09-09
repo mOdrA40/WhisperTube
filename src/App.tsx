@@ -37,7 +37,7 @@ export default function App() {
           app.clearAppUpdateError();
         }}
       />
-      {showUpdateBanner && app.appUpdate && (
+      {showUpdateBanner && app.appUpdate && app.tab !== "settings" && (
         <AppUpdateBanner
           update={app.appUpdate}
           status={app.appUpdateStatus}

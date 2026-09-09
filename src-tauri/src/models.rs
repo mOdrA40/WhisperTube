@@ -24,9 +24,9 @@ use crate::{
     types::{CudaDownloadPayload, ModelDownloadPayload, ModelInfo},
 };
 
-const CUDA_ENGINE_VERSION: &str = "v1.9.1";
+const CUDA_ENGINE_VERSION: &str = "v1.9.2";
 const CUDA_ENGINE_BUILD: &str = "12.4.0";
-const CUDA_ENGINE_SHA256: &str = "106a2030eff8998e4ef320fe72e263a78449e9040386ee27c41ea80b001b601b";
+const CUDA_ENGINE_SHA256: &str = "443110ddaad70d4290ab2e77179e31cf712035bbc4fad56bb4519a90c917b39c";
 const MAX_CUDA_ARCHIVE_BYTES: u64 = 1024 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -168,6 +168,27 @@ pub fn recommended_model_id(available_vram_mb: Option<u64>) -> String {
         .map(|model| model.id)
         .unwrap_or(MODELS[0].id)
         .to_string()
+}
+
+pub fn recommended_model_id_for_system(
+    available_vram_mb: Option<u64>,
+    cuda_ready: bool,
+    has_discrete_vulkan: bool,
+    metal_ready: bool,
+    cpu_threads: usize,
+) -> String {
+    if cuda_ready {
+        return recommended_model_id(available_vram_mb);
+    }
+
+    // Without a ready CUDA backend, NVIDIA VRAM is not a reliable basis for
+    // recommending Accurate: Auto may resolve to Vulkan on another adapter or
+    // fall back to CPU. Keep non-CUDA recommendations conservative.
+    if has_discrete_vulkan || metal_ready || cpu_threads >= 12 {
+        "large-v3-turbo-q5_0".into()
+    } else {
+        "base".into()
+    }
 }
 
 pub fn ensure_vram_available(model_id: &str, available_vram_mb: Option<u64>) -> Result<(), String> {
@@ -625,8 +646,16 @@ fn finalize_cuda_engine_blocking(
     if cancelled.load(Ordering::SeqCst) {
         return Err("Download CUDA dibatalkan.".into());
     }
-    crate::paths::write_runtime_manifest(staging_path, "whisper-cli.exe")?;
-    crate::paths::clear_invalid_runtime_destination(destination, "whisper-cli.exe")?;
+    crate::paths::write_runtime_manifest(
+        staging_path,
+        "whisper-cli.exe",
+        crate::paths::core_runtime_manifest_version(),
+    )?;
+    crate::paths::clear_invalid_runtime_destination(
+        destination,
+        "whisper-cli.exe",
+        crate::paths::core_runtime_manifest_version(),
+    )?;
     fs::rename(staging_path, destination)
         .map_err(|e| format!("Gagal mengaktifkan CUDA engine: {e}"))?;
     emit_cuda_progress(app, 100.0, 0, 0, None);
@@ -701,7 +730,7 @@ pub fn delete_model(app: &AppHandle, model_id: &str) -> Result<(), String> {
 mod tests {
     use super::{
         clear_invalid_model_destination, ensure_vram_available, recommended_model_id,
-        verify_model_file, TemporaryFileGuard,
+        recommended_model_id_for_system, verify_model_file, TemporaryFileGuard,
     };
     use std::{fs, path::PathBuf};
     use uuid::Uuid;
@@ -711,6 +740,22 @@ mod tests {
         assert_eq!(recommended_model_id(None), "base");
         assert_eq!(recommended_model_id(Some(4096)), "large-v3-turbo-q5_0");
         assert_eq!(recommended_model_id(Some(7168)), "large-v3-q5_0");
+    }
+
+    #[test]
+    fn does_not_recommend_nvidia_vram_heavy_model_without_cuda() {
+        assert_eq!(
+            recommended_model_id_for_system(Some(16 * 1024), false, false, false, 8),
+            "base"
+        );
+        assert_eq!(
+            recommended_model_id_for_system(None, false, true, false, 8),
+            "large-v3-turbo-q5_0"
+        );
+        assert_eq!(
+            recommended_model_id_for_system(Some(4096), true, false, false, 8),
+            "large-v3-turbo-q5_0"
+        );
     }
 
     #[test]

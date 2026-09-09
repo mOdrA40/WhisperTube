@@ -6,7 +6,8 @@ use std::{
     fs,
     io::Read,
     path::{Path, PathBuf},
-    time::{Duration, SystemTime},
+    sync::{Mutex, OnceLock},
+    time::{Duration, Instant, SystemTime},
 };
 use tauri::AppHandle;
 use tauri_plugin_opener::OpenerExt;
@@ -23,6 +24,14 @@ use crate::{
 const ORPHAN_JOB_GRACE: Duration = Duration::from_secs(24 * 60 * 60);
 const HISTORY_PAGE_SIZE: usize = 100;
 pub const MAX_JOB_STORAGE_BYTES: u64 = 20 * 1024 * 1024 * 1024;
+const STORAGE_USAGE_CACHE_TTL: Duration = Duration::from_secs(5);
+
+struct StorageUsageCache {
+    bytes: u64,
+    measured_at: Instant,
+}
+
+static STORAGE_USAGE_CACHE: OnceLock<Mutex<Option<StorageUsageCache>>> = OnceLock::new();
 
 pub fn database_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(app_data_dir(app)?.join("whispertube.db"))
@@ -56,10 +65,34 @@ fn storage_tree_bytes(path: &Path) -> Result<u64, String> {
 }
 
 pub fn job_storage_bytes(app: &AppHandle) -> Result<u64, String> {
+    let cache = STORAGE_USAGE_CACHE.get_or_init(|| Mutex::new(None));
+    if let Ok(guard) = cache.lock() {
+        if let Some(cached) = guard.as_ref() {
+            if cached.measured_at.elapsed() < STORAGE_USAGE_CACHE_TTL {
+                return Ok(cached.bytes);
+            }
+        }
+    }
+
     let root = crate::paths::jobs_dir(app)?;
     let canonical_root =
         fs::canonicalize(&root).map_err(|e| format!("Gagal memvalidasi job storage: {e}"))?;
-    storage_tree_bytes(&canonical_root)
+    let bytes = storage_tree_bytes(&canonical_root)?;
+    if let Ok(mut guard) = cache.lock() {
+        *guard = Some(StorageUsageCache {
+            bytes,
+            measured_at: Instant::now(),
+        });
+    }
+    Ok(bytes)
+}
+
+pub fn invalidate_job_storage_cache() {
+    if let Some(cache) = STORAGE_USAGE_CACHE.get() {
+        if let Ok(mut guard) = cache.lock() {
+            *guard = None;
+        }
+    }
 }
 
 fn configure_connection(conn: &Connection) -> Result<(), String> {
@@ -136,6 +169,7 @@ where
     transaction
         .commit()
         .map_err(|e| format!("Gagal menyelesaikan penyimpanan history: {e}"))?;
+    invalidate_job_storage_cache();
     Ok(history_id)
 }
 
@@ -412,6 +446,7 @@ pub fn delete_history(app: &AppHandle, ids: &[i64]) -> Result<(), String> {
             cleanup_errors.push(format!("{}: {error}", item.trash.display()));
         }
     }
+    invalidate_job_storage_cache();
     if !cleanup_errors.is_empty() {
         return Err(format!(
             "History sudah dihapus dari database, tetapi file sementara gagal dibersihkan: {}",

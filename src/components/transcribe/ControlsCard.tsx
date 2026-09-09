@@ -121,6 +121,11 @@ export function ControlsCard({
   if (system?.cudaEngine && system.cudaSupported && !computeTargetOptions.some((option) => option.value.startsWith("cuda:"))) {
     computeTargetOptions.push({ value: "cuda", label: t("backend.cuda") });
   }
+  const memoryRequirementKey: "controls.cudaRequirement" | "controls.memoryEstimate" =
+    computeTargetId.startsWith("cuda") ||
+    (computeTargetId === "auto" && system?.cudaSupported && system.cudaEngine)
+      ? "controls.cudaRequirement"
+      : "controls.memoryEstimate";
   return (
     <div className="card control-card sticky-card">
       <div className="card-title-row">
@@ -152,7 +157,7 @@ export function ControlsCard({
               <div className="model-copy">
                 <strong>{getModelCopy(model, t).label}</strong>
                 <span>
-                  {getModelCopy(model, t).description} • {t("controls.cudaRequirement", { memory: formatMemory(model.vramRequiredMb, t("hardware.notDetected")) })}
+                  {getModelCopy(model, t).description} • {t(memoryRequirementKey, { memory: formatMemory(model.vramRequiredMb, t("hardware.notDetected")) })}
                 </span>
               </div>
               <div className="model-state">

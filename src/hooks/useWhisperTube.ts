@@ -135,7 +135,9 @@ export function useWhisperTube() {
     percent: 0,
   });
   const [appUpdateError, setAppUpdateError] = useState<string | null>(null);
+  const [refreshingSystem, setRefreshingSystem] = useState(false);
   const autoConfigured = useRef(false);
+  const refreshingSystemRef = useRef(false);
 
   const selectedModel = models.find((model) => model.id === modelId);
   const runtimeReady = Boolean(
@@ -155,34 +157,50 @@ export function useWhisperTube() {
   );
 
   const refreshSystem = useCallback(async () => {
-    const [systemResult, modelsResult, historyResult] = await Promise.allSettled([
-      getSystemStatus(),
-      listModels(),
-      listHistory(),
-    ]);
+    if (refreshingSystemRef.current) return;
+    refreshingSystemRef.current = true;
+    setRefreshingSystem(true);
+    try {
+      const [systemResult, modelsResult, historyResult] = await Promise.allSettled([
+        getSystemStatus(),
+        listModels(),
+        listHistory(),
+      ]);
 
-    if (systemResult.status === "fulfilled") {
-      const nextSystem = systemResult.value;
-      setSystem(nextSystem);
-      if (!autoConfigured.current) {
-        setModelId(nextSystem.recommendedModelId);
-        setBackend(nextSystem.recommendedBackend);
-        setComputeTargetId("auto");
-        autoConfigured.current = true;
+      if (systemResult.status === "fulfilled") {
+        const nextSystem = systemResult.value;
+        setSystem(nextSystem);
+        if (!autoConfigured.current) {
+          setModelId(nextSystem.recommendedModelId);
+          setBackend(nextSystem.recommendedBackend);
+          setComputeTargetId("auto");
+          autoConfigured.current = true;
+        }
       }
-    }
-    if (modelsResult.status === "fulfilled") setModels(modelsResult.value);
-    if (historyResult.status === "fulfilled") {
-      setHistory(historyResult.value.items);
-      setHistoryHasMore(historyResult.value.hasMore);
-      setHistoryTotalCount(historyResult.value.totalCount);
-    }
+      if (modelsResult.status === "fulfilled") setModels(modelsResult.value);
+      if (historyResult.status === "fulfilled") {
+        setHistory(historyResult.value.items);
+        setHistoryHasMore(historyResult.value.hasMore);
+        setHistoryTotalCount(historyResult.value.totalCount);
+      }
 
-    const failures = [systemResult, modelsResult, historyResult]
-      .filter((result): result is PromiseRejectedResult => result.status === "rejected")
-      .map((result) => friendlyError(result.reason));
-    if (failures.length > 0) throw new Error(failures.join(" "));
+      const failures = [systemResult, modelsResult, historyResult]
+        .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+        .map((result) => friendlyError(result.reason));
+      if (failures.length > 0) throw new Error(failures.join(" "));
+    } finally {
+      refreshingSystemRef.current = false;
+      setRefreshingSystem(false);
+    }
   }, []);
+
+  const refreshSystemFromUi = useCallback(async () => {
+    try {
+      await refreshSystem();
+    } catch (cause) {
+      setError(friendlyError(cause));
+    }
+  }, [refreshSystem]);
 
   const refreshAfterSuccessfulOperation = useCallback(async () => {
     try {
@@ -335,7 +353,7 @@ export function useWhisperTube() {
   const modelDownloadActive = Object.keys(downloadingModel).length > 0;
   const appUpdateInstalling = appUpdateStatus === "installing";
   const operationActive = Boolean(
-    busy || inspecting || resettingData || historyOperation || modelDownloadActive || installingCuda || installingAccelerator || appUpdateInstalling,
+    busy || inspecting || resettingData || historyOperation || modelDownloadActive || installingCuda || installingAccelerator || appUpdateInstalling || refreshingSystem,
   );
   const vramWarning = useMemo(() => {
     if (!selectedModel || backend === "cpu" || backend === "metal" || backend === "vulkan" || !system) return null;
@@ -788,7 +806,7 @@ export function useWhisperTube() {
     modelDownloadBlockReasons,
     vramWarning,
     acceleratorWarning,
-    refreshSystem,
+    refreshSystem: refreshSystemFromUi,
     inspectVideo,
     cancelInspection: handleCancelInspection,
     downloadModel: handleDownloadModel,

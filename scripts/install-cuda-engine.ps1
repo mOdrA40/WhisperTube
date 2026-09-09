@@ -2,14 +2,14 @@ $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
 $Root = Split-Path -Parent $PSScriptRoot
-$Runtime = Join-Path $Root "src-tauri\runtime\windows"
+$Runtime = Join-Path $Root "src-tauri\runtime-dev\windows"
 $CudaDir = Join-Path $Runtime "cuda"
 $Temp = Join-Path $env:TEMP ("whispertube-cuda-" + [guid]::NewGuid().ToString("N"))
 $Extract = Join-Path $Temp "extract"
 $Staging = Join-Path $Temp "staging"
-$WhisperVersion = "v1.9.1"
+$WhisperVersion = "v1.9.2"
 $CudaBuild = "12.4.0"
-$CudaSha256 = "106a2030eff8998e4ef320fe72e263a78449e9040386ee27c41ea80b001b601b"
+$CudaSha256 = "443110ddaad70d4290ab2e77179e31cf712035bbc4fad56bb4519a90c917b39c"
 
 function Download-File($Url, $OutFile) {
     Write-Host "    Downloading $Url"

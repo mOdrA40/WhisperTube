@@ -166,6 +166,7 @@ impl Drop for JobDirectoryGuard {
                 }
             }
         }
+        history::invalidate_job_storage_cache();
     }
 }
 

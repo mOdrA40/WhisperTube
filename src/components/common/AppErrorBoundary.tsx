@@ -1,5 +1,7 @@
 import type { ErrorInfo, ReactNode } from "react";
 import { Component } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { relaunch } from "@tauri-apps/plugin-process";
 
 type AppErrorBoundaryProps = {
   children: ReactNode;
@@ -20,8 +22,20 @@ export class AppErrorBoundary extends Component<AppErrorBoundaryProps, AppErrorB
     console.error("WhisperTube UI gagal dirender.", error, info.componentStack);
   }
 
-  private reload = () => {
-    window.location.reload();
+  private reload = async () => {
+    try {
+      // A WebView-only reload leaves Rust operations and child processes alive.
+      // Relaunching lets Tauri's exit handler terminate active work first.
+      await relaunch();
+    } catch (cause) {
+      console.error("WhisperTube gagal melakukan relaunch setelah crash UI.", cause);
+      try {
+        await getCurrentWindow().close();
+      } catch (closeCause) {
+        console.error("WhisperTube gagal menutup window setelah crash UI.", closeCause);
+        window.location.reload();
+      }
+    }
   };
 
   render() {

@@ -127,7 +127,13 @@ function VideoPreviewCard({ metadata }: { metadata: VideoMetadata }) {
       <div className="preview-thumbnail-col">
         {metadata.thumbnail ? (
           <div className="preview-thumbnail-frame">
-            <img src={metadata.thumbnail} alt={metadata.title} className="preview-thumb-img" />
+            <img
+              src={metadata.thumbnail}
+              alt={metadata.title}
+              className="preview-thumb-img"
+              loading="lazy"
+              referrerPolicy="no-referrer"
+            />
             <div className="preview-duration-pill">
               <Clock3 size={12} />
               <span>{formatDuration(metadata.duration)}</span>

@@ -1,8 +1,9 @@
 use regex::Regex;
 use serde_json::Value;
 use std::{
+    collections::HashSet,
     fs::{self, File},
-    io::{BufRead, BufReader, Read, Write},
+    io::{self, BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Child, ChildStderr, Command, Stdio},
     sync::{
@@ -17,12 +18,11 @@ use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
 
 use crate::{
-    browsers::cookie_args,
+    cookies::args as cookie_args,
     history, models,
     paths::{engine_path, is_regular_file, jobs_dir, model_path, tool_path},
     process, resources,
     sources::{js_runtime_args, validate_media_duration, validate_media_url},
-    state::VulkanProbeResult,
     system::{detect_gpu, detect_nvidia, detect_nvidia_device, UsageMonitor},
     types::{
         ComputeDeviceInfo, ProgressPayload, Segment, TranscriptRequest, TranscriptResult,
@@ -35,11 +35,12 @@ struct JobContext<'a> {
     usage: &'a UsageMonitor,
     active_pid: &'a Arc<Mutex<Option<u32>>>,
     cancelled: &'a Arc<AtomicBool>,
-    vulkan_probe: &'a Arc<Mutex<Option<VulkanProbeResult>>>,
+    capability_probe: &'a Arc<Mutex<HashSet<String>>>,
 }
 
 struct ProgressUpdate<'a> {
     stage: &'a str,
+    message_code: &'static str,
     percent: f64,
     message: String,
     backend: Option<&'a str>,
@@ -62,6 +63,7 @@ impl JobContext<'_> {
             "job-progress",
             ProgressPayload {
                 stage: update.stage.to_string(),
+                message_code: update.message_code.into(),
                 percent: update.percent.clamp(0.0, 100.0),
                 message: update.message,
                 backend: update.backend.map(str::to_string),
@@ -100,25 +102,25 @@ fn normalize_utf8_bytes(bytes: &[u8]) -> String {
 }
 
 fn normalize_output_utf8(path: &Path, max_bytes: u64) -> Result<(), String> {
-    let size = fs::metadata(path)
-        .map_err(|e| format!("Gagal membaca ukuran output Whisper: {e}"))?
-        .len();
-    if size > max_bytes {
-        return Err(format!(
-            "Output Whisper {} melebihi batas ukuran aman.",
-            path.extension()
-                .and_then(|extension| extension.to_str())
-                .unwrap_or("file")
-                .to_uppercase()
-        ));
-    }
-    let bytes = fs::read(path).map_err(|e| format!("Gagal membaca output Whisper: {e}"))?;
+    let bytes = read_bounded_file(path, max_bytes, "output Whisper")?;
     let normalized = normalize_utf8_bytes(&bytes);
     if normalized.as_bytes() != bytes.as_slice() {
         fs::write(path, normalized.as_bytes())
             .map_err(|e| format!("Gagal menormalkan output Whisper: {e}"))?;
     }
     Ok(())
+}
+
+fn read_bounded_file(path: &Path, max_bytes: u64, label: &str) -> Result<Vec<u8>, String> {
+    let file = File::open(path).map_err(|e| format!("Gagal membuka {label}: {e}"))?;
+    let mut bytes = Vec::with_capacity(max_bytes.min(64 * 1024) as usize);
+    file.take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("Gagal membaca {label}: {e}"))?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(format!("{label} melebihi batas ukuran aman."));
+    }
+    Ok(bytes)
 }
 
 struct JobDirectoryGuard {
@@ -193,6 +195,49 @@ const PROCESS_INACTIVITY_TIMEOUT: std::time::Duration = std::time::Duration::fro
 const CPU_INACTIVITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 const PROCESS_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 const MINIMUM_AUDIO_DURATION_SECONDS: f64 = 1.0;
+const MAX_REQUEST_TITLE_BYTES: usize = 4 * 1024;
+const MAX_REQUEST_CHANNEL_BYTES: usize = 2 * 1024;
+const MAX_REQUEST_LANGUAGE_BYTES: usize = 16;
+const MAX_REQUEST_DEVICE_ID_BYTES: usize = 64;
+const MAX_TIMESTAMP_BYTES: usize = 64;
+
+fn validate_transcript_request(request: &TranscriptRequest) -> Result<(), String> {
+    if request.title.len() > MAX_REQUEST_TITLE_BYTES {
+        return Err("Judul video terlalu panjang.".into());
+    }
+    if request.channel.len() > MAX_REQUEST_CHANNEL_BYTES {
+        return Err("Nama channel terlalu panjang.".into());
+    }
+    if request.language.len() > MAX_REQUEST_LANGUAGE_BYTES
+        || !matches!(
+            request.language.as_str(),
+            "auto" | "id" | "en" | "zh" | "ja" | "ko"
+        )
+    {
+        return Err("Bahasa transkripsi tidak didukung.".into());
+    }
+    if !matches!(
+        request.backend.as_str(),
+        "auto" | "cpu" | "cuda" | "metal" | "vulkan"
+    ) {
+        return Err("Compute backend tidak dikenal.".into());
+    }
+    if request
+        .compute_device_id
+        .as_deref()
+        .is_some_and(|value| value.len() > MAX_REQUEST_DEVICE_ID_BYTES)
+    {
+        return Err("Target compute terlalu panjang.".into());
+    }
+    if request
+        .cookies_path
+        .as_deref()
+        .is_some_and(|value| value.len() > 32 * 1024)
+    {
+        return Err("Path cookies.txt terlalu panjang.".into());
+    }
+    Ok(())
+}
 
 fn capture_stderr(mut reader: impl Read) -> Result<String, String> {
     let mut captured = Vec::with_capacity(MAX_CAPTURED_STDERR_BYTES);
@@ -268,6 +313,17 @@ fn directory_file_bytes(path: &Path) -> Result<u64, String> {
     Ok(total)
 }
 
+fn ensure_job_storage_quota(app: &AppHandle) -> Result<(), String> {
+    let used = history::job_storage_bytes(app)?;
+    if used >= history::MAX_JOB_STORAGE_BYTES {
+        return Err(format!(
+            "storage_quota_exceeded:Penyimpanan job WhisperTube sudah melewati batas {:.1} GB.",
+            history::MAX_JOB_STORAGE_BYTES as f64 / 1024_f64.powi(3),
+        ));
+    }
+    Ok(())
+}
+
 fn ffmpeg_target_duration(duration: f64) -> f64 {
     duration.max(MINIMUM_AUDIO_DURATION_SECONDS)
 }
@@ -276,16 +332,70 @@ fn spawn_line_reader<R: Read + Send + 'static>(
     reader: R,
     label: &'static str,
 ) -> (Receiver<Result<String, String>>, JoinHandle<()>) {
+    const MAX_LINE_BYTES: usize = 128 * 1024;
     let (sender, receiver) = mpsc::sync_channel(128);
     let reader = std::thread::spawn(move || {
-        for line in BufReader::new(reader).lines() {
-            let line = line.map_err(|error| format!("Gagal membaca output {label}: {error}"));
-            if sender.send(line).is_err() {
+        let mut reader = BufReader::new(reader);
+        loop {
+            let line = match read_bounded_line(&mut reader, MAX_LINE_BYTES) {
+                Ok(Some(line)) => line,
+                Ok(None) => break,
+                Err(error) => {
+                    let _ = sender.send(Err(format!("Gagal membaca output {label}: {error}")));
+                    break;
+                }
+            };
+            if sender.send(Ok(line)).is_err() {
                 break;
             }
         }
     });
     (receiver, reader)
+}
+
+fn read_bounded_line(
+    reader: &mut BufReader<impl Read>,
+    limit: usize,
+) -> io::Result<Option<String>> {
+    let mut bytes = Vec::with_capacity(limit.min(8 * 1024));
+    let mut truncated = false;
+    loop {
+        let buffer = reader.fill_buf()?;
+        if buffer.is_empty() {
+            if bytes.is_empty() {
+                return Ok(None);
+            }
+            break;
+        }
+        let consumed = buffer
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(buffer.len(), |position| position + 1);
+        if !truncated {
+            let content_length = consumed.min(buffer.len());
+            let content_length = content_length.min(limit.saturating_sub(bytes.len()));
+            bytes.extend_from_slice(&buffer[..content_length]);
+            if bytes.len() == limit && consumed > content_length {
+                truncated = true;
+            }
+        }
+        let has_newline = buffer[..consumed].contains(&b'\n');
+        reader.consume(consumed);
+        if has_newline {
+            break;
+        }
+    }
+    if bytes.last() == Some(&b'\n') {
+        bytes.pop();
+    }
+    if bytes.last() == Some(&b'\r') {
+        bytes.pop();
+    }
+    let mut line = String::from_utf8_lossy(&bytes).into_owned();
+    if truncated {
+        line.push_str("\n[output line dipotong karena terlalu panjang]");
+    }
+    Ok(Some(line))
 }
 
 fn wait_for_child_after_stream_closed(
@@ -347,12 +457,7 @@ fn run_download(
     let template = job_dir.join("source.%(ext)s");
     let mut command = Command::new(yt_dlp);
     process::hide_console(&mut command);
-    let cookie_args = cookie_args(
-        &request.browser,
-        request.browser_profile.as_deref(),
-        request.cookies_path.as_deref(),
-    )
-    .map_err(|error| {
+    let cookie_args = cookie_args(request.cookies_path.as_deref()).map_err(|error| {
         if request.cookies_path.is_some() {
             format!("media_source_cookie_file:{error}")
         } else {
@@ -425,6 +530,9 @@ fn run_download(
             match stdout_receiver.recv_timeout(PROCESS_POLL_INTERVAL) {
                 Ok(line) => {
                     let line = line?;
+                    if let Some(error) = context.usage.memory_pressure() {
+                        return Err(error);
+                    }
                     last_activity = Instant::now();
                     if let Some(caps) = progress_re.captures(&line) {
                         let downloaded_bytes =
@@ -440,6 +548,7 @@ fn run_download(
                         if let Ok(percent) = caps[1].parse::<f64>() {
                             context.emit(ProgressUpdate {
                                 stage: "downloading",
+                                message_code: "downloading_audio",
                                 percent,
                                 message: "Mengunduh best available audio dari YouTube…".into(),
                                 backend: None,
@@ -465,6 +574,7 @@ fn run_download(
                             ),
                             "download dan konversi media",
                         )?;
+                        ensure_job_storage_quota(context.app)?;
                         last_disk_check = Instant::now();
                     }
                     if context.is_cancelled() {
@@ -472,6 +582,9 @@ fn run_download(
                     }
                 }
                 Err(RecvTimeoutError::Timeout) => {
+                    if let Some(error) = context.usage.memory_pressure() {
+                        return Err(error);
+                    }
                     if context.is_cancelled() {
                         break;
                     }
@@ -612,6 +725,9 @@ fn run_ffmpeg(
             match stdout_receiver.recv_timeout(PROCESS_POLL_INTERVAL) {
                 Ok(line) => {
                     let line = line?;
+                    if let Some(error) = context.usage.memory_pressure() {
+                        return Err(error);
+                    }
                     last_activity = Instant::now();
                     if let Some(raw) = line.strip_prefix("out_time_us=") {
                         if let Ok(microseconds) = raw.parse::<f64>() {
@@ -623,6 +739,7 @@ fn run_ffmpeg(
                             };
                             context.emit(ProgressUpdate {
                                 stage: "converting",
+                                message_code: "converting_audio",
                                 percent,
                                 message: "Konversi ke PCM 16 kHz mono…".into(),
                                 backend: None,
@@ -649,6 +766,7 @@ fn run_ffmpeg(
                             remaining_disk_reservation(written, maximum_wav, 0),
                             "konversi media",
                         )?;
+                        ensure_job_storage_quota(context.app)?;
                         last_disk_check = Instant::now();
                     }
                     if context.is_cancelled() {
@@ -656,6 +774,9 @@ fn run_ffmpeg(
                     }
                 }
                 Err(RecvTimeoutError::Timeout) => {
+                    if let Some(error) = context.usage.memory_pressure() {
+                        return Err(error);
+                    }
                     if context.is_cancelled() {
                         break;
                     }
@@ -705,9 +826,9 @@ fn run_ffmpeg(
     Ok(())
 }
 
-const VULKAN_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const CAPABILITY_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-fn write_vulkan_probe_wav(path: &Path) -> Result<(), String> {
+fn write_probe_wav(path: &Path) -> Result<(), String> {
     const SAMPLE_RATE: u32 = 16_000;
     const CHANNELS: u16 = 1;
     const BITS_PER_SAMPLE: u16 = 16;
@@ -755,30 +876,39 @@ fn vulkan_probe_signature(engine: &Path, model: &Path) -> String {
     )
 }
 
-fn run_vulkan_probe(
+fn run_engine_probe(
     context: &JobContext,
+    backend: &str,
     engine: &Path,
     model: &Path,
-    device_index: usize,
+    device_index: Option<usize>,
 ) -> Result<(), String> {
     let probe_dir =
-        std::env::temp_dir().join(format!("whispertube-vulkan-probe-{}", Uuid::new_v4()));
+        std::env::temp_dir().join(format!("whispertube-{backend}-probe-{}", Uuid::new_v4()));
     fs::create_dir_all(&probe_dir)
-        .map_err(|e| format!("Gagal membuat folder probe Vulkan: {e}"))?;
+        .map_err(|e| format!("Gagal membuat folder probe {backend}: {e}"))?;
     let wav = probe_dir.join("silence.wav");
     let output = probe_dir.join("probe");
     let result = (|| -> Result<(), String> {
-        write_vulkan_probe_wav(&wav)?;
+        write_probe_wav(&wav)?;
         let mut command = Command::new(engine);
         process::hide_console(&mut command);
-        configure_vulkan_command(&mut command);
+        if backend == "vulkan" {
+            configure_vulkan_command(&mut command);
+        }
         command
             .args(["-m"])
             .arg(model)
             .args(["-f"])
             .arg(&wav)
-            .args(["-l", "auto", "-t", "1", "-nt", "-np", "-nfa", "-dev"])
-            .arg(device_index.to_string())
+            .args(["-l", "auto", "-t", "1", "-nt", "-np"]);
+        if backend == "vulkan" {
+            command.arg("-nfa");
+        }
+        if let Some(device_index) = device_index {
+            command.arg("-dev").arg(device_index.to_string());
+        }
+        command
             .args(["-of"])
             .arg(&output)
             .stdout(Stdio::null())
@@ -786,7 +916,7 @@ fn run_vulkan_probe(
             .stdin(Stdio::null());
         let mut child = command
             .spawn()
-            .map_err(|e| format!("engine Vulkan tidak bisa dijalankan: {e}"))?;
+            .map_err(|e| format!("engine {backend} tidak bisa dijalankan: {e}"))?;
         let child_pid = child.id();
         set_active_pid(context.active_pid, Some(child_pid));
         let _process_monitor = context.usage.track_process(child_pid);
@@ -796,13 +926,20 @@ fn run_vulkan_probe(
                 process::terminate_child(&mut child);
                 let _ = child.wait();
                 set_active_pid(context.active_pid, None);
-                return Err(
-                    "engine Vulkan tidak menyediakan stderr untuk capability probe.".into(),
-                );
+                return Err(format!(
+                    "engine {backend} tidak menyediakan stderr untuk capability probe."
+                ));
             }
         };
         let started = std::time::Instant::now();
         let status = loop {
+            if let Some(error) = context.usage.memory_pressure() {
+                process::terminate_child(&mut child);
+                let _ = child.wait();
+                set_active_pid(context.active_pid, None);
+                let _ = join_stderr(stderr);
+                return Err(error);
+            }
             match child.try_wait() {
                 Ok(Some(status)) => break status,
                 Ok(None) if context.is_cancelled() => {
@@ -812,7 +949,7 @@ fn run_vulkan_probe(
                     let _ = join_stderr(stderr);
                     return Err("Job dibatalkan.".into());
                 }
-                Ok(None) if started.elapsed() >= VULKAN_PROBE_TIMEOUT => {
+                Ok(None) if started.elapsed() >= CAPABILITY_PROBE_TIMEOUT => {
                     process::terminate_child(&mut child);
                     let _ = child.wait();
                     set_active_pid(context.active_pid, None);
@@ -823,7 +960,7 @@ fn run_vulkan_probe(
                         format!(" Detail: {}", stderr.trim())
                     };
                     return Err(format!(
-                        "capability probe Vulkan melewati batas waktu.{detail}"
+                        "capability probe {backend} melewati batas waktu.{detail}"
                     ));
                 }
                 Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
@@ -833,7 +970,7 @@ fn run_vulkan_probe(
                     set_active_pid(context.active_pid, None);
                     let _ = join_stderr(stderr);
                     return Err(format!(
-                        "Status capability probe Vulkan tidak bisa dibaca: {error}"
+                        "Status capability probe {backend} tidak bisa dibaca: {error}"
                     ));
                 }
             }
@@ -844,7 +981,7 @@ fn run_vulkan_probe(
             return Err(process_failed(
                 context.cancelled,
                 stderr,
-                "Capability probe Vulkan",
+                &format!("Capability probe {backend}"),
             ));
         }
         Ok(())
@@ -860,16 +997,32 @@ fn ensure_vulkan_probe(
     device_index: usize,
 ) -> Result<(), String> {
     let signature = format!(
-        "{}|device={device_index}",
+        "backend=vulkan|{}|device={device_index}",
         vulkan_probe_signature(engine, model)
     );
-    run_cached_vulkan_probe(context.vulkan_probe, signature, || {
-        run_vulkan_probe(context, engine, model, device_index)
+    run_cached_probe(context.capability_probe, signature, || {
+        run_engine_probe(context, "vulkan", engine, model, Some(device_index))
     })
 }
 
-fn run_cached_vulkan_probe<F>(
-    cache: &Arc<Mutex<Option<VulkanProbeResult>>>,
+fn ensure_backend_probe(
+    context: &JobContext,
+    backend: &str,
+    engine: &Path,
+    model: &Path,
+    device_index: Option<usize>,
+) -> Result<(), String> {
+    let signature = format!(
+        "backend={backend}|{}|device={device_index:?}",
+        vulkan_probe_signature(engine, model)
+    );
+    run_cached_probe(context.capability_probe, signature, || {
+        run_engine_probe(context, backend, engine, model, device_index)
+    })
+}
+
+fn run_cached_probe<F>(
+    cache: &Arc<Mutex<HashSet<String>>>,
     signature: String,
     probe: F,
 ) -> Result<(), String>
@@ -878,17 +1031,18 @@ where
 {
     if cache
         .lock()
-        .map_err(|_| "Cache probe Vulkan terkunci")?
-        .as_ref()
-        .is_some_and(|cached| cached.signature == signature)
+        .map_err(|_| "Cache capability probe terkunci")?
+        .contains(&signature)
     {
         return Ok(());
     }
 
     let result = probe();
     if result.is_ok() {
-        *cache.lock().map_err(|_| "Cache probe Vulkan terkunci")? =
-            Some(VulkanProbeResult { signature });
+        cache
+            .lock()
+            .map_err(|_| "Cache capability probe terkunci")?
+            .insert(signature);
     }
     result
 }
@@ -951,11 +1105,24 @@ fn probe_vulkan_devices(
     Err(errors.join("; "))
 }
 
+fn run_cuda_probe_with_vram_guard<F>(
+    model_id: &str,
+    gpu: &crate::system::GpuInfo,
+    probe: F,
+) -> Result<(), String>
+where
+    F: FnOnce() -> Result<(), String>,
+{
+    models::ensure_vram_available(model_id, gpu.available_memory_mb())?;
+    probe()
+}
+
 fn choose_backend(
     context: &JobContext,
     requested: &str,
     requested_device_id: Option<&str>,
     model: &Path,
+    model_id: &str,
 ) -> Result<(String, PathBuf, Option<String>, Option<usize>), String> {
     let app = context.app;
     let cpu = engine_path(app, "cpu")?;
@@ -988,6 +1155,9 @@ fn choose_backend(
                     None => detect_nvidia()
                         .ok_or_else(|| "NVIDIA GPU/driver tidak terdeteksi.".to_string())?,
                 };
+                run_cuda_probe_with_vram_guard(model_id, &gpu, || {
+                    ensure_backend_probe(context, "cuda", &cuda, model, gpu.device_index)
+                })?;
                 Ok(("cuda".into(), cuda, None, gpu.device_index))
             }
         }
@@ -997,6 +1167,7 @@ fn choose_backend(
             } else if !is_regular_file(&metal) {
                 Err("Metal engine belum terpasang. Install Apple Metal dari Settings terlebih dahulu.".into())
             } else {
+                ensure_backend_probe(context, "metal", &metal, model, None)?;
                 Ok(("metal".into(), metal, None, None))
             }
         }
@@ -1027,13 +1198,61 @@ fn choose_backend(
                 && cfg!(all(target_os = "windows", target_arch = "x86_64"))
                 && is_regular_file(&cuda)
             {
-                Ok((
-                    "cuda".into(),
-                    cuda,
-                    None,
-                    nvidia_gpu.as_ref().and_then(|gpu| gpu.device_index),
-                ))
+                let device_index = nvidia_gpu.as_ref().and_then(|gpu| gpu.device_index);
+                let Some(gpu) = nvidia_gpu.as_ref() else {
+                    return Err("NVIDIA GPU/driver tidak terdeteksi.".into());
+                };
+                match run_cuda_probe_with_vram_guard(model_id, gpu, || {
+                    ensure_backend_probe(context, "cuda", &cuda, model, device_index)
+                }) {
+                    Ok(()) => Ok(("cuda".into(), cuda, None, device_index)),
+                    Err(cuda_error) if context.is_cancelled() => Err(cuda_error),
+                    Err(cuda_error)
+                        if cfg!(any(target_os = "windows", target_os = "linux"))
+                            && gpu_detected
+                            && is_regular_file(&vulkan) =>
+                    {
+                        match probe_vulkan_devices(
+                            context,
+                            &vulkan,
+                            model,
+                            &available_vulkan_device_indices(app),
+                        ) {
+                            Ok(device_index) => Ok((
+                                "vulkan".into(),
+                                vulkan,
+                                Some(format!(
+                                    "CUDA capability probe gagal ({cuda_error}); Auto beralih ke Vulkan."
+                                )),
+                                Some(device_index),
+                            )),
+                            Err(vulkan_error) if is_regular_file(&cpu) => Ok((
+                                "cpu".into(),
+                                cpu,
+                                Some(format!(
+                                    "CUDA dan Vulkan tidak lolos capability probe ({cuda_error}; {vulkan_error}); transkripsi dilanjutkan dengan CPU."
+                                )),
+                                None,
+                            )),
+                            Err(vulkan_error) => Err(format!(
+                                "CUDA dan Vulkan tidak lolos capability probe: {cuda_error}; {vulkan_error}"
+                            )),
+                        }
+                    }
+                    Err(cuda_error) if is_regular_file(&cpu) => Ok((
+                        "cpu".into(),
+                        cpu,
+                        Some(format!(
+                            "CUDA tidak lolos capability probe ({cuda_error}); transkripsi dilanjutkan dengan CPU."
+                        )),
+                        None,
+                    )),
+                    Err(cuda_error) => Err(format!(
+                        "CUDA tidak lolos capability probe dan CPU engine tidak tersedia: {cuda_error}"
+                    )),
+                }
             } else if cfg!(target_os = "macos") && is_regular_file(&metal) {
+                ensure_backend_probe(context, "metal", &metal, model, None)?;
                 Ok(("metal".into(), metal, None, None))
             } else if cfg!(any(target_os = "windows", target_os = "linux"))
                 && gpu_detected
@@ -1077,14 +1296,20 @@ fn run_whisper(
     model: &Path,
     config: WhisperConfig<'_>,
 ) -> Result<String, String> {
-    let (resolved_backend, engine, fallback_message, device_index) =
-        choose_backend(context, config.backend, config.compute_device_id, model)?;
+    let (resolved_backend, engine, fallback_message, device_index) = choose_backend(
+        context,
+        config.backend,
+        config.compute_device_id,
+        model,
+        config.model_id,
+    )?;
     if let Some(message) = fallback_message {
         context.emit(ProgressUpdate {
             stage: "transcribing",
+            message_code: "backend_fallback",
             percent: 0.0,
             message,
-            backend: Some("cpu"),
+            backend: Some(&resolved_backend),
             downloaded_bytes: None,
             total_bytes: None,
             network_bytes_per_second: None,
@@ -1184,6 +1409,7 @@ fn run_whisper(
                         if let Ok(percent) = caps[1].parse::<f64>() {
                             context.emit(ProgressUpdate {
                                 stage: "transcribing",
+                                message_code: "whisper_via",
                                 percent,
                                 message: format!(
                                     "Whisper sedang bekerja via {}…",
@@ -1254,21 +1480,18 @@ fn run_whisper(
 }
 
 fn parse_whisper_result(path: &Path) -> Result<(String, Vec<Segment>, String), String> {
-    let size = fs::metadata(path)
-        .map_err(|e| format!("Gagal membaca ukuran output JSON Whisper: {e}"))?
-        .len();
-    if size > MAX_TRANSCRIPT_RESULT_BYTES {
-        return Err("Output JSON Whisper melebihi batas ukuran aman.".into());
-    }
-    let file = File::open(path).map_err(|e| format!("Output JSON Whisper tidak ditemukan: {e}"))?;
+    let bytes = read_bounded_file(path, MAX_TRANSCRIPT_RESULT_BYTES, "Output JSON Whisper")?;
     let value: Value =
-        serde_json::from_reader(file).map_err(|e| format!("Output JSON Whisper rusak: {e}"))?;
+        serde_json::from_slice(&bytes).map_err(|e| format!("Output JSON Whisper rusak: {e}"))?;
     let language = value
         .get("result")
         .and_then(|result| result.get("language"))
         .and_then(Value::as_str)
         .unwrap_or("unknown")
         .to_string();
+    if language.len() > MAX_REQUEST_LANGUAGE_BYTES {
+        return Err("Bahasa hasil Whisper terlalu panjang.".into());
+    }
     let mut segments = Vec::new();
     let mut total_text_bytes = 0usize;
     if let Some(items) = value.get("transcription").and_then(Value::as_array) {
@@ -1284,6 +1507,9 @@ fn parse_whisper_result(path: &Path) -> Result<(String, Vec<Segment>, String), S
                 .and_then(Value::as_str)
                 .unwrap_or("00:00:00,000")
                 .to_string();
+            if from.len() > MAX_TIMESTAMP_BYTES || to.len() > MAX_TIMESTAMP_BYTES {
+                return Err("Timestamp hasil Whisper terlalu panjang.".into());
+            }
             let text = item
                 .get("text")
                 .and_then(Value::as_str)
@@ -1316,13 +1542,14 @@ pub fn pipeline(
     app: AppHandle,
     active_pid: Arc<Mutex<Option<u32>>>,
     cancelled: Arc<AtomicBool>,
-    vulkan_probe: Arc<Mutex<Option<VulkanProbeResult>>>,
-    request: TranscriptRequest,
+    capability_probe: Arc<Mutex<HashSet<String>>>,
+    mut request: TranscriptRequest,
 ) -> Result<TranscriptResult, String> {
     if cancelled.load(Ordering::SeqCst) {
         return Err("Job dibatalkan.".into());
     }
-    validate_media_url(&request.url)?;
+    request.url = validate_media_url(&request.url)?;
+    validate_transcript_request(&request)?;
     validate_media_duration(request.duration, false)?;
     let yt_dlp = tool_path(&app, "yt-dlp")?;
     let ffmpeg = tool_path(&app, "ffmpeg")?;
@@ -1347,6 +1574,7 @@ pub fn pipeline(
         media_disk_reservation(request.duration),
         "download dan konversi media",
     )?;
+    ensure_job_storage_quota(&app)?;
     let job_dir = jobs_dir.join(Uuid::new_v4().to_string());
     let job_guard = JobDirectoryGuard::create(job_dir.clone())?;
     let usage_monitor = UsageMonitor::start();
@@ -1355,11 +1583,12 @@ pub fn pipeline(
         usage: &usage_monitor,
         active_pid: &active_pid,
         cancelled: &cancelled,
-        vulkan_probe: &vulkan_probe,
+        capability_probe: &capability_probe,
     };
 
     context.emit(ProgressUpdate {
         stage: "downloading",
+        message_code: "preparing_download",
         percent: 0.0,
         message: "Menyiapkan download…".into(),
         backend: None,
@@ -1375,6 +1604,7 @@ pub fn pipeline(
     let wav = job_dir.join("audio.wav");
     context.emit(ProgressUpdate {
         stage: "converting",
+        message_code: "normalizing_audio",
         percent: 0.0,
         message: "Menormalisasi audio untuk Whisper…".into(),
         backend: None,
@@ -1383,6 +1613,7 @@ pub fn pipeline(
         network_bytes_per_second: None,
     });
     run_ffmpeg(&context, &source, &wav, request.duration)?;
+    ensure_job_storage_quota(&app)?;
     remove_file_if_present(&source, "audio sumber")?;
     if context.is_cancelled() {
         return Err("Job dibatalkan.".into());
@@ -1402,6 +1633,7 @@ pub fn pipeline(
     let output_prefix = job_dir.join("transcript");
     context.emit(ProgressUpdate {
         stage: "transcribing",
+        message_code: "loading_model",
         percent: 0.0,
         message: "Memuat model Whisper…".into(),
         backend: None,
@@ -1434,6 +1666,7 @@ pub fn pipeline(
 
     context.emit(ProgressUpdate {
         stage: "finalizing",
+        message_code: "finalizing_result",
         percent: 92.0,
         message: "Merapikan transcript dan menyimpan history…".into(),
         backend: Some(&resolved_backend),
@@ -1446,6 +1679,7 @@ pub fn pipeline(
     let srt_path = output_prefix.with_extension("srt");
     let vtt_path = output_prefix.with_extension("vtt");
     let (language, segments, text) = parse_whisper_result(&json_path)?;
+    ensure_job_storage_quota(&app)?;
     let result_store_path = job_dir.join("result.json");
     if !request.keep_audio {
         remove_file_if_present(&wav, "WAV hasil konversi")?;
@@ -1486,6 +1720,7 @@ pub fn pipeline(
 
     context.emit(ProgressUpdate {
         stage: "done",
+        message_code: "complete",
         percent: 100.0,
         message: "Transkripsi selesai.".into(),
         backend: Some(&resolved_backend),
@@ -1501,15 +1736,18 @@ pub fn pipeline(
 #[cfg(test)]
 mod tests {
     use super::{
-        capture_stderr, ffmpeg_target_duration, normalize_utf8_bytes, remaining_disk_reservation,
-        run_cached_vulkan_probe, vulkan_device_indices, whisper_inactivity_timeout,
+        capture_stderr, ffmpeg_target_duration, normalize_utf8_bytes, read_bounded_line,
+        remaining_disk_reservation, run_cached_probe, run_cuda_probe_with_vram_guard,
+        validate_transcript_request, vulkan_device_indices, whisper_inactivity_timeout,
         whisper_thread_count, ComputeDeviceInfo, JobDirectoryGuard, CPU_INACTIVITY_TIMEOUT,
         DISK_SAFETY_BUFFER_BYTES, MAX_CAPTURED_STDERR_BYTES, PROCESS_INACTIVITY_TIMEOUT,
     };
+    use crate::types::TranscriptRequest;
     use std::{
-        io::Cursor,
+        collections::HashSet,
+        io::{BufReader, Cursor},
         process::{Command, Stdio},
-        sync::atomic::AtomicBool,
+        sync::atomic::{AtomicBool, Ordering},
         sync::{Arc, Mutex},
         time::{Duration, Instant},
     };
@@ -1573,16 +1811,67 @@ mod tests {
     }
 
     #[test]
+    fn progress_line_reader_caps_an_unterminated_line() {
+        let mut reader = BufReader::new(Cursor::new(vec![b'x'; 256 * 1024]));
+        let line = read_bounded_line(&mut reader, 128).unwrap().unwrap();
+        assert!(line.starts_with(&"x".repeat(128)));
+        assert!(line.ends_with("[output line dipotong karena terlalu panjang]"));
+    }
+
+    #[test]
+    fn transcript_request_rejects_untrusted_enum_and_text_values() {
+        let request = TranscriptRequest {
+            url: "https://youtube.com/watch?v=test".into(),
+            title: "x".repeat(4 * 1024 + 1),
+            channel: "channel".into(),
+            duration: 60.0,
+            cookies_path: None,
+            backend: "cpu".into(),
+            compute_device_id: None,
+            language: "en".into(),
+            model_id: "base".into(),
+            keep_audio: false,
+        };
+        assert!(validate_transcript_request(&request).is_err());
+
+        let mut invalid_language = request.clone();
+        invalid_language.title = "title".into();
+        invalid_language.language = "shell-command".into();
+        assert!(validate_transcript_request(&invalid_language).is_err());
+    }
+
+    #[test]
+    fn cuda_vram_guard_runs_before_capability_probe() {
+        let probe_called = Arc::new(AtomicBool::new(false));
+        let probe_called_by_closure = Arc::clone(&probe_called);
+        let gpu = crate::system::GpuInfo {
+            name: "Test NVIDIA".into(),
+            total_memory_mb: Some(8192),
+            free_memory_mb: Some(1024),
+            device_index: Some(0),
+        };
+
+        let error = run_cuda_probe_with_vram_guard("large-v3-q5_0", &gpu, || {
+            probe_called_by_closure.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+        .expect_err("low VRAM should stop the probe");
+
+        assert!(error.contains("membutuhkan"));
+        assert!(!probe_called.load(Ordering::SeqCst));
+    }
+
+    #[test]
     fn transient_vulkan_probe_failure_is_retried_and_not_cached() {
-        let cache = Arc::new(Mutex::new(None));
+        let cache = Arc::new(Mutex::new(HashSet::new()));
         let mut attempts = 0;
         let signature = "engine:model".to_string();
 
-        let first = run_cached_vulkan_probe(&cache, signature.clone(), || {
+        let first = run_cached_probe(&cache, signature.clone(), || {
             attempts += 1;
             Err("Job dibatalkan.".into())
         });
-        let second = run_cached_vulkan_probe(&cache, signature, || {
+        let second = run_cached_probe(&cache, signature, || {
             attempts += 1;
             Err("capability probe Vulkan melewati batas waktu.".into())
         });
@@ -1590,21 +1879,21 @@ mod tests {
         assert!(first.is_err());
         assert!(second.is_err());
         assert_eq!(attempts, 2);
-        assert!(cache.lock().unwrap().is_none());
+        assert!(cache.lock().unwrap().is_empty());
     }
 
     #[test]
     fn successful_vulkan_probe_is_cached() {
-        let cache = Arc::new(Mutex::new(None));
+        let cache = Arc::new(Mutex::new(HashSet::new()));
         let mut attempts = 0;
         let signature = "engine:model".to_string();
 
-        run_cached_vulkan_probe(&cache, signature.clone(), || {
+        run_cached_probe(&cache, signature.clone(), || {
             attempts += 1;
             Ok(())
         })
         .unwrap();
-        run_cached_vulkan_probe(&cache, signature, || {
+        run_cached_probe(&cache, signature, || {
             attempts += 1;
             Ok(())
         })

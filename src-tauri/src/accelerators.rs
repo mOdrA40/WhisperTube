@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 use std::{
     fs,
     fs::File,
-    io::{self, Read},
+    io::Read,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -14,9 +14,9 @@ use std::{
 };
 use tauri::{AppHandle, Emitter};
 use tokio::io::AsyncWriteExt;
-use zip::ZipArchive;
 
 use crate::{
+    network,
     paths::{engine_path, is_regular_file, model_path, user_runtime_dir},
     process,
     types::{AcceleratorDownloadPayload, AcceleratorInfo},
@@ -25,8 +25,6 @@ use crate::{
 const RELEASE_REPOSITORY: &str = "mOdrA40/WhisperTube";
 const RELEASE_TAG: &str = "accelerators-v0.1.0";
 const MAX_ACCELERATOR_ARCHIVE_BYTES: u64 = 1024 * 1024 * 1024;
-const MAX_ARCHIVE_ENTRIES: usize = 4096;
-const MAX_EXTRACTED_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 // These values are filled by scripts/sync-accelerator-hashes.ps1 after the
 // matching public GitHub Release has been built and reviewed. Keeping the
@@ -155,10 +153,13 @@ async fn release_asset(
 ) -> Result<(String, String, Option<String>), String> {
     let api_url =
         format!("https://api.github.com/repos/{RELEASE_REPOSITORY}/releases/tags/{RELEASE_TAG}");
-    let response = tokio::time::timeout(Duration::from_secs(30), client.get(api_url).send())
-        .await
-        .map_err(|_| "Timeout saat mengambil manifest accelerator.".to_string())?
-        .map_err(|e| format!("Gagal mengambil manifest accelerator: {e}"))?;
+    let response = network::send_cancelable(
+        client.get(api_url),
+        cancelled,
+        Duration::from_secs(30),
+        "manifest accelerator",
+    )
+    .await?;
     if response.status().as_u16() == 404 {
         return Err("Release accelerator belum tersedia atau repository masih private. Publikasikan release accelerator terlebih dahulu.".into());
     }
@@ -209,11 +210,13 @@ async fn release_asset(
         .get("browser_download_url")
         .and_then(Value::as_str)
         .ok_or_else(|| "URL checksum accelerator tidak tersedia.".to_string())?;
-    let checksum_response =
-        tokio::time::timeout(Duration::from_secs(30), client.get(checksum_url).send())
-            .await
-            .map_err(|_| "Timeout saat mengambil checksum accelerator.".to_string())?
-            .map_err(|e| format!("Gagal mengambil checksum accelerator: {e}"))?;
+    let checksum_response = network::send_cancelable(
+        client.get(checksum_url),
+        cancelled,
+        Duration::from_secs(30),
+        "checksum accelerator",
+    )
+    .await?;
     if !checksum_response.status().is_success() {
         return Err(format!(
             "Checksum accelerator mengembalikan HTTP {}.",
@@ -249,25 +252,17 @@ async fn read_small_body(
     {
         return Err(format!("Ukuran {label} accelerator melewati batas aman."));
     }
-    tokio::time::timeout(Duration::from_secs(30), async {
-        let mut body = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|e| format!("{label} accelerator tidak bisa dibaca: {e}"))?
-        {
-            if cancelled.load(Ordering::SeqCst) {
-                return Err(format!("Pengambilan {label} accelerator dibatalkan."));
-            }
-            if body.len().saturating_add(chunk.len()) > max_bytes {
-                return Err(format!("Ukuran {label} accelerator melewati batas aman."));
-            }
-            body.extend_from_slice(&chunk);
+    let mut body = Vec::new();
+    while let Some(chunk) =
+        network::next_chunk_cancelable(&mut response, cancelled, Duration::from_secs(30), label)
+            .await?
+    {
+        if body.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(format!("Ukuran {label} accelerator melewati batas aman."));
         }
-        Ok(body)
-    })
-    .await
-    .map_err(|_| format!("Timeout saat membaca {label} accelerator."))?
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 struct FinalizePaths<'a> {
@@ -289,10 +284,13 @@ async fn download_archive(
     staging: &Path,
     cancelled: &AtomicBool,
 ) -> Result<(), String> {
-    let mut response = tokio::time::timeout(Duration::from_secs(30), client.get(url).send())
-        .await
-        .map_err(|_| "Timeout saat menunggu response accelerator.".to_string())?
-        .map_err(|e| format!("Gagal mengunduh accelerator: {e}"))?;
+    let mut response = network::send_cancelable(
+        client.get(url),
+        cancelled,
+        Duration::from_secs(30),
+        "accelerator",
+    )
+    .await?;
     if !response.status().is_success() {
         return Err(format!(
             "Server accelerator mengembalikan HTTP {}",
@@ -303,14 +301,18 @@ async fn download_archive(
     if total > MAX_ACCELERATOR_ARCHIVE_BYTES {
         return Err("Ukuran accelerator dari server melebihi batas aman.".into());
     }
-    let archive_bytes = total.max(MAX_ACCELERATOR_ARCHIVE_BYTES);
+    let archive_bytes = if total == 0 {
+        MAX_ACCELERATOR_ARCHIVE_BYTES
+    } else {
+        total
+    };
     crate::resources::require_disk_allocations(
         &[
             (
                 destination,
-                archive_bytes.saturating_add(MAX_EXTRACTED_BYTES),
+                archive_bytes.saturating_add(crate::archive::MAX_EXTRACTED_BYTES),
             ),
-            (staging, MAX_EXTRACTED_BYTES),
+            (staging, crate::archive::MAX_EXTRACTED_BYTES),
         ],
         "download dan ekstraksi accelerator",
     )?;
@@ -323,10 +325,13 @@ async fn download_archive(
         if cancelled.load(Ordering::SeqCst) {
             return Err("Download accelerator dibatalkan.".into());
         }
-        let chunk = tokio::time::timeout(Duration::from_secs(30), response.chunk())
-            .await
-            .map_err(|_| "Timeout saat membaca data accelerator selama 30 detik.".to_string())?
-            .map_err(|e| format!("Download accelerator terputus: {e}"))?;
+        let chunk = network::next_chunk_cancelable(
+            &mut response,
+            cancelled,
+            Duration::from_secs(30),
+            "accelerator",
+        )
+        .await?;
         let Some(chunk) = chunk else {
             break;
         };
@@ -377,80 +382,6 @@ fn verify_sha256(path: &Path, expected: &str) -> Result<String, String> {
     Ok(actual)
 }
 
-fn extract_zip_safely(archive_path: &Path, destination: &Path) -> Result<(), String> {
-    let archive_file =
-        File::open(archive_path).map_err(|e| format!("Gagal membuka archive accelerator: {e}"))?;
-    let mut archive = ZipArchive::new(archive_file)
-        .map_err(|e| format!("Archive accelerator tidak valid: {e}"))?;
-    if archive.len() > MAX_ARCHIVE_ENTRIES {
-        return Err("Archive accelerator memiliki terlalu banyak file.".into());
-    }
-    fs::create_dir_all(destination)
-        .map_err(|e| format!("Gagal membuat folder extract accelerator: {e}"))?;
-    let mut extracted_bytes = 0u64;
-    for index in 0..archive.len() {
-        let mut entry = archive
-            .by_index(index)
-            .map_err(|e| format!("Gagal membaca entry accelerator: {e}"))?;
-        let relative = entry
-            .enclosed_name()
-            .ok_or_else(|| "Archive accelerator memiliki path tidak aman.".to_string())?
-            .to_path_buf();
-        extracted_bytes = extracted_bytes.saturating_add(entry.size());
-        if extracted_bytes > MAX_EXTRACTED_BYTES {
-            return Err("Isi archive accelerator melebihi batas ukuran aman.".into());
-        }
-        let target = destination.join(relative);
-        if entry.name().ends_with('/') {
-            fs::create_dir_all(&target)
-                .map_err(|e| format!("Gagal membuat folder accelerator: {e}"))?;
-            continue;
-        }
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("Gagal membuat folder accelerator: {e}"))?;
-        }
-        let mut output =
-            File::create(&target).map_err(|e| format!("Gagal menulis accelerator: {e}"))?;
-        io::copy(&mut entry, &mut output).map_err(|e| format!("Gagal extract accelerator: {e}"))?;
-    }
-    Ok(())
-}
-
-fn find_file(root: &Path, file_name: &str) -> Result<Option<PathBuf>, String> {
-    for entry in fs::read_dir(root).map_err(|e| format!("Gagal membaca folder accelerator: {e}"))? {
-        let entry = entry.map_err(|e| format!("Gagal membaca entry accelerator: {e}"))?;
-        let path = entry.path();
-        if path.is_dir() {
-            if let Some(found) = find_file(&path, file_name)? {
-                return Ok(Some(found));
-            }
-        } else if path.file_name().and_then(|name| name.to_str()) == Some(file_name) {
-            return Ok(Some(path));
-        }
-    }
-    Ok(None)
-}
-
-fn copy_tree(source: &Path, destination: &Path) -> Result<(), String> {
-    fs::create_dir_all(destination)
-        .map_err(|e| format!("Gagal membuat staging accelerator: {e}"))?;
-    for entry in
-        fs::read_dir(source).map_err(|e| format!("Gagal membaca folder accelerator: {e}"))?
-    {
-        let entry = entry.map_err(|e| format!("Gagal membaca entry accelerator: {e}"))?;
-        let source_path = entry.path();
-        let destination_path = destination.join(entry.file_name());
-        if source_path.is_dir() {
-            copy_tree(&source_path, &destination_path)?;
-        } else {
-            fs::copy(&source_path, &destination_path)
-                .map_err(|e| format!("Gagal menyalin accelerator: {e}"))?;
-        }
-    }
-    Ok(())
-}
-
 fn write_capability_probe_wav(path: &Path) -> Result<(), String> {
     const SAMPLE_RATE: u32 = 16_000;
     const CHANNELS: u16 = 1;
@@ -492,10 +423,6 @@ fn validate_staged_capability(
     engine: &Path,
     cancelled: &AtomicBool,
 ) -> Result<(), String> {
-    let Some(model) = first_installed_model(app)? else {
-        // A real inference probe cannot run before the user has downloaded a model.
-        return Ok(());
-    };
     let device_indices = if backend == "vulkan" {
         let devices = crate::system::detect_vulkan_devices_from_engine(engine);
         let indices = devices
@@ -508,6 +435,10 @@ fn validate_staged_capability(
         indices.into_iter().map(Some).collect::<Vec<_>>()
     } else {
         vec![None]
+    };
+    let Some(model) = first_installed_model(app)? else {
+        // A real inference probe cannot run before the user has downloaded a model.
+        return Ok(());
     };
     let probe_dir = std::env::temp_dir().join(format!(
         "whispertube-{backend}-probe-{}",
@@ -608,17 +539,18 @@ fn finalize_blocking(
         return Err("Download accelerator dibatalkan.".into());
     }
     emit_progress(app, spec.backend, 88.0, 0, 0, None);
-    extract_zip_safely(paths.archive, paths.extract)?;
-    let cli = find_file(paths.extract, executable_name())?.ok_or_else(|| {
-        format!(
-            "{} tidak ditemukan dalam accelerator package.",
-            executable_name()
-        )
-    })?;
+    crate::archive::extract_zip_safely(paths.archive, paths.extract, "accelerator")?;
+    let cli = crate::archive::find_file(paths.extract, executable_name(), "accelerator")?
+        .ok_or_else(|| {
+            format!(
+                "{} tidak ditemukan dalam accelerator package.",
+                executable_name()
+            )
+        })?;
     let release_dir = cli
         .parent()
         .ok_or_else(|| "Folder accelerator tidak valid.".to_string())?;
-    copy_tree(release_dir, paths.staging)?;
+    crate::archive::copy_tree(release_dir, paths.staging, "accelerator")?;
     let staging_cli = paths.staging.join(executable_name());
     #[cfg(unix)]
     mark_executable(&staging_cli)?;
@@ -644,6 +576,7 @@ fn finalize_blocking(
     if cancelled.load(Ordering::SeqCst) {
         return Err("Download accelerator dibatalkan.".into());
     }
+    crate::paths::write_runtime_manifest(paths.staging, executable_name())?;
     crate::paths::clear_invalid_runtime_destination(paths.destination, executable_name())?;
     fs::rename(paths.staging, paths.destination)
         .map_err(|e| format!("Gagal mengaktifkan accelerator: {e}"))?;
@@ -668,7 +601,7 @@ pub async fn install(
     })?;
     let runtime_root = user_runtime_dir(&app)?;
     let destination = runtime_root.join(spec.backend);
-    if crate::paths::is_regular_file(&destination.join(executable_name())) {
+    if engine_path(&app, spec.backend)? == destination.join(executable_name()) {
         return Ok(());
     }
     let temp_root =
@@ -726,10 +659,16 @@ pub async fn install(
         .map_err(|e| format!("Accelerator finalize task gagal: {e}"))?
     }
     .await;
-    let _ = fs::remove_dir_all(&temp_root);
-    if result.is_err() {
-        let _ = fs::remove_dir_all(&staging_path);
-    }
+    let cleanup_temp_root = temp_root.clone();
+    let cleanup_staging_path = staging_path.clone();
+    let cleanup_staging = result.is_err();
+    let _ = tokio::task::spawn_blocking(move || {
+        let _ = fs::remove_dir_all(&cleanup_temp_root);
+        if cleanup_staging {
+            let _ = fs::remove_dir_all(&cleanup_staging_path);
+        }
+    })
+    .await;
     result
 }
 

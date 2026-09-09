@@ -3,8 +3,8 @@ $Root = Split-Path -Parent $PSScriptRoot
 Set-Location $Root
 
 if (-not (Test-Path "node_modules")) {
-    Write-Host "node_modules belum ada. Menjalankan npm install..." -ForegroundColor Yellow
-    npm install
+    Write-Host "node_modules belum ada. Menjalankan npm ci..." -ForegroundColor Yellow
+    npm ci
 }
 
 if (-not (Test-Path "src-tauri\runtime\windows\yt-dlp.exe")) {

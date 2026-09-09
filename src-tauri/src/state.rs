@@ -1,6 +1,9 @@
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
+use std::{
+    collections::HashSet,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
 };
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -250,12 +253,7 @@ pub struct AppState {
     pub model_cancelled: Arc<AtomicBool>,
     pub runtime_cancelled: Arc<AtomicBool>,
     pub inspect_cancelled: Arc<AtomicBool>,
-    pub vulkan_probe: Arc<Mutex<Option<VulkanProbeResult>>>,
-}
-
-#[derive(Clone, Debug)]
-pub struct VulkanProbeResult {
-    pub signature: String,
+    pub capability_probe: Arc<Mutex<HashSet<String>>>,
 }
 
 #[cfg(test)]

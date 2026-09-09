@@ -4,7 +4,7 @@ use std::{
     collections::HashMap,
     fs,
     fs::File,
-    io::{self, Read},
+    io::Read,
     path::{Path, PathBuf},
     process::Command,
     sync::{
@@ -16,9 +16,9 @@ use std::{
 use tauri::{AppHandle, Emitter};
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
-use zip::ZipArchive;
 
 use crate::{
+    network,
     paths::{engine_path, model_path, models_dir, user_runtime_dir},
     system,
     types::{CudaDownloadPayload, ModelDownloadPayload, ModelInfo},
@@ -28,8 +28,6 @@ const CUDA_ENGINE_VERSION: &str = "v1.9.1";
 const CUDA_ENGINE_BUILD: &str = "12.4.0";
 const CUDA_ENGINE_SHA256: &str = "106a2030eff8998e4ef320fe72e263a78449e9040386ee27c41ea80b001b601b";
 const MAX_CUDA_ARCHIVE_BYTES: u64 = 1024 * 1024 * 1024;
-const MAX_ARCHIVE_ENTRIES: usize = 4096;
-const MAX_EXTRACTED_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ModelFingerprint {
@@ -352,10 +350,13 @@ pub async fn download_model(
         .connect_timeout(Duration::from_secs(30))
         .build()
         .map_err(|e| format!("Gagal membuat HTTP client: {e}"))?;
-    let mut response = tokio::time::timeout(Duration::from_secs(30), client.get(url).send())
-        .await
-        .map_err(|_| "Timeout saat menunggu response model.".to_string())?
-        .map_err(|e| format!("Gagal mengunduh model: {e}"))?;
+    let mut response = network::send_cancelable(
+        client.get(url),
+        &cancelled,
+        Duration::from_secs(30),
+        "model",
+    )
+    .await?;
     if !response.status().is_success() {
         return Err(format!(
             "Server model mengembalikan HTTP {}",
@@ -384,10 +385,13 @@ pub async fn download_model(
         if cancelled.load(Ordering::SeqCst) {
             return Err("Download model dibatalkan.".into());
         }
-        let chunk = tokio::time::timeout(Duration::from_secs(30), response.chunk())
-            .await
-            .map_err(|_| "Timeout saat membaca data model selama 30 detik.".to_string())?
-            .map_err(|e| format!("Download model terputus: {e}"))?;
+        let chunk = network::next_chunk_cancelable(
+            &mut response,
+            &cancelled,
+            Duration::from_secs(30),
+            "model",
+        )
+        .await?;
         let Some(chunk) = chunk else {
             break;
         };
@@ -480,76 +484,6 @@ fn verify_sha256(path: &Path, expected: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn extract_zip_safely(archive_path: &Path, destination: &Path) -> Result<(), String> {
-    let archive_file =
-        File::open(archive_path).map_err(|e| format!("Gagal membuka archive CUDA: {e}"))?;
-    let mut archive =
-        ZipArchive::new(archive_file).map_err(|e| format!("Archive CUDA tidak valid: {e}"))?;
-    if archive.len() > MAX_ARCHIVE_ENTRIES {
-        return Err("Archive CUDA memiliki terlalu banyak file.".into());
-    }
-    fs::create_dir_all(destination)
-        .map_err(|e| format!("Gagal membuat folder extract CUDA: {e}"))?;
-
-    let mut extracted_bytes = 0u64;
-    for index in 0..archive.len() {
-        let mut entry = archive
-            .by_index(index)
-            .map_err(|e| format!("Gagal membaca entry archive CUDA: {e}"))?;
-        let relative = entry
-            .enclosed_name()
-            .ok_or_else(|| "Archive CUDA memiliki path yang tidak aman.".to_string())?
-            .to_path_buf();
-        extracted_bytes = extracted_bytes.saturating_add(entry.size());
-        if extracted_bytes > MAX_EXTRACTED_BYTES {
-            return Err("Isi archive CUDA melebihi batas ukuran aman.".into());
-        }
-        let target = destination.join(relative);
-        if entry.name().ends_with('/') {
-            fs::create_dir_all(&target).map_err(|e| format!("Gagal membuat folder CUDA: {e}"))?;
-            continue;
-        }
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent).map_err(|e| format!("Gagal membuat folder CUDA: {e}"))?;
-        }
-        let mut output =
-            File::create(&target).map_err(|e| format!("Gagal menulis file CUDA: {e}"))?;
-        io::copy(&mut entry, &mut output).map_err(|e| format!("Gagal extract file CUDA: {e}"))?;
-    }
-    Ok(())
-}
-
-fn find_file(root: &Path, file_name: &str) -> Result<Option<PathBuf>, String> {
-    for entry in fs::read_dir(root).map_err(|e| format!("Gagal membaca folder CUDA: {e}"))? {
-        let entry = entry.map_err(|e| format!("Gagal membaca entry CUDA: {e}"))?;
-        let path = entry.path();
-        if path.is_dir() {
-            if let Some(found) = find_file(&path, file_name)? {
-                return Ok(Some(found));
-            }
-        } else if path.file_name().and_then(|name| name.to_str()) == Some(file_name) {
-            return Ok(Some(path));
-        }
-    }
-    Ok(None)
-}
-
-fn copy_tree(source: &Path, destination: &Path) -> Result<(), String> {
-    fs::create_dir_all(destination).map_err(|e| format!("Gagal membuat staging CUDA: {e}"))?;
-    for entry in fs::read_dir(source).map_err(|e| format!("Gagal membaca Release CUDA: {e}"))? {
-        let entry = entry.map_err(|e| format!("Gagal membaca entry Release CUDA: {e}"))?;
-        let source_path = entry.path();
-        let destination_path = destination.join(entry.file_name());
-        if source_path.is_dir() {
-            copy_tree(&source_path, &destination_path)?;
-        } else {
-            fs::copy(&source_path, &destination_path)
-                .map_err(|e| format!("Gagal menyalin file CUDA: {e}"))?;
-        }
-    }
-    Ok(())
-}
-
 async fn download_cuda_package(
     app: &AppHandle,
     zip_path: &Path,
@@ -565,13 +499,13 @@ async fn download_cuda_package(
         .connect_timeout(Duration::from_secs(30))
         .build()
         .map_err(|e| format!("Gagal membuat HTTP client CUDA: {e}"))?;
-    let mut response = tokio::time::timeout(
+    let mut response = network::send_cancelable(
+        client.get(cuda_engine_url()),
+        cancelled,
         Duration::from_secs(30),
-        client.get(cuda_engine_url()).send(),
+        "CUDA",
     )
-    .await
-    .map_err(|_| "Timeout saat menunggu response CUDA.".to_string())?
-    .map_err(|e| format!("Gagal mengunduh CUDA engine: {e}"))?;
+    .await?;
     if !response.status().is_success() {
         return Err(format!(
             "Server CUDA mengembalikan HTTP {}",
@@ -583,11 +517,18 @@ async fn download_cuda_package(
     if total > MAX_CUDA_ARCHIVE_BYTES {
         return Err("Ukuran CUDA package dari server melebihi batas aman.".into());
     }
-    let archive_bytes = total.max(MAX_CUDA_ARCHIVE_BYTES);
+    let archive_bytes = if total == 0 {
+        MAX_CUDA_ARCHIVE_BYTES
+    } else {
+        total
+    };
     crate::resources::require_disk_allocations(
         &[
-            (zip_path, archive_bytes.saturating_add(MAX_EXTRACTED_BYTES)),
-            (staging_path, MAX_EXTRACTED_BYTES),
+            (
+                zip_path,
+                archive_bytes.saturating_add(crate::archive::MAX_EXTRACTED_BYTES),
+            ),
+            (staging_path, crate::archive::MAX_EXTRACTED_BYTES),
         ],
         "download dan ekstraksi CUDA runtime",
     )?;
@@ -600,10 +541,13 @@ async fn download_cuda_package(
         if cancelled.load(Ordering::SeqCst) {
             return Err("Download CUDA dibatalkan.".into());
         }
-        let chunk = tokio::time::timeout(Duration::from_secs(30), response.chunk())
-            .await
-            .map_err(|_| "Timeout saat membaca data CUDA selama 30 detik.".to_string())?
-            .map_err(|e| format!("Download CUDA terputus: {e}"))?;
+        let chunk = network::next_chunk_cancelable(
+            &mut response,
+            cancelled,
+            Duration::from_secs(30),
+            "CUDA",
+        )
+        .await?;
         let Some(chunk) = chunk else {
             break;
         };
@@ -645,13 +589,13 @@ fn finalize_cuda_engine_blocking(
         return Err("Download CUDA dibatalkan.".into());
     }
     emit_cuda_progress(app, 88.0, 0, 0, None);
-    extract_zip_safely(zip_path, extract_path)?;
-    let cli = find_file(extract_path, "whisper-cli.exe")?
+    crate::archive::extract_zip_safely(zip_path, extract_path, "CUDA")?;
+    let cli = crate::archive::find_file(extract_path, "whisper-cli.exe", "CUDA")?
         .ok_or_else(|| "whisper-cli.exe tidak ditemukan dalam CUDA package.".to_string())?;
     let release_dir = cli
         .parent()
         .ok_or_else(|| "Folder CUDA tidak valid.".to_string())?;
-    copy_tree(release_dir, staging_path)?;
+    crate::archive::copy_tree(release_dir, staging_path, "CUDA")?;
     let staging_cli = staging_path.join("whisper-cli.exe");
     if !crate::paths::is_regular_file(&staging_cli) {
         return Err("CUDA engine gagal dipasang ke staging.".into());
@@ -674,6 +618,7 @@ fn finalize_cuda_engine_blocking(
     if cancelled.load(Ordering::SeqCst) {
         return Err("Download CUDA dibatalkan.".into());
     }
+    crate::paths::write_runtime_manifest(staging_path, "whisper-cli.exe")?;
     crate::paths::clear_invalid_runtime_destination(destination, "whisper-cli.exe")?;
     fs::rename(staging_path, destination)
         .map_err(|e| format!("Gagal mengaktifkan CUDA engine: {e}"))?;
@@ -687,7 +632,7 @@ pub async fn install_cuda_engine(app: AppHandle, cancelled: Arc<AtomicBool>) -> 
     }
     let runtime_root = user_runtime_dir(&app)?;
     let destination = runtime_root.join("cuda");
-    if crate::paths::is_regular_file(&destination.join("whisper-cli.exe")) {
+    if engine_path(&app, "cuda")? == destination.join("whisper-cli.exe") {
         return Ok(());
     }
 
@@ -721,10 +666,16 @@ pub async fn install_cuda_engine(app: AppHandle, cancelled: Arc<AtomicBool>) -> 
     }
     .await;
 
-    let _ = fs::remove_dir_all(&temp_root);
-    if result.is_err() {
-        let _ = fs::remove_dir_all(&staging_path);
-    }
+    let cleanup_temp_root = temp_root.clone();
+    let cleanup_staging_path = staging_path.clone();
+    let cleanup_staging = result.is_err();
+    let _ = tokio::task::spawn_blocking(move || {
+        let _ = fs::remove_dir_all(&cleanup_temp_root);
+        if cleanup_staging {
+            let _ = fs::remove_dir_all(&cleanup_staging_path);
+        }
+    })
+    .await;
     result
 }
 

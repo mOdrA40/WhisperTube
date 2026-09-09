@@ -4,7 +4,7 @@ use std::process::{Command, ExitStatus, Stdio};
 use std::{
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex, OnceLock,
+        Arc, Mutex,
     },
     time::{Duration, Instant},
 };
@@ -12,7 +12,7 @@ use tauri::AppHandle;
 use url::Url;
 
 use crate::{
-    browsers::cookie_args,
+    cookies::args as cookie_args,
     paths::{is_regular_file, tool_path},
     transcription::MAX_MEDIA_DURATION_SECONDS,
     types::VideoMetadata,
@@ -88,6 +88,13 @@ const METADATA_RETRY_BASE_DELAY: Duration = Duration::from_millis(900);
 const METADATA_PROCESS_TIMEOUT: Duration = Duration::from_secs(45);
 const MAX_METADATA_STDOUT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_METADATA_STDERR_BYTES: usize = 256 * 1024;
+const MAX_MEDIA_URL_BYTES: usize = 8 * 1024;
+const MAX_METADATA_ID_BYTES: usize = 512;
+const MAX_METADATA_TITLE_BYTES: usize = 4 * 1024;
+const MAX_METADATA_CHANNEL_BYTES: usize = 2 * 1024;
+const MAX_METADATA_SOURCE_BYTES: usize = 512;
+const MAX_METADATA_AVAILABILITY_BYTES: usize = 512;
+const MAX_METADATA_THUMBNAIL_URL_BYTES: usize = 4 * 1024;
 const TIKTOK_REHYDRATION_ERROR: &str = "unable to extract universal data for rehydration";
 const TIKTOK_TRANSIENT_ERROR_PREFIX: &str = "media_tiktok_transient:";
 const SOURCE_TRANSIENT_ERROR_PREFIX: &str = "media_source_transient:";
@@ -97,14 +104,10 @@ const SOURCE_ACCESS_ERROR_PREFIX: &str = "media_source_access_required:";
 const SOURCE_UNAVAILABLE_ERROR_PREFIX: &str = "media_source_unavailable:";
 const SOURCE_INPUT_ERROR_PREFIX: &str = "media_source_input:";
 const SOURCE_DURATION_ERROR_PREFIX: &str = "media_source_duration:";
-const SOURCE_BROWSER_ERROR_PREFIX: &str = "media_source_browser:";
-const SOURCE_BROWSER_DECRYPTION_ERROR_PREFIX: &str = "media_source_browser_decryption:";
 const SOURCE_COOKIE_FILE_ERROR_PREFIX: &str = "media_source_cookie_file:";
 const SOURCE_JS_RUNTIME_ERROR_PREFIX: &str = "media_source_js_runtime:";
 const SOURCE_RUNTIME_ERROR_PREFIX: &str = "media_source_runtime:";
 const SOURCE_METADATA_ERROR_PREFIX: &str = "media_source_metadata:";
-static NODE_AVAILABLE: OnceLock<bool> = OnceLock::new();
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MetadataRetryReason {
     TikTokRehydration,
@@ -127,6 +130,9 @@ fn source_for_host(host: &str) -> Option<SourceDefinition> {
 }
 
 pub fn validate_media_url(raw: &str) -> Result<String, String> {
+    if raw.len() > MAX_MEDIA_URL_BYTES {
+        return Err("URL video terlalu panjang.".into());
+    }
     let parsed = Url::parse(raw).map_err(|_| "URL tidak valid.".to_string())?;
     if parsed.scheme() != "https" {
         return Err("URL harus menggunakan HTTPS.".into());
@@ -138,7 +144,11 @@ pub fn validate_media_url(raw: &str) -> Result<String, String> {
     if source_for_host(&host).is_none() {
         return Err("Domain video ini belum termasuk platform yang didukung.".into());
     }
-    Ok(parsed.to_string())
+    let safe_url = parsed.to_string();
+    if safe_url.len() > MAX_MEDIA_URL_BYTES {
+        return Err("URL video terlalu panjang.".into());
+    }
+    Ok(safe_url)
 }
 
 pub(crate) fn validate_media_duration(duration: f64, is_live: bool) -> Result<(), String> {
@@ -154,8 +164,8 @@ pub(crate) fn validate_media_duration(duration: f64, is_live: bool) -> Result<()
     Ok(())
 }
 
-fn source_label_from_metadata(value: &Value, safe_url: &str) -> String {
-    value
+fn source_label_from_metadata(value: &Value, safe_url: &str) -> Result<String, String> {
+    let source = value
         .get("extractor_key")
         .or_else(|| value.get("extractor"))
         .and_then(Value::as_str)
@@ -167,7 +177,56 @@ fn source_label_from_metadata(value: &Value, safe_url: &str) -> String {
                 .and_then(|url| url.host_str().and_then(source_for_host))
                 .map(|source| source.label.to_string())
         })
-        .unwrap_or_else(|| "Video".into())
+        .unwrap_or_else(|| "Video".into());
+    if source.len() > MAX_METADATA_SOURCE_BYTES {
+        return Err(format!(
+            "{SOURCE_METADATA_ERROR_PREFIX}Nama source metadata terlalu panjang."
+        ));
+    }
+    Ok(source)
+}
+
+fn required_metadata_text(
+    value: &Value,
+    key: &str,
+    fallback: &str,
+    maximum: usize,
+) -> Result<String, String> {
+    let text = value.get(key).and_then(Value::as_str).unwrap_or(fallback);
+    if text.len() > maximum {
+        return Err(format!(
+            "{SOURCE_METADATA_ERROR_PREFIX}Field metadata {key} terlalu panjang."
+        ));
+    }
+    Ok(text.to_string())
+}
+
+fn optional_metadata_text(value: &Value, key: &str, maximum: usize) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|text| text.len() <= maximum)
+        .map(str::to_string)
+}
+
+fn safe_thumbnail(value: &Value) -> Option<String> {
+    let thumbnail = value
+        .get("thumbnail")
+        .and_then(Value::as_str)
+        .filter(|thumbnail| thumbnail.len() <= MAX_METADATA_THUMBNAIL_URL_BYTES)?;
+    let parsed = Url::parse(thumbnail).ok()?;
+    if parsed.scheme() != "https" || !parsed.username().is_empty() || parsed.password().is_some() {
+        return None;
+    }
+    Some(parsed.to_string())
+}
+
+fn safe_webpage_url(value: &Value, safe_url: &str) -> String {
+    let candidate = value.get("webpage_url").and_then(Value::as_str);
+    candidate
+        .filter(|candidate| candidate.len() <= MAX_MEDIA_URL_BYTES)
+        .and_then(|candidate| validate_media_url(candidate).ok())
+        .unwrap_or_else(|| safe_url.to_string())
 }
 
 struct CapturedOutput {
@@ -300,17 +359,15 @@ fn run_output(
 }
 
 pub fn js_runtime_args() -> Vec<String> {
-    let node_available = NODE_AVAILABLE.get_or_init(|| {
-        let mut command = Command::new("node");
-        crate::process::hide_console(&mut command);
-        command
-            .arg("--version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success())
-    });
-    if *node_available {
+    let mut command = Command::new("node");
+    crate::process::hide_console(&mut command);
+    let node_available = command
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    if node_available {
         vec!["--js-runtimes".into(), "node".into()]
     } else {
         Vec::new()
@@ -331,17 +388,6 @@ fn is_membership_error(normalized: &str) -> bool {
             "join this channel",
         ],
     )
-}
-
-fn is_browser_cookie_error(normalized: &str) -> bool {
-    (normalized.contains("cookie database")
-        && (normalized.contains("could not copy") || normalized.contains("permission denied")))
-        || normalized.contains("could not extract cookies from")
-}
-
-fn is_browser_cookie_decryption_error(normalized: &str) -> bool {
-    normalized.contains("failed to decrypt with dpapi")
-        || (normalized.contains("dpapi") && normalized.contains("decrypt"))
 }
 
 fn is_access_error(normalized: &str) -> bool {
@@ -387,7 +433,6 @@ fn is_tiktok_url(safe_url: &str) -> bool {
 fn metadata_retry_reason(safe_url: &str, error: &str) -> Option<MetadataRetryReason> {
     let normalized = error.to_ascii_lowercase();
     if is_membership_error(&normalized)
-        || is_browser_cookie_error(&normalized)
         || is_access_error(&normalized)
         || is_unavailable_error(&normalized)
     {
@@ -442,12 +487,6 @@ fn metadata_error_prefix(safe_url: &str, error: &str) -> &'static str {
     if is_membership_error(&normalized) {
         return SOURCE_MEMBERSHIP_ERROR_PREFIX;
     }
-    if is_browser_cookie_decryption_error(&normalized) {
-        return SOURCE_BROWSER_DECRYPTION_ERROR_PREFIX;
-    }
-    if is_browser_cookie_error(&normalized) {
-        return SOURCE_BROWSER_ERROR_PREFIX;
-    }
     if normalized.contains("no supported javascript runtime")
         || normalized.contains("the page needs to be reloaded")
     {
@@ -470,8 +509,6 @@ fn metadata_error_prefix(safe_url: &str, error: &str) -> &'static str {
 pub async fn inspect_media(
     app: AppHandle,
     url: String,
-    browser: String,
-    profile: Option<String>,
     cookies_path: Option<String>,
     active_pid: Arc<Mutex<Option<u32>>>,
     cancelled: Arc<AtomicBool>,
@@ -488,14 +525,8 @@ pub async fn inspect_media(
         if cancelled.load(Ordering::SeqCst) {
             return Err("Pemeriksaan metadata dibatalkan.".into());
         }
-        let cookie_args = cookie_args(&browser, profile.as_deref(), cookies_path.as_deref())
-            .map_err(|error| {
-                if cookies_path.is_some() {
-                    format!("{SOURCE_COOKIE_FILE_ERROR_PREFIX}{error}")
-                } else {
-                    format!("{SOURCE_BROWSER_ERROR_PREFIX}{error}")
-                }
-            })?;
+        let cookie_args = cookie_args(cookies_path.as_deref())
+            .map_err(|error| format!("{SOURCE_COOKIE_FILE_ERROR_PREFIX}{error}"))?;
         let output = {
             let mut attempt = 0;
             loop {
@@ -535,7 +566,7 @@ pub async fn inspect_media(
             let error = String::from_utf8_lossy(&output.stderr).trim().to_string();
             let error_prefix = metadata_error_prefix(&safe_url, &error);
             return Err(if error.is_empty() {
-                "Metadata video gagal dibaca. Untuk video yang memerlukan login, pilih browser yang sudah login.".into()
+                "Metadata video gagal dibaca. Untuk video yang memerlukan login, import cookies.txt yang masih baru.".into()
             } else {
                 format!("{error_prefix}yt-dlp: {error}")
             });
@@ -547,24 +578,35 @@ pub async fn inspect_media(
             || matches!(value.get("live_status").and_then(Value::as_str), Some("is_live" | "is_upcoming"));
         validate_media_duration(duration, is_live)
             .map_err(|error| format!("{SOURCE_DURATION_ERROR_PREFIX}{error}"))?;
+        let title = required_metadata_text(
+            &value,
+            "title",
+            "Untitled video",
+            MAX_METADATA_TITLE_BYTES,
+        )?;
+        let channel = value
+            .get("channel")
+            .or_else(|| value.get("uploader"))
+            .and_then(Value::as_str)
+            .unwrap_or("Unknown channel");
+        if channel.len() > MAX_METADATA_CHANNEL_BYTES {
+            return Err(format!(
+                "{SOURCE_METADATA_ERROR_PREFIX}Field metadata channel terlalu panjang."
+            ));
+        }
         Ok(VideoMetadata {
-            id: value.get("id").and_then(Value::as_str).unwrap_or("unknown").into(),
-            title: value.get("title").and_then(Value::as_str).unwrap_or("Untitled video").into(),
-            channel: value
-                .get("channel")
-                .or_else(|| value.get("uploader"))
-                .and_then(Value::as_str)
-                .unwrap_or("Unknown channel")
-                .into(),
+            id: required_metadata_text(&value, "id", "unknown", MAX_METADATA_ID_BYTES)?,
+            title,
+            channel: channel.to_string(),
             duration,
-            thumbnail: value.get("thumbnail").and_then(Value::as_str).map(str::to_string),
-            webpage_url: value
-                .get("webpage_url")
-                .and_then(Value::as_str)
-                .unwrap_or(&safe_url)
-                .to_string(),
-            availability: value.get("availability").and_then(Value::as_str).map(str::to_string),
-            source: source_label_from_metadata(&value, &safe_url),
+            thumbnail: safe_thumbnail(&value),
+            webpage_url: safe_webpage_url(&value, &safe_url),
+            availability: optional_metadata_text(
+                &value,
+                "availability",
+                MAX_METADATA_AVAILABILITY_BYTES,
+            ),
+            source: source_label_from_metadata(&value, &safe_url)?,
         })
     })
     .await
@@ -599,6 +641,12 @@ mod tests {
     #[test]
     fn rejects_plaintext_http_urls() {
         assert!(validate_media_url("http://www.youtube.com/watch?v=abc").is_err());
+    }
+
+    #[test]
+    fn rejects_overlong_video_urls() {
+        let url = format!("https://youtube.com/watch?v={}", "x".repeat(9 * 1024));
+        assert!(validate_media_url(&url).is_err());
     }
 
     #[test]
@@ -708,27 +756,6 @@ mod tests {
                 "This video is available to this channel's members on level: VIP"
             ),
             super::SOURCE_MEMBERSHIP_ERROR_PREFIX
-        );
-        assert_eq!(
-            metadata_error_prefix(
-                "https://www.youtube.com/watch?v=123",
-                "ERROR: Could not copy Chrome cookie database. Permission denied"
-            ),
-            super::SOURCE_BROWSER_ERROR_PREFIX
-        );
-        assert_eq!(
-            metadata_error_prefix(
-                "https://www.youtube.com/watch?v=123",
-                "ERROR: Failed to decrypt with DPAPI"
-            ),
-            super::SOURCE_BROWSER_DECRYPTION_ERROR_PREFIX
-        );
-        assert_eq!(
-            metadata_error_prefix(
-                "https://www.youtube.com/watch?v=123",
-                "ERROR: Failed to decrypt with DPAPI"
-            ),
-            super::SOURCE_BROWSER_DECRYPTION_ERROR_PREFIX
         );
     }
 }

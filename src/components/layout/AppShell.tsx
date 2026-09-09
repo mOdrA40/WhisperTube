@@ -91,7 +91,7 @@ export function AppShell({
 
             <div className="hardware-spec">
               <div className="hardware-icon-box">
-                {system?.gpuName ? <Zap size={14} className="nvidia-icon" /> : <Cpu size={14} />}
+                {system?.gpuName ? <Zap size={14} className={system.nvidia ? "nvidia-icon" : undefined} /> : <Cpu size={14} />}
               </div>
               <div className="hardware-details">
                 <span className="hardware-name">

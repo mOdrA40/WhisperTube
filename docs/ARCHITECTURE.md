@@ -43,8 +43,10 @@ The Rust backend uses similar boundaries:
 - types.rs contains IPC DTOs and transcript limits;
 - state.rs contains runtime operation state, cancellation flags, and guards;
 - paths.rs resolves application-data, resource, model, job, and runtime paths;
-- browsers.rs discovers browser metadata and profiles without reading cookie
-  contents during discovery;
+- cookies.rs validates the user-selected cookies.txt path without reading or
+  storing cookie contents;
+- archive.rs centralizes bounded ZIP extraction and staged runtime copying;
+- network.rs provides cancellable, timeout-bounded HTTP operations;
 - models.rs manages model and optional CUDA downloads;
 - sources.rs validates source URLs and performs metadata inspection;
 - process.rs provides platform-specific child-process setup and termination;
@@ -153,16 +155,20 @@ attempts to restore the original directories.
 
 The Settings reset operation is intentionally limited to WhisperTube-owned
 application data: models, jobs, runtime, and whispertube.db. The frontend also
-clears its saved cookie-path and browser-session preference from local storage.
+clears its saved cookie-path preference from local storage.
 It does not delete the WebView profile/cache, interface-language preference,
 external cookies.txt files, or exports saved outside WhisperTube storage.
+Job storage is capped at 20 GiB and the current usage is exposed in Settings.
 
 ## Runtime layout and verification
 
 Development runtime binaries live under src-tauri/runtime/<platform> so Tauri
 can bundle them as resources. In packaged builds, the bundled runtime is
 resolved from the application resource directory. An installed user runtime
-under application-local-data takes precedence over the bundled engine.
+under application-local-data takes precedence over the bundled engine only
+when its runtime manifest matches the expected whisper.cpp version and
+executable SHA-256. Modified or legacy user runtimes are ignored until
+reinstalled.
 
 Windows bootstrap:
 
@@ -182,7 +188,8 @@ cleared by a data reset.
 
 Archives are downloaded to unique temporary staging paths, checked for size
 and checksum limits, extracted with path-traversal protection, self-tested,
-and activated only after validation succeeds.
+and activated only after validation succeeds. Stale installer staging and
+temporary download directories older than 24 hours are cleaned at startup.
 
 ## Hardware and backend selection
 
@@ -204,17 +211,18 @@ approximately 2 GiB for Fast, 4 GiB for Balanced, and 7 GiB for Accurate.
 These thresholds are not a universal guarantee because other GPU processes
 can consume memory.
 
-GPU telemetry follows the resolved target. CUDA uses the selected NVIDIA
-device index. Vulkan uses best-effort operating-system graphics counters
-instead of incorrectly querying an unrelated NVIDIA device. The Vulkan
-execution monitor also checks available system memory and child-process RSS.
+GPU telemetry follows the resolved target where the platform exposes a reliable
+mapping. CUDA uses the selected NVIDIA device index. Vulkan and unsupported
+cross-adapter mappings report unavailable instead of showing another GPU's
+usage. The execution monitor also checks available system memory and
+child-process RSS during download, conversion, probing, and inference.
 
-Auto Vulkan selection runs a bounded capability probe with the installed
-engine, model, and a generated one-second silent WAV. Only successful probes
-are cached for the engine/model file signatures during the application
-session. Cancellation and timeout failures are retried. If Auto Vulkan fails
-and the CPU engine is available, the application falls back to CPU. An
-explicitly selected Vulkan target fails closed with a diagnostic error.
+Auto and explicit GPU selection run a bounded capability probe with the
+installed engine, model, and a generated one-second silent WAV. Only
+successful probes are cached for the backend/device/engine/model signature
+during the application session. Cancellation and timeout failures are retried.
+If Auto CUDA fails, the application tries Vulkan and then CPU where available.
+An explicitly selected GPU target fails closed with a diagnostic error.
 
 For cross-vendor stability, Vulkan child processes disable the optional
 cooperative-matrix shader path and flash attention. This avoids known driver
@@ -222,12 +230,8 @@ paths that can be exposed by some AMD devices but fail during inference.
 
 ## Browser and cookie handling
 
-Browser discovery reads bounded local profile metadata and exposes supported
-browser families and profiles. It does not read cookie contents during
-discovery.
-
-The user can provide a Netscape-format cookies.txt file. On macOS, the
-application can also pass a detected Safari session to yt-dlp. Browser
+The user can provide a Netscape-format cookies.txt file. WhisperTube validates
+the path and size, then passes it only to the local yt-dlp process. Browser
 encryption, OS permissions, extractor changes, and platform anti-bot behavior
 can still prevent protected downloads.
 

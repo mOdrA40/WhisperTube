@@ -1,8 +1,10 @@
 mod accelerators;
-mod browsers;
+mod archive;
 mod commands;
+mod cookies;
 mod history;
 mod models;
+mod network;
 mod paths;
 mod process;
 mod resources;
@@ -49,6 +51,9 @@ pub fn run() {
             if let Err(error) = history::cleanup_job_storage(&handle) {
                 eprintln!("WhisperTube startup cleanup warning: {error}");
             }
+            if let Err(error) = paths::cleanup_stale_transient_storage(&handle) {
+                eprintln!("WhisperTube transient storage cleanup warning: {error}");
+            }
             paths::models_dir(&handle).map_err(std::io::Error::other)?;
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             if let Some(window) = app.get_webview_window("main") {
@@ -60,7 +65,6 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::system_status,
-            commands::list_browsers,
             commands::list_models,
             commands::download_model,
             commands::install_cuda_engine,

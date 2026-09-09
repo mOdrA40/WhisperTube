@@ -11,7 +11,6 @@ import {
   installCudaEngine,
   inspectMedia,
   installAppUpdate,
-  listBrowsers,
   listHistory,
   listModels,
   loadHistory,
@@ -24,16 +23,14 @@ import {
   subscribeToCudaDownload,
   subscribeToProgress,
 } from "../services/tauri";
-import { friendlyError } from "../lib/format";
-import { getAcceleratorCopy, getModelCopy, useI18n } from "../i18n";
+import { errorCode, friendlyError } from "../lib/format";
+import { getAcceleratorCopy, getModelCopy, useI18n, type Translate } from "../i18n";
 import type {
   AppUpdateInfo,
   AppUpdateProgress,
   AppUpdateStatus,
   AppTab,
   BackendChoice,
-  BrowserChoice,
-  BrowserInfo,
   HistoryItem,
   ModelInfo,
   ModelDownloadPayload,
@@ -45,6 +42,7 @@ import type {
 
 const initialProgress: ProgressPayload = {
   stage: "idle",
+  messageCode: "idle",
   percent: 0,
   message: "",
   backend: null,
@@ -56,16 +54,31 @@ const initialProgress: ProgressPayload = {
 };
 
 const COOKIES_PATH_STORAGE_KEY = "whispertube.cookiesPath";
-const ACCESS_BROWSER_STORAGE_KEY = "whispertube.accessBrowser";
 
+function localizedMetadataError(cause: unknown, t: Translate) {
+  const code = errorCode(cause);
+  if (code === "media_tiktok_transient") return t("error.tiktokMetadataRetry");
+  if (code === "media_source_transient") return t("error.sourceTemporary");
+  if (code === "media_source_rate_limited") return t("error.sourceRateLimited");
+  if (code === "media_source_membership_required") return t("error.sourceMembershipRequired");
+  if (code === "media_source_cookie_file") return t("error.sourceCookiesFile");
+  if (code === "media_source_js_runtime") return t("error.sourceJsRuntime");
+  if (code === "media_source_access_required") return t("error.sourceAccessRequired");
+  if (code === "media_source_unavailable") return t("error.sourceUnavailable");
+  if (code === "media_source_runtime") return t("error.sourceRuntime");
+  if (code === "media_source_metadata") return t("error.sourceMetadata");
+  if (code === "media_source_duration") return t("error.sourceDuration");
+  if (code === "media_source_input") {
+    return friendlyError(cause).toLowerCase().includes("domain video")
+      ? t("error.sourceUnsupported")
+      : t("error.sourceInputInvalid");
+  }
+  return friendlyError(cause);
+}
 function readStoredCookiesPath() {
   if (typeof window === "undefined") return "";
   try {
     const path = window.localStorage.getItem(COOKIES_PATH_STORAGE_KEY) ?? "";
-    if (path.toLowerCase().endsWith("browser-session.cookies.txt")) {
-      window.localStorage.removeItem(COOKIES_PATH_STORAGE_KEY);
-      return "";
-    }
     return path;
   } catch {
     return "";
@@ -81,30 +94,11 @@ function persistCookiesPath(path: string) {
   }
 }
 
-function readStoredBrowser(): BrowserChoice {
-  if (typeof window === "undefined") return "none";
-  try {
-    return window.localStorage.getItem(ACCESS_BROWSER_STORAGE_KEY) === "safari" ? "safari" : "none";
-  } catch {
-    return "none";
-  }
-}
-
-function persistBrowser(browser: BrowserChoice) {
-  try {
-    if (browser === "safari") window.localStorage.setItem(ACCESS_BROWSER_STORAGE_KEY, browser);
-    else window.localStorage.removeItem(ACCESS_BROWSER_STORAGE_KEY);
-  } catch {
-    // The browser choice still works for the current session if storage is unavailable.
-  }
-}
-
 export function useWhisperTube() {
   const { t } = useI18n();
   const [tab, setTab] = useState<AppTab>("transcribe");
   const [url, setUrl] = useState("");
   const [cookiesPath, setCookiesPath] = useState(readStoredCookiesPath);
-  const [browser, setBrowser] = useState<BrowserChoice>(readStoredBrowser);
   const [backend, setBackend] = useState<BackendChoice>("auto");
   const [computeTargetId, setComputeTargetId] = useState("auto");
   const [language, setLanguage] = useState("auto");
@@ -112,7 +106,6 @@ export function useWhisperTube() {
   const [keepAudio, setKeepAudio] = useState(false);
   const [metadata, setMetadata] = useState<VideoMetadata | null>(null);
   const [system, setSystem] = useState<SystemStatus | null>(null);
-  const [browsers, setBrowsers] = useState<BrowserInfo[]>([]);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [historyTotalCount, setHistoryTotalCount] = useState(0);
@@ -145,14 +138,27 @@ export function useWhisperTube() {
   const autoConfigured = useRef(false);
 
   const selectedModel = models.find((model) => model.id === modelId);
-  const runtimeReady = Boolean(system?.ytDlp && system?.ffmpeg && system?.cpuEngine);
+  const runtimeReady = Boolean(
+    system?.ytDlp &&
+      system.ffmpeg &&
+      (backend === "cpu"
+        ? system.cpuEngine
+        : backend === "cuda"
+          ? system.cudaSupported && system.nvidia && system.cudaEngine
+          : backend === "metal"
+            ? system.accelerators.some((accelerator) => accelerator.backend === "metal" && accelerator.installed)
+            : backend === "vulkan"
+              ? system.accelerators.some((accelerator) => accelerator.backend === "vulkan" && accelerator.installed)
+              : system.cpuEngine ||
+                (system.cudaSupported && system.nvidia && system.cudaEngine) ||
+                system.accelerators.some((accelerator) => accelerator.installed)),
+  );
 
   const refreshSystem = useCallback(async () => {
-    const [systemResult, modelsResult, historyResult, browsersResult] = await Promise.allSettled([
+    const [systemResult, modelsResult, historyResult] = await Promise.allSettled([
       getSystemStatus(),
       listModels(),
       listHistory(),
-      listBrowsers(),
     ]);
 
     if (systemResult.status === "fulfilled") {
@@ -166,14 +172,13 @@ export function useWhisperTube() {
       }
     }
     if (modelsResult.status === "fulfilled") setModels(modelsResult.value);
-    if (browsersResult.status === "fulfilled") setBrowsers(browsersResult.value);
     if (historyResult.status === "fulfilled") {
       setHistory(historyResult.value.items);
       setHistoryHasMore(historyResult.value.hasMore);
       setHistoryTotalCount(historyResult.value.totalCount);
     }
 
-    const failures = [systemResult, modelsResult, historyResult, browsersResult]
+    const failures = [systemResult, modelsResult, historyResult]
       .filter((result): result is PromiseRejectedResult => result.status === "rejected")
       .map((result) => friendlyError(result.reason));
     if (failures.length > 0) throw new Error(failures.join(" "));
@@ -205,13 +210,6 @@ export function useWhisperTube() {
       // Preserve the mutation error: refreshSystem already applied every fulfilled result.
     }
   }, [refreshSystem]);
-
-  useEffect(() => {
-    if (browser === "safari" && browsers.length > 0 && !browsers.some((item) => item.id === "safari")) {
-      setBrowser("none");
-      persistBrowser("none");
-    }
-  }, [browser, browsers]);
 
   useEffect(() => {
     let disposed = false;
@@ -310,8 +308,6 @@ export function useWhisperTube() {
     try {
       const path = await pickCookiesFile();
       if (!path) return;
-      setBrowser("none");
-      persistBrowser("none");
       setCookiesPath(path);
       persistCookiesPath(path);
       resetInspectedVideo();
@@ -322,19 +318,6 @@ export function useWhisperTube() {
   }
 
   function handleClearCookiesFile() {
-    setCookiesPath("");
-    persistCookiesPath("");
-    resetInspectedVideo();
-    setError(null);
-  }
-
-  function handleUseSafariSession() {
-    if (!browsers.some((item) => item.id === "safari")) {
-      setError(t("error.safariUnavailable"));
-      return;
-    }
-    setBrowser("safari");
-    persistBrowser("safari");
     setCookiesPath("");
     persistCookiesPath("");
     resetInspectedVideo();
@@ -451,45 +434,13 @@ export function useWhisperTube() {
     setError(null);
     setResult(null);
     try {
-      setMetadata(await inspectMedia(url.trim(), browser, "", cookiesPath));
+      setMetadata(await inspectMedia(url.trim(), cookiesPath));
     } catch (cause) {
       setMetadata(null);
       const message = friendlyError(cause);
       const normalizedMessage = message.toLowerCase();
       if (normalizedMessage.includes("dibatalkan")) return;
-      setError(
-        normalizedMessage.startsWith("media_tiktok_transient:")
-          ? t("error.tiktokMetadataRetry")
-          : normalizedMessage.startsWith("media_source_transient:")
-            ? t("error.sourceTemporary")
-            : normalizedMessage.startsWith("media_source_rate_limited:")
-              ? t("error.sourceRateLimited")
-            : normalizedMessage.startsWith("media_source_membership_required:")
-              ? t("error.sourceMembershipRequired")
-              : normalizedMessage.startsWith("media_source_browser_decryption:")
-                ? t("error.sourceBrowserEncryption")
-              : normalizedMessage.startsWith("media_source_cookie_file:")
-                ? t("error.sourceCookiesFile")
-              : normalizedMessage.startsWith("media_source_js_runtime:")
-                ? t("error.sourceJsRuntime")
-              : normalizedMessage.startsWith("media_source_access_required:")
-                ? t("error.sourceAccessRequired")
-                : normalizedMessage.startsWith("media_source_unavailable:")
-                  ? t("error.sourceUnavailable")
-                  : normalizedMessage.startsWith("media_source_runtime:")
-                    ? t("error.sourceRuntime")
-                    : normalizedMessage.startsWith("media_source_metadata:")
-                      ? t("error.sourceMetadata")
-                      : normalizedMessage.startsWith("media_source_duration:")
-                        ? t("error.sourceDuration")
-                      : normalizedMessage.startsWith("media_source_browser:")
-                        ? t("error.sourceBrowser")
-                        : normalizedMessage.startsWith("media_source_input:")
-                          ? normalizedMessage.includes("domain video")
-                            ? t("error.sourceUnsupported")
-                            : t("error.sourceInputInvalid")
-                          : message,
-      );
+      setError(localizedMetadataError(cause, t));
     } finally {
       setInspecting(false);
       setCancellingInspection(false);
@@ -540,12 +491,10 @@ export function useWhisperTube() {
       await resetUserDataRequest();
       try {
         window.localStorage.removeItem(COOKIES_PATH_STORAGE_KEY);
-        window.localStorage.removeItem(ACCESS_BROWSER_STORAGE_KEY);
       } catch {
-        // Backend data reset remains successful when browser storage is unavailable.
+        // Backend data reset remains successful when WebView storage is unavailable.
       }
       setCookiesPath("");
-      setBrowser("none");
       setMetadata(null);
       setResult(null);
       setSearchQuery("");
@@ -639,9 +588,10 @@ export function useWhisperTube() {
     setError(null);
     setResult(null);
     setNetworkSpeedBytesPerSecond(null);
-    setProgress({
-      stage: "downloading",
-      percent: 0,
+      setProgress({
+        stage: "downloading",
+        messageCode: "preparing_download",
+        percent: 0,
       message: "",
       backend: null,
       downloadedBytes: 0,
@@ -656,8 +606,6 @@ export function useWhisperTube() {
         title: metadata.title,
         channel: metadata.channel,
         duration: metadata.duration,
-        browser,
-        browserProfile: "",
         cookiesPath,
         backend,
         computeDeviceId: computeTargetId,
@@ -673,9 +621,11 @@ export function useWhisperTube() {
       const normalizedMessage = message.toLowerCase();
       if (!normalizedMessage.includes("dibatalkan")) {
         setError(
-          normalizedMessage.startsWith("media_source_cookie_file:")
+          errorCode(cause) === "media_source_cookie_file"
             ? t("error.sourceCookiesFile")
-            : message,
+            : errorCode(cause) === "storage_quota_exceeded"
+              ? t("error.storageQuotaExceeded")
+              : message,
         );
       }
     } finally {
@@ -802,11 +752,8 @@ export function useWhisperTube() {
     setUrl: handleUrlChange,
     clearTranscription,
     cookiesPath,
-    usingSafariSession: browser === "safari",
-    browsers,
     selectCookiesFile: handleSelectCookiesFile,
     clearCookiesFile: handleClearCookiesFile,
-    useSafariSession: handleUseSafariSession,
     backend,
     computeTargetId,
     setBackend,

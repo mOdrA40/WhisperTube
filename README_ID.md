@@ -10,7 +10,7 @@ Dokumentasi utama: [README.md](README.md) (English). Dokumentasi Mandarin: [READ
 - Bahasa antarmuka default adalah English. Bahasa Indonesia dan 中文（普通话） tersedia di Settings.
 - Inferensi CPU disertakan dalam setup development.
 - NVIDIA CUDA bersifat opsional dan diunduh terpisah supaya setup dasar tetap kecil.
-- Aplikasi mendeteksi OS, arsitektur, GPU, browser, dan profil sebelum menawarkan komponen opsional.
+- Aplikasi mendeteksi OS, arsitektur, dan GPU sebelum menawarkan komponen opsional.
 
 Platform yang dicakup antara lain YouTube, TikTok, X/Twitter, Facebook, Instagram, Reddit, Twitch, Vimeo, Dailymotion, Pinterest, LinkedIn, Tumblr, Bilibili, dan VK. Dukungan mengikuti extractor yt-dlp yang terpasang dan dapat berubah saat platform memperbarui sistemnya.
 
@@ -21,7 +21,7 @@ Untuk menjaga pemakaian disk dan memori tetap terprediksi, transkripsi dibatasi 
 - Tempel URL video yang didukung dan periksa metadata sebelum download.
 - Video publik dan video yang memerlukan login melalui import `cookies.txt` format Netscape.
 - Tidak meminta email atau password Google dan tidak menyalin cookies ke database aplikasi.
-- Akses `cookies.txt` format Netscape dari berbagai keluarga browser; di macOS, Settings juga dapat mencoba session Safari yang terdeteksi secara langsung.
+- Akses `cookies.txt` format Netscape dari berbagai keluarga browser.
 - Download `bestaudio/best`, normalisasi FFmpeg ke WAV PCM signed 16-bit mono 16 kHz, lalu inferensi lokal whisper.cpp.
 - Model: Fast (`base`, ~142 MB), Balanced (`large-v3-turbo-q5_0`, ~547 MB), dan Accurate (`large-v3-q5_0`, ~1,1 GB).
 - Verifikasi checksum model, progress, cancel, timestamp, export TXT/SRT/VTT, dan history SQLite lokal.
@@ -82,11 +82,11 @@ Video source → yt-dlp → FFmpeg WAV 16 kHz mono → whisper.cpp
 
 ## Video yang memerlukan login
 
-Login ke platform terkait terlebih dahulu. Di WhisperTube buka **Pengaturan → Akses sumber**, lalu import file `cookies.txt` format Netscape yang masih baru. Di macOS, session Safari yang terdeteksi juga dapat dicoba secara langsung. Kembali ke halaman Transkripsi dan klik **Periksa video**.
+Login ke platform terkait terlebih dahulu. Di WhisperTube buka **Pengaturan → Akses sumber**, lalu import file `cookies.txt` format Netscape yang masih baru. Kembali ke halaman Transkripsi dan klik **Periksa video**.
 
-`yt-dlp` hanya membaca sesi browser pilihan saat job berjalan. Dukungan video yang memerlukan login dapat berubah ketika platform mengubah extractor, login flow, atau sistem anti-bot.
+`yt-dlp` hanya membaca file cookies yang dipilih saat job berjalan. Dukungan video yang memerlukan login dapat berubah ketika platform mengubah extractor, login flow, atau sistem anti-bot.
 
-Di Windows, enkripsi browser berbasis Chromium dapat membuat yt-dlp gagal membuka profile Brave/Chrome/Edge, sehingga file cookies manual adalah jalur utama. Di macOS, penyimpanan cookies Safari mungkin memerlukan izin dari macOS. File/session hanya digunakan oleh proses WhisperTube lokal.
+WhisperTube hanya meneruskan file cookies ke proses yt-dlp lokal untuk job yang dipilih. Enkripsi browser dapat membuat ekspor cookies tidak dapat digunakan, jadi jaga file tetap baru dan rahasia.
 
 ## Build installer
 
@@ -179,7 +179,7 @@ Perintah pertama hanya membaca dan menampilkan hash. Opsi `-Apply` menulis hash 
 - `src/services/`: batas IPC Tauri.
 - `src-tauri/src/`: command dan modul domain Rust.
 
-Model, job, export, dan `whispertube.db` disimpan di app-local-data sesuai OS.
+Model, job, export, dan `whispertube.db` disimpan di app-local-data sesuai OS. Penyimpanan job memiliki batas keamanan 20 GiB dan pemakaiannya ditampilkan di Pengaturan.
 
 ## Batasan v0.1
 

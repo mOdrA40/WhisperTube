@@ -76,13 +76,10 @@ execution policy merely to run WhisperTube.
 1. Confirm that the imported cookies.txt came from the account that can access
    the video.
 2. Export a fresh Netscape-format cookies.txt file if the current one is old.
-3. On macOS, try the detected Safari session and grant macOS permission if
-   requested.
-4. On Windows, Chromium profile encryption can prevent yt-dlp from reading
-   Chrome, Edge, or Brave profiles; the manual cookies file is the primary
-   fallback.
-5. Run the setup script again if yt-dlp is outdated.
-6. Capture the exact yt-dlp error. Platform authentication, anti-bot, and
+3. On Windows, browser encryption can prevent a cookies export from being
+   usable; export a fresh Netscape-format cookies.txt file.
+4. Run the setup script again if yt-dlp is outdated.
+5. Capture the exact yt-dlp error. Platform authentication, anti-bot, and
    extractor behavior can change independently of WhisperTube.
 
 WhisperTube does not request the website password and does not upload the
@@ -93,7 +90,14 @@ cookies file.
 Check that the URL belongs to a supported host and that yt-dlp can reach the
 network. Metadata inspection retries only recognized transient failures and
 has a bounded 45-second process timeout. A login-protected source may require
-an explicitly selected browser session or cookies file.
+an imported cookies file.
+
+## Job storage quota or low disk space
+
+Settings shows the current job storage usage and the 20 GiB safety quota.
+Delete old history items or turn off Keep processed audio before starting a
+new large job. WhisperTube also reserves space for the maximum media and WAV
+sizes before downloading.
 
 ## CUDA is selected but NVIDIA is not detected
 

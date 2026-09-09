@@ -56,7 +56,7 @@ Write-Host "`nFrontend dependencies:" -ForegroundColor Cyan
 if (Test-Path (Join-Path $Root "node_modules")) {
     Write-Host "[OK]   node_modules exists" -ForegroundColor Green
 } else {
-    Write-Host "[MISS] node_modules -> jalankan npm install atau setup-windows.ps1" -ForegroundColor Red
+    Write-Host "[MISS] node_modules -> jalankan npm ci atau setup-windows.ps1" -ForegroundColor Red
 }
 
 Write-Host "`nJika semua prerequisite utama OK, jalankan:" -ForegroundColor White

@@ -1,18 +1,15 @@
-import { AlertTriangle, Check, CircleStop, Copy, Cpu, Database, Download, ExternalLink, FileKey, Globe2, HardDrive, KeyRound, Languages, LockKeyhole, LoaderCircle, MonitorCog, RotateCcw, Trash2 } from "lucide-react";
+import { AlertTriangle, Check, CircleStop, Copy, Cpu, Database, Download, ExternalLink, FileKey, HardDrive, KeyRound, Languages, LockKeyhole, LoaderCircle, MonitorCog, RotateCcw, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { formatBytes, formatMemory, friendlyError } from "../../lib/format";
 import { getAcceleratorCopy, getModelCopy, uiLanguageOptions, useI18n } from "../../i18n";
-import type { AcceleratorInfo, AppUpdateInfo, AppUpdateProgress, AppUpdateStatus, BackendChoice, BrowserInfo, ModelDownloadPayload, ModelInfo, SystemStatus } from "../../types";
+import type { AcceleratorInfo, AppUpdateInfo, AppUpdateProgress, AppUpdateStatus, BackendChoice, ModelDownloadPayload, ModelInfo, SystemStatus } from "../../types";
 import { CustomSelect, type SelectOption } from "../common/CustomSelect";
 
 const COOKIES_EXTENSION_URL = "https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc";
 const FIREFOX_COOKIES_EXTENSION_URL = "https://addons.mozilla.org/en-US/firefox/addon/get-cookies-txt-locally/";
-const CHROMIUM_BROWSER_IDS = new Set(["chrome", "brave", "edge", "chromium", "opera", "vivaldi", "whale"]);
 
 type SettingsPageProps = {
   cookiesPath: string;
-  usingSafariSession: boolean;
-  browsers: BrowserInfo[];
   system: SystemStatus | null;
   models: ModelInfo[];
   modelDownloadBlockReasons: Record<string, string>;
@@ -33,7 +30,6 @@ type SettingsPageProps = {
   updateChecking: boolean;
   onSelectCookiesFile: () => void;
   onClearCookiesFile: () => void;
-  onUseSafariSession: () => void;
   onOpenUrl: (url: string) => void;
   onDownloadModel: (id: string) => void;
   onCancelModel: () => void;
@@ -50,8 +46,6 @@ type SettingsPageProps = {
 
 export function SettingsPage({
   cookiesPath,
-  usingSafariSession,
-  browsers,
   system,
   models,
   modelDownloadBlockReasons,
@@ -72,7 +66,6 @@ export function SettingsPage({
   updateChecking,
   onSelectCookiesFile,
   onClearCookiesFile,
-  onUseSafariSession,
   onOpenUrl,
   onDownloadModel,
   onCancelModel,
@@ -112,11 +105,6 @@ export function SettingsPage({
     value: option.value,
     label: option.label,
   }));
-  const chromiumDetected = browsers.some((browser) => CHROMIUM_BROWSER_IDS.has(browser.id));
-  const firefoxDetected = browsers.some((browser) => browser.id === "firefox");
-  const safariDetected = browsers.some((browser) => browser.id === "safari");
-  const showChromiumLink = chromiumDetected || !firefoxDetected;
-  const showFirefoxLink = firefoxDetected || !chromiumDetected;
 
   async function copyLink(url: string) {
     try {
@@ -136,7 +124,7 @@ export function SettingsPage({
     ...(system?.cudaEngine ? [t("settings.cudaEngine")] : []),
     ...installedAccelerators.map((accelerator) => getAcceleratorCopy(accelerator, t).label),
   ];
-  const hasSavedAccessPreference = Boolean(cookiesPath || usingSafariSession);
+  const hasSavedAccessPreference = Boolean(cookiesPath);
 
   async function handleResetUserData() {
     setResetComplete(false);
@@ -347,27 +335,6 @@ export function SettingsPage({
         )}
         <p className="settings-note">{t("settings.cookiesFileNote")}</p>
 
-        {safariDetected && (
-          <div className="info-box">
-            <Globe2 size={16} />
-            <span>
-              {usingSafariSession
-                ? t("settings.safariSessionActive")
-                : t("settings.safariSessionNote")}
-            </span>
-            <button
-              type="button"
-              className="secondary-button compact"
-              onClick={usingSafariSession ? onSelectCookiesFile : onUseSafariSession}
-              disabled={busy}
-            >
-              {usingSafariSession
-                ? t("settings.useCookiesFileInstead")
-                : t("settings.useSafariSession")}
-            </button>
-          </div>
-        )}
-
         <label className="field-label">{t("settings.interfaceLanguage")}</label>
         <CustomSelect
           value={uiLanguage}
@@ -396,8 +363,7 @@ export function SettingsPage({
               <p>{t("settings.cookiesGuideBody")}</p>
               <p className="cookies-guide-extension">{t("settings.cookiesGuideExtension")}</p>
               <div className="cookies-guide-links">
-                {showChromiumLink && (
-                  <CookieExtensionLink
+                <CookieExtensionLink
                     label={t("settings.cookiesGuideChromiumFamily")}
                     url={COOKIES_EXTENSION_URL}
                     copied={copiedUrl === COOKIES_EXTENSION_URL}
@@ -408,10 +374,8 @@ export function SettingsPage({
                     copyLabel={t("settings.copyLink")}
                     copiedLabel={t("settings.linkCopied")}
                     copyFailedLabel={t("settings.copyLinkFailed")}
-                  />
-                )}
-                {showFirefoxLink && (
-                  <CookieExtensionLink
+                />
+                <CookieExtensionLink
                     label={t("settings.cookiesGuideFirefoxFamily")}
                     url={FIREFOX_COOKIES_EXTENSION_URL}
                     copied={copiedUrl === FIREFOX_COOKIES_EXTENSION_URL}
@@ -422,8 +386,7 @@ export function SettingsPage({
                     copyLabel={t("settings.copyLink")}
                     copiedLabel={t("settings.linkCopied")}
                     copyFailedLabel={t("settings.copyLinkFailed")}
-                  />
-                )}
+                />
               </div>
               <ol className="cookies-guide-steps">
                 <li>{t("settings.cookiesGuideStep1")}</li>
@@ -663,6 +626,14 @@ export function SettingsPage({
           <div>
             <span>{t("hardware.cpuThreads")}</span>
             <strong>{system?.cpuThreads ?? "—"}</strong>
+          </div>
+          <div>
+            <span>{t("settings.jobStorage")}</span>
+            <strong>
+              {system
+                ? `${formatBytes(system.jobStorageBytes)} / ${formatBytes(system.jobStorageLimitBytes)}`
+                : t("hardware.notDetected")}
+            </strong>
           </div>
         </div>
 

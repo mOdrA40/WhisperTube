@@ -1,5 +1,4 @@
 export type AppTab = "transcribe" | "history" | "settings";
-export type BrowserChoice = "none" | "chrome" | "edge" | "firefox" | "brave" | "chromium" | "opera" | "vivaldi" | "whale" | "safari";
 export type BackendChoice = "auto" | "cpu" | "cuda" | "metal" | "vulkan";
 
 export type AppUpdateInfo = {
@@ -9,6 +8,11 @@ export type AppUpdateInfo = {
 };
 
 export type AppUpdateStatus = "idle" | "checking" | "available" | "up-to-date" | "installing";
+
+export type BackendErrorPayload = {
+  code: string;
+  detail?: string | null;
+};
 
 export type AppUpdateProgress = {
   downloadedBytes: number;
@@ -24,18 +28,6 @@ export type AcceleratorInfo = {
   installed: boolean;
   downloadable: boolean;
   description: string;
-};
-
-export type BrowserProfile = {
-  id: string;
-  label: string;
-  isDefault: boolean;
-};
-
-export type BrowserInfo = {
-  id: string;
-  label: string;
-  profiles: BrowserProfile[];
 };
 
 export type SystemStatus = {
@@ -54,6 +46,8 @@ export type SystemStatus = {
   recommendedBackend: BackendChoice;
   accelerators: AcceleratorInfo[];
   computeDevices: ComputeDeviceInfo[];
+  jobStorageBytes: number;
+  jobStorageLimitBytes: number;
 };
 
 export type ComputeDeviceInfo = {
@@ -98,6 +92,7 @@ export type ProgressStage =
 
 export type ProgressPayload = {
   stage: ProgressStage;
+  messageCode: string;
   percent: number;
   message: string;
   backend: string | null;
@@ -176,8 +171,6 @@ export type TranscriptRequest = {
   title: string;
   channel: string;
   duration: number;
-  browser: BrowserChoice;
-  browserProfile: string;
   cookiesPath: string;
   backend: BackendChoice;
   computeDeviceId: string | null;

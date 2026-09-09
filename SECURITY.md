@@ -4,7 +4,7 @@
 
 WhisperTube is a local-first desktop application. Video audio and transcript
 processing are performed on the user's device. The application can nevertheless
-handle sensitive local inputs, including imported browser cookies, downloaded
+handle sensitive local inputs, including imported cookies.txt session files, downloaded
 media, transcript content, and model/runtime files.
 
 ## Reporting a vulnerability
@@ -56,3 +56,13 @@ trust mechanisms:
 The updater signing private key must remain outside source control and must be
 provided to release automation only through the repository secret
 TAURI_SIGNING_PRIVATE_KEY.
+
+## Dependency audit status
+
+The current Rust lockfile has no known vulnerability advisory, but Linux builds
+inherit GTK3 `glib 0.18.5` through the Tauri/WebKitGTK stack. RustSec reports an
+unsound `VariantStrIter` implementation for that range. The current Tauri and
+Wry releases still resolve this Linux stack to GTK3, so the project must not
+silently ignore the advisory or claim Linux is fully hardened until the
+upstream stack moves to a fixed GLib line or a reviewed compatible patch is
+available.

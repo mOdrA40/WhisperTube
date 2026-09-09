@@ -19,13 +19,28 @@ export function formatDuration(totalSeconds: number) {
 }
 
 export function friendlyError(error: unknown) {
+  if (typeof error === "object" && error !== null && "code" in error) {
+    const payload = error as { code?: unknown; detail?: unknown };
+    const detail = typeof payload.detail === "string" ? payload.detail.trim() : "";
+    const code = typeof payload.code === "string" ? payload.code.trim() : "";
+    return detail || code || "Terjadi kesalahan yang tidak diketahui";
+  }
   const raw = String(error ?? "Terjadi kesalahan yang tidak diketahui");
   return raw.replace(/^Error:\s*/i, "").replace(/^operation_conflict:\s*/i, "");
 }
 
+export function errorCode(error: unknown) {
+  if (typeof error === "object" && error !== null && "code" in error) {
+    const code = (error as { code?: unknown }).code;
+    return typeof code === "string" ? code : null;
+  }
+  const raw = String(error ?? "").replace(/^Error:\s*/i, "");
+  const separator = raw.indexOf(":");
+  return separator > 0 ? raw.slice(0, separator) : null;
+}
+
 export function isOperationConflict(error: unknown) {
-  const raw = String(error ?? "");
-  return /^Error:\s*operation_conflict:/i.test(raw) || /^operation_conflict:/i.test(raw);
+  return errorCode(error) === "operation_conflict";
 }
 
 export function formatMemory(megabytes: number | null | undefined, notDetected = "Not detected") {

@@ -84,8 +84,8 @@ const english = {
   "source.cancelChecking": "Cancel check",
   "source.cancelling": "Cancelling…",
   "source.checkVideo": "Check video",
-  "source.memberHint": "For login-protected videos, import cookies.txt in Settings, or use Safari on macOS.",
-  "source.access": "Browser access",
+  "source.memberHint": "For login-protected videos, import a fresh cookies.txt file in Settings.",
+  "source.access": "Source access",
   "source.videoReady": "Video ready",
   "source.clear": "Clear video and transcript",
   "controls.eyebrow": "Transcription",
@@ -127,10 +127,6 @@ const english = {
   "settings.cookiesFileSelected": "Using {file}",
   "settings.clearCookiesFile": "Remove cookies file",
   "settings.cookiesFileNote": "Use this if Windows cannot unlock Brave/Chrome cookies. The file stays on your device; WhisperTube stores only its path and passes it to yt-dlp locally. Keep it private.",
-  "settings.safariSessionNote": "Safari was detected on this Mac. WhisperTube can try Safari's local session; macOS may ask for permission to read Safari cookies.",
-  "settings.safariSessionActive": "Using the detected Safari session for source access.",
-  "settings.useSafariSession": "Use Safari session",
-  "settings.useCookiesFileInstead": "Use cookies.txt instead",
   "settings.cookiesGuideTitle": "Add a cookies.txt file",
   "settings.cookiesGuideBody": "Use a local Netscape-format cookies.txt file when a video requires your signed-in account. WhisperTube will not upload it or add it to history.",
   "settings.cookiesGuideExtension": "Official download links by browser family:",
@@ -156,6 +152,7 @@ const english = {
   "settings.gpu": "GPU",
   "settings.totalVram": "Total VRAM",
   "settings.freeVram": "Free VRAM",
+  "settings.jobStorage": "Job storage",
   "settings.cudaEngine": "CUDA engine",
   "settings.optional": "Optional",
   "settings.cudaInfo": "The CUDA engine is downloaded from an official whisper.cpp release and stored in app storage (~678 MB).",
@@ -196,8 +193,8 @@ const english = {
   "settings.resetDataModels": "Downloaded Whisper models",
   "settings.resetDataRuntimes": "Downloaded runtimes and GPU accelerators",
   "settings.resetDataAccess": "Saved source-access preferences",
-  "settings.resetDataAccessDetail": "The saved cookies.txt path and browser session choice will be cleared. The external cookies.txt file itself is not deleted.",
-  "settings.resetDataAccessNone": "No cookies.txt path or browser session choice is currently saved.",
+  "settings.resetDataAccessDetail": "The saved cookies.txt path will be cleared. The external cookies.txt file itself is not deleted.",
+  "settings.resetDataAccessNone": "No cookies.txt path is currently saved.",
   "settings.resetDataNoneInstalled": "Nothing is currently detected in this category.",
   "settings.resetDataStatusUnknown": "Status is still loading; any downloaded runtime in app storage will be removed.",
   "settings.resetDataWillKeep": "Will be kept",
@@ -280,13 +277,11 @@ const english = {
   "error.sourceInputInvalid": "This is not a valid supported video link. Paste a complete HTTPS video URL.",
   "error.sourceDuration": "Live streams, upcoming streams, media with unknown duration, and videos longer than 2 hours are not supported.",
   "error.sourceUnsupported": "This platform is not supported yet. Try a video link from a supported platform.",
-  "error.sourceBrowser": "WhisperTube could not use the selected session. Import a fresh cookies.txt file and try again.",
-  "error.safariUnavailable": "Safari session is not available on this device. Use a cookies.txt file instead.",
-  "error.sourceBrowserEncryption": "Windows protected the selected browser cookies and WhisperTube could not unlock them. Use an exported cookies.txt file, try Firefox, or use Public videos only for public videos.",
   "error.sourceCookiesFile": "The selected cookies.txt file cannot be read. Select it again or remove it in Settings.",
   "error.sourceJsRuntime": "YouTube needs a JavaScript runtime to prepare this video. Install Node.js or update the app runtime, then try again.",
   "error.sourceRuntime": "The video downloader is not installed. Run the setup script or reinstall the app runtime.",
   "error.sourceMetadata": "The platform returned unreadable video information. Update the app runtime and try again.",
+  "error.storageQuotaExceeded": "WhisperTube job storage has reached its 20 GiB safety limit. Delete old history before starting another job.",
 } as const;
 
 export type TranslationKey = keyof typeof english;
@@ -362,8 +357,8 @@ const messages: Record<UiLanguage, Record<TranslationKey, string>> = {
     "source.cancelChecking": "Batalkan pemeriksaan",
     "source.cancelling": "Membatalkan…",
     "source.checkVideo": "Periksa video",
-    "source.memberHint": "Untuk video yang memerlukan login, import cookies.txt di Pengaturan, atau gunakan Safari di macOS.",
-    "source.access": "Akses browser",
+    "source.memberHint": "Untuk video yang memerlukan login, import file cookies.txt terbaru di Pengaturan.",
+    "source.access": "Akses sumber",
     "source.videoReady": "Video siap",
     "source.clear": "Bersihkan video dan transkrip",
     "controls.eyebrow": "Transkripsi",
@@ -405,10 +400,6 @@ const messages: Record<UiLanguage, Record<TranslationKey, string>> = {
     "settings.cookiesFileSelected": "Menggunakan {file}",
     "settings.clearCookiesFile": "Hapus file cookies",
     "settings.cookiesFileNote": "Gunakan ini jika Windows tidak bisa membuka cookies Brave/Chrome. File tetap di perangkatmu; WhisperTube hanya menyimpan path dan meneruskannya ke yt-dlp secara lokal. Jaga file ini tetap rahasia.",
-    "settings.safariSessionNote": "Safari terdeteksi di Mac ini. WhisperTube dapat mencoba session lokal Safari; macOS mungkin meminta izin untuk membaca cookies Safari.",
-    "settings.safariSessionActive": "Session Safari yang terdeteksi sedang digunakan untuk akses sumber.",
-    "settings.useSafariSession": "Gunakan session Safari",
-    "settings.useCookiesFileInstead": "Gunakan cookies.txt",
     "settings.cookiesGuideTitle": "Tambahkan file cookies.txt",
     "settings.cookiesGuideBody": "Gunakan file cookies.txt lokal format Netscape saat video memerlukan akunmu yang sudah login. WhisperTube tidak mengunggahnya dan tidak memasukkannya ke history.",
     "settings.cookiesGuideExtension": "Link download resmi berdasarkan keluarga browser:",
@@ -433,7 +424,8 @@ const messages: Record<UiLanguage, Record<TranslationKey, string>> = {
     "settings.unavailable": "Tidak tersedia",
     "settings.gpu": "GPU",
     "settings.totalVram": "Total VRAM",
-    "settings.freeVram": "VRAM bebas",
+  "settings.freeVram": "VRAM bebas",
+  "settings.jobStorage": "Penyimpanan job",
     "settings.cudaEngine": "Engine CUDA",
     "settings.optional": "Opsional",
     "settings.cudaInfo": "Engine CUDA diunduh dari release resmi whisper.cpp dan disimpan di storage aplikasi (~678 MB).",
@@ -474,8 +466,8 @@ const messages: Record<UiLanguage, Record<TranslationKey, string>> = {
     "settings.resetDataModels": "Model Whisper yang diunduh",
     "settings.resetDataRuntimes": "Runtime dan akselerator GPU yang diunduh",
     "settings.resetDataAccess": "Preferensi akses sumber yang tersimpan",
-    "settings.resetDataAccessDetail": "Path cookies.txt dan pilihan session browser akan dihapus. File cookies.txt eksternal itu sendiri tidak dihapus.",
-    "settings.resetDataAccessNone": "Belum ada path cookies.txt atau pilihan session browser yang tersimpan.",
+    "settings.resetDataAccessDetail": "Path cookies.txt yang tersimpan akan dihapus. File cookies.txt eksternal itu sendiri tidak dihapus.",
+    "settings.resetDataAccessNone": "Belum ada path cookies.txt yang tersimpan.",
     "settings.resetDataNoneInstalled": "Tidak ada data yang terdeteksi saat ini.",
     "settings.resetDataStatusUnknown": "Status masih dimuat; runtime apa pun yang ada di storage aplikasi akan dihapus.",
     "settings.resetDataWillKeep": "Yang tetap disimpan",
@@ -558,13 +550,11 @@ const messages: Record<UiLanguage, Record<TranslationKey, string>> = {
     "error.sourceInputInvalid": "Link video ini tidak valid atau belum didukung. Tempel URL video HTTPS yang lengkap.",
     "error.sourceDuration": "Live stream, siaran mendatang, media tanpa durasi pasti, dan video lebih dari 2 jam belum didukung.",
     "error.sourceUnsupported": "Platform ini belum didukung. Coba link video dari platform yang tersedia.",
-  "error.sourceBrowser": "WhisperTube tidak bisa memakai session yang dipilih. Import cookies.txt yang masih baru, lalu coba lagi.",
-  "error.safariUnavailable": "Session Safari tidak tersedia di perangkat ini. Gunakan cookies.txt sebagai gantinya.",
-    "error.sourceBrowserEncryption": "Windows melindungi cookies browser yang dipilih dan WhisperTube tidak bisa membukanya. Gunakan file cookies.txt hasil ekspor, coba Firefox, atau gunakan Video publik saja untuk video publik.",
-    "error.sourceCookiesFile": "File cookies.txt yang dipilih tidak bisa dibaca. Pilih ulang atau hapus dari Pengaturan.",
+  "error.sourceCookiesFile": "File cookies.txt yang dipilih tidak bisa dibaca. Pilih ulang atau hapus dari Pengaturan.",
     "error.sourceJsRuntime": "YouTube membutuhkan JavaScript runtime untuk menyiapkan video ini. Pasang Node.js atau perbarui runtime aplikasi, lalu coba lagi.",
     "error.sourceRuntime": "Downloader video belum terpasang. Jalankan script setup atau pasang ulang runtime aplikasi.",
     "error.sourceMetadata": "Platform mengirim informasi video yang tidak bisa dibaca. Perbarui runtime aplikasi lalu coba lagi.",
+    "error.storageQuotaExceeded": "Penyimpanan job WhisperTube sudah mencapai batas keamanan 20 GiB. Hapus history lama sebelum memulai job baru.",
   },
   zh: {
     "app.tagline": "本地 Whisper 转录",
@@ -631,8 +621,8 @@ const messages: Record<UiLanguage, Record<TranslationKey, string>> = {
     "source.cancelChecking": "取消检查",
     "source.cancelling": "正在取消…",
     "source.checkVideo": "检查视频",
-    "source.memberHint": "对于需要登录的视频，请在设置中导入 cookies.txt，或在 macOS 上使用 Safari。",
-    "source.access": "浏览器访问",
+    "source.memberHint": "对于需要登录的视频，请在设置中导入最新的 cookies.txt 文件。",
+    "source.access": "来源访问",
     "source.videoReady": "视频已就绪",
     "source.clear": "清除视频和转录文本",
     "controls.eyebrow": "转录",
@@ -674,10 +664,6 @@ const messages: Record<UiLanguage, Record<TranslationKey, string>> = {
     "settings.cookiesFileSelected": "正在使用 {file}",
     "settings.clearCookiesFile": "移除 cookies 文件",
     "settings.cookiesFileNote": "如果 Windows 无法解锁 Brave/Chrome cookies，请使用此选项。文件保留在设备上；WhisperTube 只保存路径，并在本地传递给 yt-dlp。请妥善保密。",
-    "settings.safariSessionNote": "已在此 Mac 上检测到 Safari。WhisperTube 可以尝试使用 Safari 本地会话；macOS 可能会请求读取 Safari cookies 的权限。",
-    "settings.safariSessionActive": "正在使用检测到的 Safari 会话访问来源。",
-    "settings.useSafariSession": "使用 Safari 会话",
-    "settings.useCookiesFileInstead": "改用 cookies.txt",
     "settings.cookiesGuideTitle": "添加 cookies.txt 文件",
     "settings.cookiesGuideBody": "当视频需要已登录账号时，请使用本地 Netscape 格式的 cookies.txt 文件。WhisperTube 不会上传它，也不会将其加入历史记录。",
     "settings.cookiesGuideExtension": "按浏览器系列提供的官方下载链接：",
@@ -702,7 +688,8 @@ const messages: Record<UiLanguage, Record<TranslationKey, string>> = {
     "settings.unavailable": "不可用",
     "settings.gpu": "GPU",
     "settings.totalVram": "总显存",
-    "settings.freeVram": "可用显存",
+  "settings.freeVram": "可用显存",
+  "settings.jobStorage": "任务存储",
     "settings.cudaEngine": "CUDA 引擎",
     "settings.optional": "可选",
     "settings.cudaInfo": "CUDA 引擎来自官方 whisper.cpp release，并安装到应用存储中（约 678 MB）。",
@@ -743,8 +730,8 @@ const messages: Record<UiLanguage, Record<TranslationKey, string>> = {
     "settings.resetDataModels": "已下载的 Whisper 模型",
     "settings.resetDataRuntimes": "已下载的运行环境和 GPU 加速器",
     "settings.resetDataAccess": "已保存的来源访问偏好",
-    "settings.resetDataAccessDetail": "已保存的 cookies.txt 路径和浏览器会话选择会被清除，但不会删除外部 cookies.txt 文件本身。",
-    "settings.resetDataAccessNone": "当前没有保存 cookies.txt 路径或浏览器会话选择。",
+    "settings.resetDataAccessDetail": "已保存的 cookies.txt 路径会被清除，但不会删除外部 cookies.txt 文件本身。",
+    "settings.resetDataAccessNone": "当前没有保存 cookies.txt 路径。",
     "settings.resetDataNoneInstalled": "当前未检测到此类别的数据。",
     "settings.resetDataStatusUnknown": "状态仍在加载；应用存储中的任何已下载运行环境都会被删除。",
     "settings.resetDataWillKeep": "将被保留",
@@ -827,13 +814,11 @@ const messages: Record<UiLanguage, Record<TranslationKey, string>> = {
     "error.sourceInputInvalid": "此视频链接无效或尚不受支持。请粘贴完整的 HTTPS 视频 URL。",
     "error.sourceDuration": "暂不支持直播、即将开始的直播、时长未知的媒体以及超过 2 小时的视频。",
     "error.sourceUnsupported": "暂不支持此平台。请尝试使用受支持平台的视频链接。",
-  "error.sourceBrowser": "WhisperTube 无法使用所选会话。请导入最新的 cookies.txt 后重试。",
-  "error.safariUnavailable": "此设备上没有可用的 Safari 会话。请改用 cookies.txt。",
-    "error.sourceBrowserEncryption": "Windows 保护了所选浏览器的 cookies，WhisperTube 无法解锁。请使用导出的 cookies.txt 文件、尝试 Firefox，或对公开视频使用仅公开视频模式。",
-    "error.sourceCookiesFile": "无法读取所选 cookies.txt 文件。请重新选择，或在设置中移除它。",
+  "error.sourceCookiesFile": "无法读取所选 cookies.txt 文件。请重新选择，或在设置中移除它。",
     "error.sourceJsRuntime": "YouTube 需要 JavaScript 运行环境来准备此视频。请安装 Node.js 或更新应用运行环境，然后重试。",
     "error.sourceRuntime": "视频下载器尚未安装。请运行设置脚本或重新安装应用运行环境。",
     "error.sourceMetadata": "该平台返回的视频信息无法读取。请更新应用运行环境后重试。",
+    "error.storageQuotaExceeded": "WhisperTube 任务存储已达到 20 GiB 安全上限。请删除旧历史记录后再开始新任务。",
   },
 };
 
@@ -961,26 +946,33 @@ const stageKeys: Record<ProgressStage, TranslationKey> = {
   error: "progress.error",
 };
 
+const progressMessageKeys: Partial<Record<string, TranslationKey>> = {
+  preparing_download: "progress.preparingDownload",
+  downloading_audio: "progress.downloadingAudio",
+  normalizing_audio: "progress.normalizingAudio",
+  converting_audio: "progress.convertingAudio",
+  loading_model: "progress.loadingModel",
+  finalizing_result: "progress.finalizingResult",
+  complete: "progress.complete",
+};
+
 export function getProgressStageLabel(stage: ProgressStage, t: Translate) {
   return t(stageKeys[stage]);
 }
 
 export function getProgressMessage(
-  progress: Pick<ProgressPayload, "stage" | "message" | "backend">,
+  progress: Pick<ProgressPayload, "stage" | "message" | "messageCode" | "backend">,
   requestedBackend: string,
   t: Translate,
 ) {
   const rawMessage = progress.message.trim();
-  const normalizedMessage = rawMessage.toLowerCase();
   const actualBackend = progress.backend ?? requestedBackend;
-
-  if (normalizedMessage.includes("menyiapkan download")) return t("progress.preparingDownload");
-  if (normalizedMessage.includes("mengunduh best available")) return t("progress.downloadingAudio");
-  if (normalizedMessage.includes("menormalisasi audio")) return t("progress.normalizingAudio");
-  if (normalizedMessage.includes("konversi ke pcm")) return t("progress.convertingAudio");
-  if (normalizedMessage.includes("memuat model whisper")) return t("progress.loadingModel");
-  if (normalizedMessage.includes("merapikan transcript")) return t("progress.finalizingResult");
-  if (normalizedMessage.includes("transkripsi selesai")) return t("progress.complete");
+  const messageKey = progressMessageKeys[progress.messageCode];
+  if (messageKey) return t(messageKey);
+  if (progress.messageCode === "backend_fallback") return rawMessage || t("progress.startingJob");
+  if (progress.messageCode === "whisper_via" && progress.backend) {
+    return t("progress.whisperVia", { backend: actualBackend.toUpperCase() });
+  }
   if (progress.stage === "transcribing" && progress.backend) {
     return t("progress.whisperVia", { backend: actualBackend.toUpperCase() });
   }

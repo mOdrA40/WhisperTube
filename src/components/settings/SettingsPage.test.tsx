@@ -11,8 +11,6 @@ describe("SettingsPage local data reset", () => {
       <I18nProvider>
         <SettingsPage
           cookiesPath=""
-          usingSafariSession={false}
-          browsers={[]}
           system={null}
           models={[{
             id: "base",
@@ -40,7 +38,6 @@ describe("SettingsPage local data reset", () => {
           updateChecking={false}
           onSelectCookiesFile={vi.fn()}
           onClearCookiesFile={vi.fn()}
-          onUseSafariSession={vi.fn()}
           onOpenUrl={vi.fn()}
           onDownloadModel={vi.fn()}
           onCancelModel={vi.fn()}

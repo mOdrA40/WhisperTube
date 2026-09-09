@@ -28,7 +28,7 @@
       "csp": {
         "default-src": "'self' asset:",
         "connect-src": "ipc: http://ipc.localhost",
-        "img-src": "'self' asset: http://asset.localhost data: https:",
+        "img-src": "'self' asset: http://asset.localhost https:",
         "style-src": "'self' 'unsafe-inline'"
       }
     }

@@ -4,6 +4,7 @@ use std::{
     collections::{BTreeSet, HashSet},
     ffi::OsStr,
     fs,
+    io::Read,
     path::{Path, PathBuf},
     time::{Duration, SystemTime},
 };
@@ -21,9 +22,44 @@ use crate::{
 
 const ORPHAN_JOB_GRACE: Duration = Duration::from_secs(24 * 60 * 60);
 const HISTORY_PAGE_SIZE: usize = 100;
+pub const MAX_JOB_STORAGE_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 
 pub fn database_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(app_data_dir(app)?.join("whispertube.db"))
+}
+
+fn storage_tree_bytes(path: &Path) -> Result<u64, String> {
+    let mut total = 0u64;
+    for entry in fs::read_dir(path).map_err(|e| format!("Gagal membaca job storage: {e}"))? {
+        let entry = entry.map_err(|e| format!("Gagal membaca entry job storage: {e}"))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|e| format!("Gagal membaca tipe file job storage: {e}"))?;
+        if file_type.is_symlink() {
+            return Err("Job storage berisi symbolic link yang tidak diizinkan.".into());
+        }
+        if file_type.is_dir() {
+            total = total.saturating_add(storage_tree_bytes(&entry.path())?);
+        } else if file_type.is_file() {
+            total = total.saturating_add(
+                entry
+                    .metadata()
+                    .map_err(|e| format!("Gagal membaca ukuran job storage: {e}"))?
+                    .len(),
+            );
+        }
+        if total > MAX_JOB_STORAGE_BYTES {
+            return Ok(total);
+        }
+    }
+    Ok(total)
+}
+
+pub fn job_storage_bytes(app: &AppHandle) -> Result<u64, String> {
+    let root = crate::paths::jobs_dir(app)?;
+    let canonical_root =
+        fs::canonicalize(&root).map_err(|e| format!("Gagal memvalidasi job storage: {e}"))?;
+    storage_tree_bytes(&canonical_root)
 }
 
 fn configure_connection(conn: &Connection) -> Result<(), String> {
@@ -163,14 +199,12 @@ pub fn load_history(app: &AppHandle, id: i64) -> Result<TranscriptResult, String
     {
         return Err("File history berada di luar folder job WhisperTube.".into());
     }
-    let result_size = fs::metadata(&canonical_result)
-        .map_err(|e| format!("Gagal membaca ukuran file history: {e}"))?
-        .len();
-    if result_size > MAX_TRANSCRIPT_RESULT_BYTES {
-        return Err("File history melebihi batas ukuran aman.".into());
-    }
-    let bytes = fs::read(canonical_result)
+    let file = fs::File::open(canonical_result)
         .map_err(|e| format!("File transcript history tidak ditemukan: {e}"))?;
+    let mut bytes = Vec::with_capacity(MAX_TRANSCRIPT_RESULT_BYTES.min(64 * 1024) as usize);
+    file.take(MAX_TRANSCRIPT_RESULT_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("Gagal membaca file history: {e}"))?;
     decode_history_result(&bytes)
 }
 

@@ -9,7 +9,6 @@ const services = vi.hoisted(() => ({
   getSystemStatus: vi.fn(),
   listModels: vi.fn(),
   listHistory: vi.fn(),
-  listBrowsers: vi.fn(),
   inspectMedia: vi.fn(),
   startTranscription: vi.fn(),
   deleteHistory: vi.fn(),
@@ -51,6 +50,8 @@ const system: SystemStatus = {
   recommendedBackend: "auto",
   accelerators: [],
   computeDevices: [],
+  jobStorageBytes: 0,
+  jobStorageLimitBytes: 20 * 1024 * 1024 * 1024,
 };
 
 const models: ModelInfo[] = [{
@@ -100,7 +101,6 @@ describe("useWhisperTube", () => {
     services.getSystemStatus.mockResolvedValue(system);
     services.listModels.mockResolvedValue(models);
     services.listHistory.mockResolvedValue({ items: [], hasMore: false, totalCount: 0 });
-    services.listBrowsers.mockResolvedValue([]);
     services.inspectMedia.mockResolvedValue(metadata);
     services.startTranscription.mockResolvedValue(transcript);
     services.checkForAppUpdate.mockResolvedValue(null);

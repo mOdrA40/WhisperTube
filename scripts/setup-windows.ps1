@@ -152,7 +152,7 @@ try {
     Write-Step "Installing JavaScript dependencies"
     Push-Location $Root
     try {
-        npm install
+        npm ci
     } finally {
         Pop-Location
     }

@@ -1,24 +1,64 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ErrorPayload {
+    pub code: String,
+    pub detail: Option<String>,
+}
+
+impl From<String> for ErrorPayload {
+    fn from(raw: String) -> Self {
+        const KNOWN_CODES: &[&str] = &[
+            "media_tiktok_transient",
+            "media_source_transient",
+            "media_source_rate_limited",
+            "media_source_membership_required",
+            "media_source_access_required",
+            "media_source_unavailable",
+            "media_source_input",
+            "media_source_duration",
+            "media_source_cookie_file",
+            "media_source_js_runtime",
+            "media_source_runtime",
+            "media_source_metadata",
+            "operation_conflict",
+            "storage_quota_exceeded",
+        ];
+
+        for code in KNOWN_CODES {
+            if let Some(detail) = raw
+                .strip_prefix(code)
+                .and_then(|value| value.strip_prefix(':'))
+            {
+                return Self {
+                    code: (*code).into(),
+                    detail: non_empty_detail(detail),
+                };
+            }
+        }
+
+        Self {
+            code: "backend_error".into(),
+            detail: non_empty_detail(&raw),
+        }
+    }
+}
+
+impl From<&str> for ErrorPayload {
+    fn from(raw: &str) -> Self {
+        raw.to_string().into()
+    }
+}
+
+fn non_empty_detail(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
 pub(crate) const MAX_TRANSCRIPT_RESULT_BYTES: u64 = 32 * 1024 * 1024;
 pub(crate) const MAX_TRANSCRIPT_SEGMENTS: usize = 100_000;
 pub(crate) const MAX_TRANSCRIPT_TEXT_BYTES: usize = 16 * 1024 * 1024;
-
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct BrowserProfile {
-    pub id: String,
-    pub label: String,
-    pub is_default: bool,
-}
-
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct BrowserInfo {
-    pub id: String,
-    pub label: String,
-    pub profiles: Vec<BrowserProfile>,
-}
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -63,6 +103,8 @@ pub struct SystemStatus {
     pub recommended_backend: String,
     pub accelerators: Vec<AcceleratorInfo>,
     pub compute_devices: Vec<ComputeDeviceInfo>,
+    pub job_storage_bytes: u64,
+    pub job_storage_limit_bytes: u64,
 }
 
 #[derive(Serialize)]
@@ -93,6 +135,7 @@ pub struct VideoMetadata {
 #[serde(rename_all = "camelCase")]
 pub struct ProgressPayload {
     pub stage: String,
+    pub message_code: String,
     pub percent: f64,
     pub message: String,
     pub backend: Option<String>,
@@ -188,9 +231,6 @@ pub struct TranscriptRequest {
     pub title: String,
     pub channel: String,
     pub duration: f64,
-    pub browser: String,
-    #[serde(default)]
-    pub browser_profile: Option<String>,
     #[serde(default)]
     pub cookies_path: Option<String>,
     pub backend: String,

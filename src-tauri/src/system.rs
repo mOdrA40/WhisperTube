@@ -23,7 +23,7 @@ use crate::{
 const USAGE_SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
 const MIN_AVAILABLE_MEMORY_AFTER_START_BYTES: u64 = 256 * 1024 * 1024;
 
-static NVIDIA_SMI_PROGRAM: OnceLock<Option<String>> = OnceLock::new();
+static NVIDIA_SMI_PROGRAM: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 static NVIDIA_SELECTED_DEVICE: OnceLock<Mutex<Option<usize>>> = OnceLock::new();
 
 #[derive(Clone, Debug)]
@@ -236,7 +236,7 @@ pub fn detect_nvidia_devices() -> Vec<GpuInfo> {
         return Vec::new();
     };
     let output = {
-        let mut command = Command::new(program);
+        let mut command = Command::new(&program);
         crate::process::hide_console(&mut command);
         command.args([
             "--query-gpu=index,name,memory.total,memory.free",
@@ -244,9 +244,13 @@ pub fn detect_nvidia_devices() -> Vec<GpuInfo> {
         ]);
         command_output_with_timeout(command, Duration::from_secs(2))
     };
-    output
-        .map(|out| parse_nvidia_devices(&out.stdout))
-        .unwrap_or_default()
+    match output {
+        Some(out) => parse_nvidia_devices(&out.stdout),
+        None => {
+            clear_nvidia_smi_program();
+            Vec::new()
+        }
+    }
 }
 
 fn select_nvidia_device(devices: &[GpuInfo]) -> Option<GpuInfo> {
@@ -298,23 +302,42 @@ fn parse_nvidia_gpus(output: &[u8]) -> Option<GpuInfo> {
     select_nvidia_device(&parse_nvidia_devices(output))
 }
 
-fn nvidia_smi_program() -> Option<&'static str> {
-    NVIDIA_SMI_PROGRAM
-        .get_or_init(|| {
-            let mut candidates = vec!["nvidia-smi".to_string()];
-            #[cfg(target_os = "windows")]
-            {
-                candidates.push(r"C:\Windows\System32\nvidia-smi.exe".into());
-                candidates.push(r"C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe".into());
-            }
-            candidates.into_iter().find(|program| {
-                let mut command = Command::new(program);
-                crate::process::hide_console(&mut command);
-                command.arg("--version");
-                command_output_with_timeout(command, Duration::from_secs(2)).is_some()
-            })
-        })
-        .as_deref()
+fn nvidia_smi_program() -> Option<String> {
+    let cache = NVIDIA_SMI_PROGRAM.get_or_init(|| Mutex::new(None));
+    if let Ok(cached) = cache.lock() {
+        if cached.is_some() {
+            return cached.clone();
+        }
+    }
+    let mut candidates = vec!["nvidia-smi".to_string()];
+    #[cfg(target_os = "windows")]
+    {
+        candidates.push(r"C:\Windows\System32\nvidia-smi.exe".into());
+        candidates.push(r"C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe".into());
+    }
+    let found = candidates.into_iter().find(|program| {
+        let mut command = Command::new(program);
+        crate::process::hide_console(&mut command);
+        command.arg("--version");
+        command_output_with_timeout(command, Duration::from_secs(2)).is_some()
+    });
+    if let Ok(mut cached) = cache.lock() {
+        *cached = found;
+        return cached.clone();
+    }
+    None
+}
+
+fn clear_nvidia_smi_program() {
+    if let Some(cache) = NVIDIA_SMI_PROGRAM.get() {
+        if let Ok(mut cached) = cache.lock() {
+            *cached = None;
+        }
+    }
+}
+
+pub fn refresh_hardware_detection() {
+    clear_nvidia_smi_program();
 }
 
 fn vulkan_vendor(name: &str) -> &'static str {
@@ -583,7 +606,7 @@ fn sample_gpu_usage(target: Option<&UsageTarget>) -> Option<f64> {
     }
     if target.is_some_and(|value| value.backend == "cuda") {
         if let Some(program) = nvidia_smi_program() {
-            let mut command = Command::new(program);
+            let mut command = Command::new(&program);
             crate::process::hide_console(&mut command);
             if let Some(index) = target.and_then(|value| value.device_index) {
                 command.arg(format!("--id={index}"));
@@ -598,38 +621,14 @@ fn sample_gpu_usage(target: Option<&UsageTarget>) -> Option<f64> {
                 return Some(value);
             }
         }
+        return None;
     }
-
-    let mut command = Command::new("powershell.exe");
-    crate::process::hide_console(&mut command);
-    command.args([
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        "$samples = (Get-Counter '\\GPU Engine(*)\\Utilization Percentage' -ErrorAction Stop).CounterSamples | Where-Object { $_.InstanceName -match 'engtype_(3D|Compute|Copy|VideoDecode|VideoEncode)' }; if ($samples.Count -eq 0) { exit 2 }; ($samples | Measure-Object -Property CookedValue -Maximum).Maximum",
-    ]);
-    let output = command_output_with_timeout(command, Duration::from_secs(2))?;
-    parse_percent(&output.stdout)
+    None
 }
 
 #[cfg(target_os = "linux")]
-fn sample_gpu_usage(target: Option<&UsageTarget>) -> Option<f64> {
-    if target.map_or(true, |value| value.backend == "cpu") {
-        return None;
-    }
-    let root = fs::read_dir("/sys/class/drm").ok()?;
-    root.flatten()
-        .filter(|entry| {
-            let name = entry.file_name().to_string_lossy().to_string();
-            name.starts_with("card") && !name.contains('-')
-        })
-        .filter_map(|entry| {
-            fs::read_to_string(entry.path().join("device/gpu_busy_percent"))
-                .ok()
-                .and_then(|value| value.trim().parse::<f64>().ok())
-                .map(|value| value.clamp(0.0, 100.0))
-        })
-        .max_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal))
+fn sample_gpu_usage(_target: Option<&UsageTarget>) -> Option<f64> {
+    None
 }
 
 #[cfg(any(
@@ -661,6 +660,7 @@ fn sample_usage_uncached(
 }
 
 pub fn system_status(app: &AppHandle) -> Result<SystemStatus, String> {
+    refresh_hardware_detection();
     let runtime = runtime_dir(app)?;
     let yt_dlp = crate::paths::is_regular_file(&tool_path(app, "yt-dlp")?);
     let ffmpeg = crate::paths::is_regular_file(&tool_path(app, "ffmpeg")?);
@@ -677,6 +677,7 @@ pub fn system_status(app: &AppHandle) -> Result<SystemStatus, String> {
     let gpu_free_memory_mb = gpu.as_ref().and_then(|info| info.free_memory_mb);
     let available_vram_mb = gpu.as_ref().and_then(GpuInfo::available_memory_mb);
     let accelerators = accelerators::catalog(app, gpu.is_some())?;
+    let job_storage_bytes = crate::history::job_storage_bytes(app)?;
     let vulkan_installed = accelerators
         .iter()
         .any(|accelerator| accelerator.backend == "vulkan" && accelerator.installed);
@@ -773,6 +774,8 @@ pub fn system_status(app: &AppHandle) -> Result<SystemStatus, String> {
         cuda_supported,
         accelerators,
         compute_devices,
+        job_storage_bytes,
+        job_storage_limit_bytes: crate::history::MAX_JOB_STORAGE_BYTES,
     })
 }
 

@@ -10,7 +10,7 @@ Other languages: [Bahasa Indonesia](README_ID.md) · [中文（普通话）](REA
 - English is the default interface language. Indonesian and Simplified Chinese are also available from Settings.
 - CPU inference is included in the development setup.
 - NVIDIA CUDA is optional and installed separately so the base setup stays small.
-- The app detects the current operating system, architecture, GPU, and installed browsers before offering optional components.
+- The app detects the current operating system, architecture, and available GPU before offering optional components.
 
 Supported source families include YouTube, TikTok, X/Twitter, Facebook, Instagram, Reddit, Twitch, Vimeo, Dailymotion, Pinterest, LinkedIn, Tumblr, Bilibili, and VK. Support is based on the current yt-dlp extractor and can change as each platform changes.
 
@@ -21,7 +21,7 @@ For predictable disk and memory use, transcription is limited to on-demand media
 - Paste a supported video URL and inspect metadata before downloading.
 - Public videos.
 - Login-protected videos through an imported Netscape `cookies.txt` file. The app never asks for site passwords.
-- Manual Netscape `cookies.txt` access works across browser families; on macOS, Settings can also try the detected Safari session directly.
+- Manual Netscape `cookies.txt` access works across browser families.
 - Download `bestaudio/best`; the original download is not converted to MP3 first.
 - FFmpeg normalization to signed 16-bit PCM WAV, mono, 16 kHz.
 - Local whisper.cpp inference.
@@ -170,11 +170,11 @@ JSON + TXT + SRT + VTT + SQLite history
 
 ## Login-protected videos
 
-Log in to the relevant platform first. In WhisperTube, open **Settings → Source access** and import a fresh Netscape-format `cookies.txt` file. On macOS, a detected Safari session can also be tried directly. Then return to Transcribe and select **Check video**.
+Log in to the relevant platform first. In WhisperTube, open **Settings → Source access** and import a fresh Netscape-format `cookies.txt` file. Then return to Transcribe and select **Check video**.
 
 WhisperTube does not request site credentials and does not copy cookies into its database. `yt-dlp` reads the imported local cookies file only while the process runs. Extractor, authentication, anti-bot, and platform changes can still affect protected downloads; keeping `yt-dlp` current is the first line of defense.
 
-On Windows, Chromium-based browser encryption can prevent yt-dlp from decrypting a Brave/Chrome/Edge profile, so the manual cookies file is the primary path. On macOS, Safari cookie storage may require permission from macOS. The file/session is used only by the local WhisperTube process.
+WhisperTube uses the imported cookies file only for the local yt-dlp process. Browser encryption can prevent exporting usable cookies, so keep the file fresh and private.
 
 ## Build a Windows installer
 
@@ -292,7 +292,7 @@ WhisperTube/
 
 ## Local data
 
-Tauri selects the platform-specific app-local-data directory. WhisperTube stores model files, job data, exports, and `whispertube.db` there. Temporary source audio and WAV files are deleted when `Keep processed audio` is off.
+Tauri selects the platform-specific app-local-data directory. WhisperTube stores model files, job data, exports, and `whispertube.db` there. Temporary source audio and WAV files are deleted when `Keep processed audio` is off. Job storage has a 20 GiB safety quota and its current usage is shown in Settings.
 
 ## Security decisions
 
@@ -300,7 +300,7 @@ Tauri selects the platform-specific app-local-data directory. WhisperTube stores
 - The frontend has no arbitrary shell execution capability.
 - External processes are launched by Rust with argument arrays, not concatenated shell commands.
 - Known model and accelerator downloads are verified with checksums before activation.
-- Browser discovery reads local profile metadata; imported cookies and the optional Safari session are read by yt-dlp only for the selected job.
+- Imported cookies are read by yt-dlp only for the selected local job.
 - Only one transcription job and one runtime installer can run at a time; job reservation is independent of child-process PID state.
 - Cancellation terminates the active process tree on Windows with `taskkill /T /F`.
 - Failed jobs clean up their temporary job folders, and runtime bootstrap downloads are pinned and checksum-verified before activation.
@@ -309,7 +309,7 @@ Tauri selects the platform-specific app-local-data directory. WhisperTube stores
 
 1. The pinned CUDA bootstrap currently targets Windows x64 with a detected NVIDIA driver.
 2. Metal and Vulkan packs require matching public GitHub Release assets and are not bundled into the base source setup.
-3. Browser support depends on yt-dlp's current cookie extraction support and the browser's OS security behavior; direct Safari access is macOS-only and may require permission.
+3. Protected downloads depend on the exported cookies format, yt-dlp compatibility, and platform authentication behavior.
 4. Login-protected downloads can break when a platform changes authentication, anti-bot, or extractor requirements.
 5. There are no playlist/batch jobs, speaker diarization, word-level subtitle editing, or runtime/model auto-updates yet. App updates are handled by the signed Tauri updater; see [`docs/UPDATER.md`](docs/UPDATER.md).
 6. macOS/Linux builds are available from native scripts and CI. macOS uses an ad-hoc signature but is not notarized; Windows/Linux signing and broad distro/hardware QA are not complete in v0.1.

@@ -17,14 +17,12 @@ describe("Tauri IPC contracts", () => {
     await downloadModel("base", null);
     await deleteModel("base");
     await listHistory(42);
-    await inspectMedia("https://www.youtube.com/watch?v=test", "none", "", "");
+    await inspectMedia("https://www.youtube.com/watch?v=test", "");
     const request = {
       url: "https://www.youtube.com/watch?v=test",
       title: "Test",
       channel: "Channel",
       duration: 60,
-      browser: "none" as const,
-      browserProfile: "",
       cookiesPath: "",
       backend: "cpu" as const,
       computeDeviceId: null,
@@ -39,8 +37,6 @@ describe("Tauri IPC contracts", () => {
     expect(invoke).toHaveBeenNthCalledWith(3, "list_history", { beforeId: 42 });
     expect(invoke).toHaveBeenNthCalledWith(4, "inspect_media", {
       url: "https://www.youtube.com/watch?v=test",
-      browser: "none",
-      profile: null,
       cookiesPath: null,
     });
     expect(invoke).toHaveBeenNthCalledWith(5, "start_transcription", { request });

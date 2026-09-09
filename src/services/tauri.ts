@@ -7,8 +7,6 @@ import { check, type DownloadEvent, type Update } from "@tauri-apps/plugin-updat
 import type {
   AppUpdateInfo,
   AppUpdateProgress,
-  BrowserChoice,
-  BrowserInfo,
   AcceleratorDownloadPayload,
   BackendChoice,
   CudaDownloadPayload,
@@ -89,19 +87,13 @@ export function listModels() {
   return invoke<ModelInfo[]>("list_models");
 }
 
-export function listBrowsers() {
-  return invoke<BrowserInfo[]>("list_browsers");
-}
-
 export function listHistory(beforeId: number | null = null) {
   return invoke<HistoryPageResult>("list_history", { beforeId });
 }
 
-export function inspectMedia(url: string, browser: BrowserChoice, browserProfile: string, cookiesPath: string) {
+export function inspectMedia(url: string, cookiesPath: string) {
   return invoke<VideoMetadata>("inspect_media", {
     url,
-    browser,
-    profile: browserProfile || null,
     cookiesPath: cookiesPath || null,
   });
 }

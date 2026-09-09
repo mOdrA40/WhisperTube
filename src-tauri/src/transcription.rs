@@ -1,5 +1,5 @@
 use regex::Regex;
-use serde_json::Value;
+use serde::Deserialize;
 use std::{
     collections::HashSet,
     fs::{self, File},
@@ -146,14 +146,25 @@ impl JobDirectoryGuard {
 
     fn commit(mut self) {
         self.committed = true;
-        let _ = fs::remove_file(&self.marker);
+        if let Err(error) = fs::remove_file(&self.marker) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                eprintln!("WhisperTube job marker cleanup warning: {error}");
+            }
+        }
     }
 }
 
 impl Drop for JobDirectoryGuard {
     fn drop(&mut self) {
         if !self.committed {
-            let _ = fs::remove_dir_all(&self.path);
+            if let Err(error) = fs::remove_dir_all(&self.path) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    eprintln!(
+                        "WhisperTube failed job cleanup warning ({}): {error}",
+                        self.path.display()
+                    );
+                }
+            }
         }
     }
 }
@@ -1074,29 +1085,64 @@ fn vulkan_device_indices(devices: &[ComputeDeviceInfo]) -> Vec<usize> {
         .collect::<Vec<_>>();
     indexed.sort_by_key(|(integrated, _)| *integrated);
 
-    let indices = indexed
+    indexed
         .into_iter()
         .map(|(_, index)| index)
-        .collect::<Vec<_>>();
-    if indices.is_empty() {
-        vec![0]
-    } else {
-        indices
-    }
+        .collect::<Vec<_>>()
 }
 
 fn available_vulkan_device_indices(app: &AppHandle) -> Vec<usize> {
     vulkan_device_indices(&crate::system::detect_vulkan_devices(app))
 }
 
+fn ensure_vulkan_host_memory(
+    context: &JobContext,
+    model_id: &str,
+    wav: &Path,
+    device_index: usize,
+) -> Result<(), String> {
+    let Some(device) = crate::system::detect_vulkan_devices(context.app)
+        .into_iter()
+        .find(|device| device.device_index == Some(device_index))
+    else {
+        return Ok(());
+    };
+
+    // Vulkan does not expose a portable, trustworthy VRAM budget through the
+    // whisper.cpp device listing. UMA/iGPU devices share system RAM, so apply
+    // a conservative host-memory guard instead of inventing dedicated VRAM.
+    if device.integrated {
+        let spec = models::model_spec(model_id)?;
+        let wav_bytes = fs::metadata(wav)
+            .map_err(|error| format!("Gagal membaca ukuran audio untuk guard Vulkan: {error}"))?
+            .len();
+        let required = spec
+            .vram_required_mb
+            .saturating_mul(1024 * 1024)
+            .saturating_add(wav_bytes.saturating_mul(2))
+            .saturating_add(512 * 1024 * 1024);
+        resources::require_memory(required, "inference Vulkan pada GPU shared-memory")?;
+    }
+    Ok(())
+}
+
 fn probe_vulkan_devices(
     context: &JobContext,
     engine: &Path,
     model: &Path,
+    model_id: &str,
+    wav: &Path,
     device_indices: &[usize],
 ) -> Result<usize, String> {
+    if device_indices.is_empty() {
+        return Err("Tidak ada device Vulkan nyata yang lolos enumerasi.".into());
+    }
     let mut errors = Vec::new();
     for device_index in device_indices {
+        if let Err(error) = ensure_vulkan_host_memory(context, model_id, wav, *device_index) {
+            errors.push(format!("device {device_index}: {error}"));
+            continue;
+        }
         match ensure_vulkan_probe(context, engine, model, *device_index) {
             Ok(()) => return Ok(*device_index),
             Err(error) => errors.push(format!("device {device_index}: {error}")),
@@ -1122,6 +1168,7 @@ fn choose_backend(
     requested: &str,
     requested_device_id: Option<&str>,
     model: &Path,
+    wav: &Path,
     model_id: &str,
 ) -> Result<(String, PathBuf, Option<String>, Option<usize>), String> {
     let app = context.app;
@@ -1186,10 +1233,11 @@ fn choose_backend(
                 let device_indices = requested_device_index
                     .map(|index| vec![index])
                     .unwrap_or_else(|| available_vulkan_device_indices(app));
-                let device_index = probe_vulkan_devices(context, &vulkan, model, &device_indices)
-                    .map_err(|error| {
-                    format!("Vulkan dipilih tetapi capability probe gagal: {error}")
-                })?;
+                let device_index =
+                    probe_vulkan_devices(context, &vulkan, model, model_id, wav, &device_indices)
+                        .map_err(|error| {
+                        format!("Vulkan dipilih tetapi capability probe gagal: {error}")
+                    })?;
                 Ok(("vulkan".into(), vulkan, None, Some(device_index)))
             }
         }
@@ -1216,16 +1264,20 @@ fn choose_backend(
                             context,
                             &vulkan,
                             model,
+                            model_id,
+                            wav,
                             &available_vulkan_device_indices(app),
                         ) {
-                            Ok(device_index) => Ok((
-                                "vulkan".into(),
-                                vulkan,
-                                Some(format!(
-                                    "CUDA capability probe gagal ({cuda_error}); Auto beralih ke Vulkan."
-                                )),
-                                Some(device_index),
-                            )),
+                            Ok(device_index) => {
+                                Ok((
+                                    "vulkan".into(),
+                                    vulkan,
+                                    Some(format!(
+                                        "CUDA capability probe gagal ({cuda_error}); Auto beralih ke Vulkan."
+                                    )),
+                                    Some(device_index),
+                                ))
+                            }
                             Err(vulkan_error) if is_regular_file(&cpu) => Ok((
                                 "cpu".into(),
                                 cpu,
@@ -1262,6 +1314,8 @@ fn choose_backend(
                     context,
                     &vulkan,
                     model,
+                    model_id,
+                    wav,
                     &available_vulkan_device_indices(app),
                 ) {
                     Ok(device_index) => Ok(("vulkan".into(), vulkan, None, Some(device_index))),
@@ -1278,7 +1332,16 @@ fn choose_backend(
                     )),
                 }
             } else if nvidia && cfg!(all(target_os = "windows", target_arch = "x86_64")) {
-                Err("NVIDIA GPU terdeteksi tetapi CUDA engine belum terpasang. Pasang CUDA acceleration terlebih dahulu.".into())
+                if is_regular_file(&cpu) {
+                    Ok((
+                        "cpu".into(),
+                        cpu,
+                        Some("CUDA engine belum terpasang; Auto melanjutkan dengan CPU.".into()),
+                        None,
+                    ))
+                } else {
+                    Err("NVIDIA GPU terdeteksi tetapi CUDA engine belum terpasang dan CPU engine tidak tersedia.".into())
+                }
             } else if is_regular_file(&cpu) {
                 Ok(("cpu".into(), cpu, None, None))
             } else {
@@ -1301,6 +1364,7 @@ fn run_whisper(
         config.backend,
         config.compute_device_id,
         model,
+        wav,
         config.model_id,
     )?;
     if let Some(message) = fallback_message {
@@ -1479,55 +1543,93 @@ fn run_whisper(
     Ok(resolved_backend)
 }
 
+#[derive(Deserialize)]
+struct WhisperOutput {
+    #[serde(default)]
+    result: Option<WhisperResultMetadata>,
+    #[serde(default)]
+    transcription: Vec<WhisperOutputSegment>,
+}
+
+#[derive(Deserialize)]
+struct WhisperResultMetadata {
+    #[serde(default)]
+    language: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct WhisperOutputSegment {
+    #[serde(default)]
+    timestamps: Option<WhisperTimestamps>,
+    #[serde(default)]
+    text: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct WhisperTimestamps {
+    #[serde(default)]
+    from: Option<String>,
+    #[serde(default)]
+    to: Option<String>,
+}
+
 fn parse_whisper_result(path: &Path) -> Result<(String, Vec<Segment>, String), String> {
-    let bytes = read_bounded_file(path, MAX_TRANSCRIPT_RESULT_BYTES, "Output JSON Whisper")?;
-    let value: Value =
-        serde_json::from_slice(&bytes).map_err(|e| format!("Output JSON Whisper rusak: {e}"))?;
-    let language = value
-        .get("result")
-        .and_then(|result| result.get("language"))
-        .and_then(Value::as_str)
-        .unwrap_or("unknown")
-        .to_string();
+    let metadata = fs::metadata(path)
+        .map_err(|error| format!("Gagal membaca ukuran output JSON Whisper: {error}"))?;
+    if metadata.len() > MAX_TRANSCRIPT_RESULT_BYTES {
+        return Err("Output JSON Whisper melebihi batas ukuran aman.".into());
+    }
+    let file =
+        File::open(path).map_err(|error| format!("Gagal membuka output JSON Whisper: {error}"))?;
+    let mut bounded_reader = file.take(MAX_TRANSCRIPT_RESULT_BYTES.saturating_add(1));
+    let mut deserializer = serde_json::Deserializer::from_reader(&mut bounded_reader);
+    let output = WhisperOutput::deserialize(&mut deserializer)
+        .map_err(|error| format!("Output JSON Whisper rusak: {error}"))?;
+    deserializer
+        .end()
+        .map_err(|error| format!("Output JSON Whisper memiliki data tambahan: {error}"))?;
+    drop(deserializer);
+    if bounded_reader.limit() == 0 {
+        return Err("Output JSON Whisper melebihi batas ukuran aman.".into());
+    }
+
+    let language = output
+        .result
+        .and_then(|result| result.language)
+        .unwrap_or_else(|| "unknown".into());
     if language.len() > MAX_REQUEST_LANGUAGE_BYTES {
         return Err("Bahasa hasil Whisper terlalu panjang.".into());
     }
     let mut segments = Vec::new();
     let mut total_text_bytes = 0usize;
-    if let Some(items) = value.get("transcription").and_then(Value::as_array) {
-        for item in items {
-            let timestamps = item.get("timestamps");
-            let from = timestamps
-                .and_then(|value| value.get("from"))
-                .and_then(Value::as_str)
-                .unwrap_or("00:00:00,000")
-                .to_string();
-            let to = timestamps
-                .and_then(|value| value.get("to"))
-                .and_then(Value::as_str)
-                .unwrap_or("00:00:00,000")
-                .to_string();
-            if from.len() > MAX_TIMESTAMP_BYTES || to.len() > MAX_TIMESTAMP_BYTES {
-                return Err("Timestamp hasil Whisper terlalu panjang.".into());
+    for item in output.transcription {
+        let from = item
+            .timestamps
+            .as_ref()
+            .and_then(|timestamps| timestamps.from.as_deref())
+            .unwrap_or("00:00:00,000")
+            .to_string();
+        let to = item
+            .timestamps
+            .as_ref()
+            .and_then(|timestamps| timestamps.to.as_deref())
+            .unwrap_or("00:00:00,000")
+            .to_string();
+        if from.len() > MAX_TIMESTAMP_BYTES || to.len() > MAX_TIMESTAMP_BYTES {
+            return Err("Timestamp hasil Whisper terlalu panjang.".into());
+        }
+        let text = item.text.unwrap_or_default().trim().to_string();
+        if !text.is_empty() {
+            if segments.len() >= MAX_TRANSCRIPT_SEGMENTS {
+                return Err("Output Whisper memiliki terlalu banyak segment.".into());
             }
-            let text = item
-                .get("text")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            if !text.is_empty() {
-                if segments.len() >= MAX_TRANSCRIPT_SEGMENTS {
-                    return Err("Output Whisper memiliki terlalu banyak segment.".into());
-                }
-                total_text_bytes = total_text_bytes
-                    .saturating_add(text.len())
-                    .saturating_add(usize::from(!segments.is_empty()));
-                if total_text_bytes > MAX_TRANSCRIPT_TEXT_BYTES {
-                    return Err("Teks output Whisper melebihi batas ukuran aman.".into());
-                }
-                segments.push(Segment { from, to, text });
+            total_text_bytes = total_text_bytes
+                .saturating_add(text.len())
+                .saturating_add(usize::from(!segments.is_empty()));
+            if total_text_bytes > MAX_TRANSCRIPT_TEXT_BYTES {
+                return Err("Teks output Whisper melebihi batas ukuran aman.".into());
             }
+            segments.push(Segment { from, to, text });
         }
     }
     let text = segments
@@ -1736,15 +1838,17 @@ pub fn pipeline(
 #[cfg(test)]
 mod tests {
     use super::{
-        capture_stderr, ffmpeg_target_duration, normalize_utf8_bytes, read_bounded_line,
-        remaining_disk_reservation, run_cached_probe, run_cuda_probe_with_vram_guard,
-        validate_transcript_request, vulkan_device_indices, whisper_inactivity_timeout,
-        whisper_thread_count, ComputeDeviceInfo, JobDirectoryGuard, CPU_INACTIVITY_TIMEOUT,
-        DISK_SAFETY_BUFFER_BYTES, MAX_CAPTURED_STDERR_BYTES, PROCESS_INACTIVITY_TIMEOUT,
+        capture_stderr, ffmpeg_target_duration, normalize_utf8_bytes, parse_whisper_result,
+        read_bounded_line, remaining_disk_reservation, run_cached_probe,
+        run_cuda_probe_with_vram_guard, validate_transcript_request, vulkan_device_indices,
+        whisper_inactivity_timeout, whisper_thread_count, ComputeDeviceInfo, JobDirectoryGuard,
+        CPU_INACTIVITY_TIMEOUT, DISK_SAFETY_BUFFER_BYTES, MAX_CAPTURED_STDERR_BYTES,
+        PROCESS_INACTIVITY_TIMEOUT,
     };
     use crate::types::TranscriptRequest;
     use std::{
         collections::HashSet,
+        fs,
         io::{BufReader, Cursor},
         process::{Command, Stdio},
         sync::atomic::{AtomicBool, Ordering},
@@ -1759,6 +1863,22 @@ mod tests {
             normalize_utf8_bytes(b"text: \xAE misalnya"),
             "text: � misalnya"
         );
+    }
+
+    #[test]
+    fn parses_whisper_result_with_bounded_typed_deserialization() {
+        let path = std::env::temp_dir().join(format!("whispertube-result-{}.json", Uuid::new_v4()));
+        fs::write(
+            &path,
+            br#"{"result":{"language":"en"},"transcription":[{"timestamps":{"from":"00:00:00,000","to":"00:00:01,000"},"text":" hello "}]}"#,
+        )
+        .unwrap();
+
+        let parsed = parse_whisper_result(&path).expect("bounded result should parse");
+        assert_eq!(parsed.0, "en");
+        assert_eq!(parsed.1.len(), 1);
+        assert_eq!(parsed.2, "hello");
+        fs::remove_file(path).unwrap();
     }
 
     #[test]

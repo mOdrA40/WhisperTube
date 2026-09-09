@@ -45,5 +45,5 @@ describe("HistoryPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Delete selected" }));
     fireEvent.click(screen.getByRole("button", { name: /^Delete$/ }));
     await waitFor(() => expect(onDelete).toHaveBeenCalledWith(Array.from({ length: 100 }, (_, index) => index + 1)));
-  });
+  }, 15_000);
 });

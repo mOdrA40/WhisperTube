@@ -332,22 +332,17 @@ export function useWhisperTube() {
     return result.segments.filter((segment) => segment.text.toLowerCase().includes(query));
   }, [deferredSearchQuery, result]);
 
-  const autoAcceleratorInstalled = Boolean(system?.accelerators.some((accelerator) => accelerator.installed));
   const modelDownloadActive = Object.keys(downloadingModel).length > 0;
   const appUpdateInstalling = appUpdateStatus === "installing";
   const operationActive = Boolean(
     busy || inspecting || resettingData || historyOperation || modelDownloadActive || installingCuda || installingAccelerator || appUpdateInstalling,
   );
-  const cudaInstallRequired = Boolean(system?.cudaSupported && system.nvidia && backend === "auto" && !system.cudaEngine && !autoAcceleratorInstalled);
   const vramWarning = useMemo(() => {
     if (!selectedModel || backend === "cpu" || backend === "metal" || backend === "vulkan" || !system) return null;
     if (backend === "cuda" && (!system.cudaSupported || !system.nvidia)) {
       return t("error.cudaUnavailable");
     }
     if (!system.nvidia || !system.cudaSupported) return null;
-    if (!system.cudaEngine && backend === "auto" && !system.accelerators.some((accelerator) => accelerator.installed)) {
-      return t("error.cudaRequired");
-    }
     if (!system.cudaEngine) return null;
     const selectedCudaDevice = computeTargetId.startsWith("cuda:")
       ? system.computeDevices.find((device) => device.id === computeTargetId)
@@ -367,6 +362,9 @@ export function useWhisperTube() {
   }, [backend, computeTargetId, selectedModel, system, t]);
   const acceleratorWarning = useMemo(() => {
     if (!system || backend === "auto" || backend === "cpu" || backend === "cuda") return null;
+    if (backend === "vulkan" && !system.computeDevices.some((device) => device.backend === "vulkan")) {
+      return t("error.vulkanDeviceUnavailable");
+    }
     const accelerator = system.accelerators.find((item) => item.backend === backend);
     if (!accelerator?.installed) {
       return t("error.acceleratorMissing", {
@@ -375,7 +373,7 @@ export function useWhisperTube() {
     }
     return null;
   }, [backend, system, t]);
-  const canStart = Boolean(!operationActive && metadata && selectedModel?.installed && runtimeReady && !cudaInstallRequired && !vramWarning && !acceleratorWarning);
+  const canStart = Boolean(!operationActive && metadata && selectedModel?.installed && runtimeReady && !vramWarning && !acceleratorWarning);
   const modelDownloadBlockReasons = useMemo<Record<string, string>>(() => {
     const reasons: Record<string, string> = {};
     const cudaTarget = backend === "cuda" || (backend === "auto" && system?.cudaEngine);
@@ -569,10 +567,6 @@ export function useWhisperTube() {
     }
     if (!runtimeReady) {
       setError(t("error.runtimeIncomplete"));
-      return;
-    }
-    if (cudaInstallRequired) {
-      setError(t("error.cudaRequired"));
       return;
     }
     if (vramWarning) {
@@ -792,7 +786,6 @@ export function useWhisperTube() {
     canStart,
     modelDownloadBlocked,
     modelDownloadBlockReasons,
-    cudaInstallRequired,
     vramWarning,
     acceleratorWarning,
     refreshSystem,

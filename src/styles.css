@@ -1348,9 +1348,14 @@ input:focus-visible,
 }
 
 .segments {
-  max-height: 520px;
-  overflow-y: auto;
+  height: min(520px, 55vh);
+  min-height: 220px;
+  overflow: hidden;
   padding: 0 20px 18px;
+}
+
+.transcript-virtual-list {
+  height: 100%;
 }
 
 .segment {
@@ -2424,6 +2429,82 @@ input:focus-visible,
 @keyframes spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+.app-crash-fallback {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: #080b11;
+}
+
+.app-crash-card {
+  width: min(520px, 100%);
+  padding: 32px;
+  border: 1px solid rgba(248, 113, 113, 0.35);
+  border-radius: 16px;
+  background: rgba(18, 23, 35, 0.96);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
+}
+
+.app-crash-card h1 {
+  margin-top: 8px;
+  font-size: clamp(20px, 3vw, 28px);
+}
+
+.app-crash-card p {
+  margin: 12px 0 20px;
+  color: #cbd5e1;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+/* Keep supporting text readable on laptop panels and Windows scaling. */
+.settings-note,
+.hardware-sub,
+.history-copy span,
+.history-meta,
+.transcript-search span,
+.timestamp,
+.option-description,
+.progress-bytes,
+.progress-metric,
+.model-download-status small {
+  font-size: 12px;
+}
+
+@media (forced-colors: active) {
+  * {
+    forced-color-adjust: auto;
+  }
+
+  .card,
+  .custom-select-popover,
+  .custom-select-trigger,
+  .url-input-box,
+  .app-crash-card {
+    border-color: ButtonText;
+    background: Canvas;
+    color: CanvasText;
+  }
+
+  .primary-button,
+  .secondary-button,
+  .start-button,
+  .danger-button,
+  .inspect-action-btn {
+    border: 1px solid ButtonText;
+    background: ButtonFace;
+    color: ButtonText;
+  }
+
+  button:focus-visible,
+  input:focus-visible,
+  [role="option"]:focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: 2px;
   }
 }
 

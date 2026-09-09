@@ -454,6 +454,13 @@ pub fn copy_export(app: &AppHandle, source: &str, target: &str) -> Result<(), St
     if target_path.is_dir() || canonical_source == target_path {
         return Err("Target export tidak valid.".into());
     }
+    if let Ok(metadata) = fs::symlink_metadata(&target_path) {
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+            return Err(
+                "Target export harus berupa file biasa, bukan symbolic link atau device.".into(),
+            );
+        }
+    }
     if target_path.exists() {
         let canonical_target = fs::canonicalize(&target_path)
             .map_err(|e| format!("Gagal memvalidasi target export: {e}"))?;

@@ -1,4 +1,5 @@
 use std::{
+    io::Read,
     path::Path,
     process::{Command, Output, Stdio},
     sync::{
@@ -22,6 +23,7 @@ use crate::{
 
 const USAGE_SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
 const MIN_AVAILABLE_MEMORY_AFTER_START_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_SYSTEM_PROBE_STDOUT_BYTES: usize = 1024 * 1024;
 
 static NVIDIA_SMI_PROGRAM: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 static NVIDIA_SELECTED_DEVICE: OnceLock<Mutex<Option<usize>>> = OnceLock::new();
@@ -353,6 +355,22 @@ fn vulkan_vendor(name: &str) -> &'static str {
     }
 }
 
+fn is_software_vulkan_device(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    [
+        "llvmpipe",
+        "lavapipe",
+        "swiftshader",
+        "software rasterizer",
+        "software adapter",
+        "microsoft basic render",
+        "warp",
+        "virtual display",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+}
+
 fn parse_vulkan_devices(stderr: &str) -> Vec<ComputeDeviceInfo> {
     stderr
         .lines()
@@ -362,7 +380,7 @@ fn parse_vulkan_devices(stderr: &str) -> Vec<ComputeDeviceInfo> {
             let device_index = index.trim().parse::<usize>().ok()?;
             let (name, capabilities) = rest.split_once(" | ").unwrap_or((rest, ""));
             let name = name.trim();
-            if name.is_empty() {
+            if name.is_empty() || is_software_vulkan_device(name) {
                 return None;
             }
             Some(ComputeDeviceInfo {
@@ -513,6 +531,29 @@ pub fn detect_gpu() -> Option<GpuInfo> {
     detect_nvidia().or_else(detect_generic_gpu)
 }
 
+fn capture_system_probe_stdout(mut reader: impl Read) -> Result<Vec<u8>, String> {
+    let mut captured = Vec::with_capacity(MAX_SYSTEM_PROBE_STDOUT_BYTES.min(64 * 1024));
+    let mut buffer = [0u8; 16 * 1024];
+    let mut truncated = false;
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .map_err(|error| format!("Gagal membaca output system probe: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        let remaining = MAX_SYSTEM_PROBE_STDOUT_BYTES.saturating_sub(captured.len());
+        let retained = remaining.min(read);
+        captured.extend_from_slice(&buffer[..retained]);
+        truncated |= retained < read;
+    }
+    if truncated {
+        Err("Output system probe terlalu besar.".into())
+    } else {
+        Ok(captured)
+    }
+}
+
 fn command_output_with_timeout(mut command: Command, timeout: Duration) -> Option<Output> {
     crate::process::hide_console(&mut command);
     let mut child = command
@@ -520,19 +561,30 @@ fn command_output_with_timeout(mut command: Command, timeout: Duration) -> Optio
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
+    let stdout = child.stdout.take()?;
+    let stdout_reader = std::thread::spawn(move || capture_system_probe_stdout(stdout));
     let started = Instant::now();
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => return child.wait_with_output().ok().filter(|_| status.success()),
+            Ok(Some(status)) => {
+                let stdout = stdout_reader.join().ok()?.ok()?;
+                return status.success().then_some(Output {
+                    status,
+                    stdout,
+                    stderr: Vec::new(),
+                });
+            }
             Ok(None) if started.elapsed() >= timeout => {
-                let _ = child.kill();
+                crate::process::terminate_process_tree(child.id());
                 let _ = child.wait();
+                let _ = stdout_reader.join();
                 return None;
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(25)),
             Err(_) => {
-                let _ = child.kill();
+                crate::process::terminate_process_tree(child.id());
                 let _ = child.wait();
+                let _ = stdout_reader.join();
                 return None;
             }
         }
@@ -627,8 +679,45 @@ fn sample_gpu_usage(target: Option<&UsageTarget>) -> Option<f64> {
 }
 
 #[cfg(target_os = "linux")]
-fn sample_gpu_usage(_target: Option<&UsageTarget>) -> Option<f64> {
-    None
+fn linux_gpu_busy_percent() -> Option<f64> {
+    let mut primary_card_count = 0usize;
+    let mut card_values = Vec::new();
+    for entry in fs::read_dir("/sys/class/drm").ok()?.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with("card") || name.contains('-') {
+            continue;
+        }
+        primary_card_count = primary_card_count.saturating_add(1);
+        let device = entry.path().join("device");
+        let direct = fs::read_to_string(device.join("gpu_busy_percent"))
+            .ok()
+            .and_then(|value| value.trim().parse::<f64>().ok());
+        let intel = fs::read_dir(device.join("gt"))
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .filter_map(|gt| fs::read_to_string(gt.path().join("busy_percent")).ok())
+            .filter_map(|value| value.trim().parse::<f64>().ok())
+            .max_by(|left, right| left.total_cmp(right));
+        if let Some(value) = direct.or(intel) {
+            card_values.push(value.clamp(0.0, 100.0));
+        }
+    }
+    // A single readable metric is not enough: a hybrid system may expose a
+    // metric for only one of several adapters. Without a PCI/Vulkan mapping,
+    // report unavailable rather than attaching that value to the wrong GPU.
+    (primary_card_count == 1 && card_values.len() == 1).then(|| card_values[0])
+}
+
+#[cfg(target_os = "linux")]
+fn sample_gpu_usage(target: Option<&UsageTarget>) -> Option<f64> {
+    if target.is_none_or(|value| value.backend == "cpu") {
+        return None;
+    }
+    // Vulkan indices do not map portably to DRM cards. The helper therefore
+    // reports a value only when the host exposes exactly one primary adapter.
+    linux_gpu_busy_percent()
 }
 
 #[cfg(any(
@@ -636,6 +725,8 @@ fn sample_gpu_usage(_target: Option<&UsageTarget>) -> Option<f64> {
     not(any(target_os = "windows", target_os = "linux"))
 ))]
 fn sample_gpu_usage(_target: Option<&UsageTarget>) -> Option<f64> {
+    // macOS has no stable, non-privileged GPU utilization API that can be
+    // mapped to the selected Metal device without guessing.
     None
 }
 
@@ -782,9 +873,10 @@ pub fn system_status(app: &AppHandle) -> Result<SystemStatus, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        memory_pressure_message, parse_nvidia_gpus, parse_vulkan_devices, UsageMonitor,
-        UsageSnapshot,
+        capture_system_probe_stdout, memory_pressure_message, parse_nvidia_gpus,
+        parse_vulkan_devices, UsageMonitor, UsageSnapshot, MAX_SYSTEM_PROBE_STDOUT_BYTES,
     };
+    use std::io::Cursor;
 
     #[test]
     fn selects_nvidia_device_with_the_most_free_memory() {
@@ -815,6 +907,21 @@ mod tests {
         assert!(devices[0].integrated);
         assert_eq!(devices[1].vendor, "nvidia");
         assert!(!devices[1].integrated);
+    }
+
+    #[test]
+    fn filters_software_vulkan_devices() {
+        let output = "ggml_vulkan: 0 = llvmpipe (LLVM 17.0.6, 256 bits) | uma: 1 | fp16: 1\n\
+            ggml_vulkan: 1 = AMD Radeon 780M Graphics (AMD proprietary driver) | uma: 1 | fp16: 1\n";
+        let devices = parse_vulkan_devices(output);
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].id, "vulkan:1");
+    }
+
+    #[test]
+    fn system_probe_output_is_bounded() {
+        let output = vec![b'x'; MAX_SYSTEM_PROBE_STDOUT_BYTES + 1];
+        assert!(capture_system_probe_stdout(Cursor::new(output)).is_err());
     }
 
     #[test]

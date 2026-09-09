@@ -121,10 +121,6 @@ export function ControlsCard({
   if (system?.cudaEngine && system.cudaSupported && !computeTargetOptions.some((option) => option.value.startsWith("cuda:"))) {
     computeTargetOptions.push({ value: "cuda", label: t("backend.cuda") });
   }
-  if (accelerators.some((item) => item.backend === "vulkan" && item.installed) && !computeTargetOptions.some((option) => option.value.startsWith("vulkan:"))) {
-    computeTargetOptions.push({ value: "vulkan", label: getAcceleratorCopy(accelerators.find((item) => item.backend === "vulkan")!, t).label });
-  }
-
   return (
     <div className="card control-card sticky-card">
       <div className="card-title-row">

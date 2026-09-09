@@ -202,9 +202,10 @@ The application distinguishes execution backends from models:
 - Vulkan is supported on Windows/Linux x64 with a matching Vulkan runtime.
 
 NVIDIA device discovery uses nvidia-smi and preserves the selected device
-index. Vulkan devices are enumerated by the selected whisper.cpp engine. The
-compute selector exposes explicit targets such as cuda:<index> and
-vulkan:<index> when available.
+index. Vulkan devices are enumerated by the selected whisper.cpp engine, with
+known software adapters such as llvmpipe, lavapipe, SwiftShader, and WARP
+filtered out. The compute selector exposes explicit targets such as
+cuda:<index> and vulkan:<index> when available.
 
 CUDA model guardrails use free NVIDIA VRAM as a conservative preflight:
 approximately 2 GiB for Fast, 4 GiB for Balanced, and 7 GiB for Accurate.
@@ -212,9 +213,13 @@ These thresholds are not a universal guarantee because other GPU processes
 can consume memory.
 
 GPU telemetry follows the resolved target where the platform exposes a reliable
-mapping. CUDA uses the selected NVIDIA device index. Vulkan and unsupported
-cross-adapter mappings report unavailable instead of showing another GPU's
-usage. The execution monitor also checks available system memory and
+mapping. CUDA uses the selected NVIDIA device index. Linux reports Vulkan GPU
+busy time only when exactly one measurable DRM adapter exists; multi-adapter
+and macOS mappings report unavailable instead of showing another GPU's usage.
+Vulkan has no portable dedicated-VRAM budget in the engine listing. Integrated
+Vulkan devices therefore receive a conservative shared-system-memory guard,
+while discrete devices rely on capability probing plus the runtime memory
+monitor. The execution monitor also checks available system memory and
 child-process RSS during download, conversion, probing, and inference.
 
 Auto and explicit GPU selection run a bounded capability probe with the
@@ -222,7 +227,9 @@ installed engine, model, and a generated one-second silent WAV. Only
 successful probes are cached for the backend/device/engine/model signature
 during the application session. Cancellation and timeout failures are retried.
 If Auto CUDA fails, the application tries Vulkan and then CPU where available.
-An explicitly selected GPU target fails closed with a diagnostic error.
+If CUDA is not installed, Auto can use CPU directly; CUDA remains an optional
+performance accelerator. An explicitly selected GPU target fails closed with
+a diagnostic error.
 
 For cross-vendor stability, Vulkan child processes disable the optional
 cooperative-matrix shader path and flash attention. This avoids known driver

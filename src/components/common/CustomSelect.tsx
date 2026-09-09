@@ -38,6 +38,8 @@ export function CustomSelect({
   const containerRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
   const shouldScrollHighlightedRef = useRef(false);
+  const typeaheadRef = useRef("");
+  const typeaheadTimerRef = useRef<number | null>(null);
   const selectId = useId();
   const listboxId = `${selectId}-listbox`;
 
@@ -64,7 +66,8 @@ export function CustomSelect({
     if (isOpen) {
       const idx = options.findIndex((opt) => opt.value === value);
       shouldScrollHighlightedRef.current = true;
-      setHighlightedIndex(idx >= 0 ? idx : 0);
+      const fallback = options.findIndex((option) => !option.disabled);
+      setHighlightedIndex(idx >= 0 && !options[idx].disabled ? idx : fallback);
     }
   }, [isOpen, options, value]);
 
@@ -82,6 +85,10 @@ export function CustomSelect({
       shouldScrollHighlightedRef.current = false;
     }
   }, [highlightedIndex, isOpen]);
+
+  useEffect(() => () => {
+    if (typeaheadTimerRef.current !== null) window.clearTimeout(typeaheadTimerRef.current);
+  }, []);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (disabled) return;
@@ -126,6 +133,30 @@ export function CustomSelect({
         }
         break;
       }
+      case "Home": {
+        e.preventDefault();
+        const firstEnabled = options.findIndex((option) => !option.disabled);
+        if (firstEnabled >= 0) {
+          shouldScrollHighlightedRef.current = true;
+          setHighlightedIndex(firstEnabled);
+        }
+        break;
+      }
+      case "End": {
+        e.preventDefault();
+        let lastEnabled = -1;
+        for (let index = options.length - 1; index >= 0; index -= 1) {
+          if (!options[index].disabled) {
+            lastEnabled = index;
+            break;
+          }
+        }
+        if (lastEnabled >= 0) {
+          shouldScrollHighlightedRef.current = true;
+          setHighlightedIndex(lastEnabled);
+        }
+        break;
+      }
       case "Enter":
       case " ": {
         e.preventDefault();
@@ -135,6 +166,22 @@ export function CustomSelect({
           setIsOpen(false);
         }
         break;
+      }
+      default: {
+        if (e.key.length !== 1 || e.ctrlKey || e.metaKey || e.altKey) break;
+        typeaheadRef.current = `${typeaheadRef.current}${e.key.toLowerCase()}`;
+        if (typeaheadTimerRef.current !== null) window.clearTimeout(typeaheadTimerRef.current);
+        typeaheadTimerRef.current = window.setTimeout(() => {
+          typeaheadRef.current = "";
+          typeaheadTimerRef.current = null;
+        }, 500);
+        const match = options.findIndex(
+          (option) => !option.disabled && option.label.toLowerCase().startsWith(typeaheadRef.current),
+        );
+        if (match >= 0) {
+          shouldScrollHighlightedRef.current = true;
+          setHighlightedIndex(match);
+        }
       }
     }
   };
@@ -164,6 +211,7 @@ export function CustomSelect({
         className="custom-select-trigger"
         onClick={() => !disabled && setIsOpen((prev) => !prev)}
         aria-haspopup="listbox"
+        aria-disabled={disabled || undefined}
         aria-expanded={isOpen}
         aria-controls={listboxId}
         aria-label={ariaLabel}
@@ -207,6 +255,7 @@ export function CustomSelect({
                   key={option.value}
                   id={`${listboxId}-option-${index}`}
                   role="option"
+                  tabIndex={-1}
                   aria-selected={isSelected}
                   aria-disabled={option.disabled}
                   className={`custom-select-option ${isSelected ? "selected" : ""} ${isHighlighted ? "highlighted" : ""} ${option.disabled ? "disabled" : ""}`}

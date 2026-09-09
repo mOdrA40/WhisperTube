@@ -130,7 +130,16 @@ fi
 
 rm -rf "$CPU"
 mkdir -p "$CPU"
-cp -R "$(dirname "$cli")/." "$CPU/"
+find "$(dirname "$cli")" -maxdepth 1 \( -type f -o -type l \) \( \
+  -name whisper-cli -o \
+  -name 'libwhisper*' -o \
+  -name 'libggml*' -o \
+  -name 'ggml*' \
+\) -exec cp -a {} "$CPU/" \;
+if [[ ! -x "$CPU/whisper-cli" ]]; then
+  echo "whisper-cli gagal disalin ke runtime yang diizinkan." >&2
+  exit 1
+fi
 chmod +x "$CPU/whisper-cli"
 
 # whisper.cpp emits sibling shared libraries. Preserve that relationship after

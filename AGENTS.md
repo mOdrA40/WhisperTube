@@ -159,6 +159,23 @@ After making a change:
 2. Run the relevant lint, formatter, and type checker.
 3. Run the broader test suite when the change can affect other modules.
 
+Default validation should stay lightweight. Do not automatically run
+`npm run build` after every task; the user owns the final full frontend build
+unless it is explicitly requested or the change affects bundling, frontend
+production output, native packaging, runtime resources, or release readiness.
+For routine TypeScript changes, prefer `npm run typecheck` plus focused tests.
+For Rust, Tauri IPC, hardware, storage, runtime, or cross-file changes, the
+following Rust final gate is mandatory before reporting completion:
+
+    cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+    cargo check --manifest-path src-tauri/Cargo.toml --all-targets --all-features
+    cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
+    cargo test --manifest-path src-tauri/Cargo.toml --all-targets --all-features
+
+These checks validate formatting, compile/type errors, lint errors, and tests
+without producing a release installer. A focused test may be run first, but it
+does not replace the final Rust gate. Report any skipped command explicitly.
+
 Add or update tests when behavior changes.
 
 Tests must verify behavior, not merely increase coverage.
@@ -195,7 +212,8 @@ Before declaring the task complete:
 - reread the user's requirement;
 - inspect the complete diff;
 - ensure there are no accidental changes;
-- build or compile the code when relevant;
+- build or compile the code when relevant; a full build is not mandatory for
+  every task and should follow the lightweight-validation rule above;
 - run the relevant tests;
 - run lint and type checks when available;
 - check important edge cases;

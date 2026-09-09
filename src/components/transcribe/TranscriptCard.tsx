@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
 import { Check, Copy, FileText, FolderOpen, Play, Search } from "lucide-react";
+import { Virtuoso } from "react-virtuoso";
 import type { Segment, TranscriptResult } from "../../types";
 import { getModelLabel, useI18n } from "../../i18n";
 
@@ -15,8 +15,6 @@ type TranscriptCardProps = {
   onSearchChange: (query: string) => void;
 };
 
-const SEGMENTS_PER_PAGE = 300;
-
 export function TranscriptCard({
   result,
   operationActive,
@@ -29,12 +27,6 @@ export function TranscriptCard({
   onSearchChange,
 }: TranscriptCardProps) {
   const { t } = useI18n();
-  const [visibleSegmentCount, setVisibleSegmentCount] = useState(SEGMENTS_PER_PAGE);
-  const visibleSegments = filteredSegments.slice(0, visibleSegmentCount);
-
-  useEffect(() => {
-    setVisibleSegmentCount(SEGMENTS_PER_PAGE);
-  }, [result.historyId, searchQuery]);
 
   return (
     <div className="transcript-card card">
@@ -82,27 +74,21 @@ export function TranscriptCard({
       </div>
 
       <div className="segments">
-        {visibleSegments.map((segment, index) => (
-          <div className="segment" key={`${segment.from}-${index}`}>
-            <div className="timestamp">
-              <Play size={11} fill="currentColor" /> {segment.from}
-            </div>
-            <p>{segment.text}</p>
-          </div>
-        ))}
-        {filteredSegments.length === 0 && (
+        {filteredSegments.length > 0 ? (
+          <Virtuoso
+            className="transcript-virtual-list"
+            data={filteredSegments}
+            itemContent={(_, segment) => (
+              <div className="segment">
+                <div className="timestamp">
+                  <Play size={11} fill="currentColor" /> {segment.from}
+                </div>
+                <p>{segment.text}</p>
+              </div>
+            )}
+          />
+        ) : (
           <div className="empty-inline">{t("transcript.empty")}</div>
-        )}
-        {visibleSegmentCount < filteredSegments.length && (
-          <button
-            type="button"
-            className="secondary-button transcript-load-more"
-            onClick={() => setVisibleSegmentCount((count) => count + SEGMENTS_PER_PAGE)}
-          >
-            {t("transcript.loadMore", {
-              count: Math.min(SEGMENTS_PER_PAGE, filteredSegments.length - visibleSegmentCount),
-            })}
-          </button>
         )}
       </div>
     </div>

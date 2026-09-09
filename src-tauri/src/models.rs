@@ -78,7 +78,14 @@ impl TemporaryFileGuard {
 impl Drop for TemporaryFileGuard {
     fn drop(&mut self) {
         if !self.committed {
-            let _ = fs::remove_file(&self.path);
+            if let Err(error) = fs::remove_file(&self.path) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    eprintln!(
+                        "WhisperTube model temporary file cleanup warning ({}): {error}",
+                        self.path.display()
+                    );
+                }
+            }
         }
     }
 }

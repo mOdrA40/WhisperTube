@@ -125,7 +125,16 @@ build_engine() {
 
   rm -rf "$destination"
   mkdir -p "$destination"
-  cp -R "$(dirname "$cli")/." "$destination/"
+  find "$(dirname "$cli")" -maxdepth 1 \( -type f -o -type l \) \( \
+    -name "whisper-cli" -o \
+    -name "libwhisper*" -o \
+    -name "libggml*" -o \
+    -name "ggml*" \
+  \) -exec cp -a {} "$destination/" \;
+  if [[ ! -x "$destination/whisper-cli" ]]; then
+    echo "whisper-cli gagal disalin ke runtime yang diizinkan." >&2
+    exit 1
+  fi
   "$destination/whisper-cli" --version >/dev/null
 }
 

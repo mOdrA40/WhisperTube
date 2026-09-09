@@ -663,9 +663,23 @@ pub async fn install(
     let cleanup_staging_path = staging_path.clone();
     let cleanup_staging = result.is_err();
     let _ = tokio::task::spawn_blocking(move || {
-        let _ = fs::remove_dir_all(&cleanup_temp_root);
+        if let Err(error) = fs::remove_dir_all(&cleanup_temp_root) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                eprintln!(
+                    "WhisperTube accelerator temporary cleanup warning ({}): {error}",
+                    cleanup_temp_root.display()
+                );
+            }
+        }
         if cleanup_staging {
-            let _ = fs::remove_dir_all(&cleanup_staging_path);
+            if let Err(error) = fs::remove_dir_all(&cleanup_staging_path) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    eprintln!(
+                        "WhisperTube accelerator staging cleanup warning ({}): {error}",
+                        cleanup_staging_path.display()
+                    );
+                }
+            }
         }
     })
     .await;

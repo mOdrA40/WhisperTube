@@ -5176,7 +5176,7 @@ dependencies = [
 
 [[package]]
 name = "whispertube"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "bytes",
  "chrono",

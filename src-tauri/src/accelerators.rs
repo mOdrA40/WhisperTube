@@ -363,7 +363,7 @@ async fn download_archive(
 fn verify_sha256(path: &Path, expected: &str) -> Result<String, String> {
     let mut file = File::open(path).map_err(|e| format!("Gagal membuka accelerator: {e}"))?;
     let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 1024 * 1024];
+    let mut buffer = vec![0u8; 1024 * 1024];
     loop {
         let read = file
             .read(&mut buffer)

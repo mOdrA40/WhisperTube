@@ -265,7 +265,7 @@ fn verify_sha256_file(path: &Path, expected: &str) -> Result<(), String> {
     let mut file =
         File::open(path).map_err(|e| format!("Gagal membuka file untuk verifikasi: {e}"))?;
     let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 1024 * 1024];
+    let mut buffer = vec![0u8; 1024 * 1024];
     loop {
         let read = file
             .read(&mut buffer)
@@ -493,7 +493,7 @@ fn emit_cuda_progress(
 fn verify_sha256(path: &Path, expected: &str) -> Result<(), String> {
     let mut file = File::open(path).map_err(|e| format!("Gagal membuka CUDA package: {e}"))?;
     let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 1024 * 1024];
+    let mut buffer = vec![0u8; 1024 * 1024];
     loop {
         let read = file
             .read(&mut buffer)

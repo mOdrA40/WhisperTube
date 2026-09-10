@@ -105,7 +105,7 @@ pub fn is_regular_file(path: &Path) -> bool {
 fn file_sha256(path: &Path) -> Result<String, String> {
     let mut file = File::open(path).map_err(|e| format!("Gagal membuka runtime: {e}"))?;
     let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 1024 * 1024];
+    let mut buffer = vec![0u8; 1024 * 1024];
     loop {
         let read = file
             .read(&mut buffer)

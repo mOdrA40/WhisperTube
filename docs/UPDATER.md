@@ -10,7 +10,7 @@ embedded updater public key before installation.
    src-tauri/tauri.conf.json, and src-tauri/Cargo.toml.
 2. Commit the versioned application changes on the intended release branch,
    normally main.
-3. Push a new application tag such as v0.1.3.
+3. Push a new application tag such as v0.1.0.
 4. build-application-bundles.yml runs its reusable quality gate, builds the
    native bundles, and collects checksums and updater signatures.
 5. The workflow validates that the tag version matches all three version

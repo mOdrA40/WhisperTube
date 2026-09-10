@@ -60,10 +60,37 @@ Vulkan tertentu.
 
 CUDA tidak dibundel dalam setup dasar. Aplikasi mengunduhnya ke app storage user dan memvalidasi SHA-256 sebelum digunakan.
 
-Saat uninstall Windows, uninstaller secara default hanya menghapus aplikasi lalu
-menanyakan apakah data user juga ingin dihapus. Opsi cleanup menghapus history,
-model, jobs, audio tersimpan, dan runtime yang diunduh. File di luar app-local
-data, seperti `cookies.txt` yang dipilih user, tidak ikut dihapus.
+Untuk CUDA khusus development di `src-tauri/runtime-dev/windows`, jalankan
+`npm run clean:dev-runtime` jika ingin menghapus runtime developer. Script ini
+tidak menyentuh model atau runtime di app data user.
+
+Di macOS atau Linux, jalankan `npm run clean:dev-runtime:unix` untuk menghapus
+runtime hasil setup di `src-tauri/runtime/macos` atau `src-tauri/runtime/linux`.
+Jalankan ulang script setup platform terkait sebelum development.
+
+## Uninstall dan data lokal
+
+WhisperTube memisahkan file aplikasi terpasang dari data user. Untuk menghapus
+model, history, jobs, audio tersimpan, dan runtime yang diunduh di semua OS,
+gunakan **Settings → Reset WhisperTube data** sebelum menghapus aplikasi. File
+eksternal seperti `cookies.txt` pilihan user dan export di luar storage
+WhisperTube tidak ikut dihapus.
+
+- **Windows NSIS setup EXE:** uninstall dari Windows Settings atau `uninstall.exe`
+  menampilkan prompt cleanup. Pilihan cleanup menghapus data lokal WhisperTube;
+  pilihan simpan data mempertahankannya untuk reinstall berikutnya.
+- **macOS DMG/app:** memindahkan `.app` ke Trash menghapus aplikasi, tetapi
+  tidak menghapus app-local-data. Gunakan reset dari dalam aplikasi jika ingin
+  cleanup penuh.
+- **Linux AppImage:** menghapus AppImage tidak menghapus app-local-data. Pada
+  paket Debian/Ubuntu, menghapus paket juga sengaja mempertahankan data user;
+  gunakan reset dari dalam aplikasi untuk cleanup penuh.
+- **Mode development:** `npm run tauri:dev` tidak memiliki uninstaller OS.
+  Runtime developer dapat dihapus dengan `npm run clean:dev-runtime`.
+
+Lokasi default app-local-data adalah `%LOCALAPPDATA%/app.whispertube.local`
+di Windows, `~/Library/Application Support/app.whispertube.local` di macOS,
+dan `${XDG_DATA_HOME:-~/.local/share}/app.whispertube.local` di Linux.
 
 ## Alur transkripsi
 

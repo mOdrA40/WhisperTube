@@ -59,9 +59,32 @@ cd D:\Projects\WhisperTube
 
 CUDA 不包含在基础安装中。应用会将其下载到用户 app storage，并在启用前验证 SHA-256。
 
-在 Windows 卸载时，卸载程序默认只删除应用，并会询问是否同时删除用户数据。
-清理选项会删除历史记录、模型、jobs、保存的音频和已下载的运行时；应用本地数据
-目录之外的文件（例如用户选择的 `cookies.txt`）不会被删除。
+如需清理仅用于开发的 Windows CUDA 文件，请运行
+`npm run clean:dev-runtime`。该脚本不会触及用户 app data 中的模型或运行时。
+
+在 macOS 或 Linux 上，请运行 `npm run clean:dev-runtime:unix`，删除当前主机
+在 `src-tauri/runtime/macos` 或 `src-tauri/runtime/linux` 中生成的开发运行时。
+开始开发前请重新运行对应平台的 setup 脚本。
+
+## 卸载与本地数据
+
+WhisperTube 将已安装的应用文件与用户数据分开保存。若要在所有操作系统
+上删除模型、历史记录、jobs、保存的音频和已下载的运行时，请先在应用中
+使用 **Settings → Reset WhisperTube data**，再删除应用。外部文件（例如用户
+选择的 `cookies.txt`）以及 WhisperTube 存储目录之外的导出文件不会被删除。
+
+- **Windows NSIS setup EXE：** 从 Windows Settings 或 `uninstall.exe` 卸载时会
+  显示清理提示。选择清理会删除 WhisperTube 本地数据；选择保留则方便以后重新安装。
+- **macOS DMG/app：** 将 `.app` 移到 Trash 只会删除应用，不会删除 app-local-data。
+  如果需要完整清理，请先在应用中执行 reset。
+- **Linux AppImage：** 删除 AppImage 不会删除 app-local-data。对于 Debian/Ubuntu
+  软件包，卸载软件包也会保留用户数据；需要完整清理时请先在应用中执行 reset。
+- **开发模式：** `npm run tauri:dev` 没有操作系统卸载程序。开发专用运行时可用
+  `npm run clean:dev-runtime` 删除。
+
+默认 app-local-data 路径为：Windows 的 `%LOCALAPPDATA%/app.whispertube.local`，
+macOS 的 `~/Library/Application Support/app.whispertube.local`，以及 Linux 的
+`${XDG_DATA_HOME:-~/.local/share}/app.whispertube.local`。
 
 ## 转录流程
 

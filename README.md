@@ -138,11 +138,39 @@ you choose a specific CUDA or Vulkan device.
 
 The CUDA package is large, so it is deliberately excluded from the base setup. The app downloads it into user app storage and verifies its SHA-256 before activation.
 
-On Windows uninstall, the uninstaller removes the application by default but
-asks whether to also remove local user data. Choosing the cleanup option deletes
-WhisperTube history, models, jobs, saved audio, and downloaded runtimes. Files
-outside the app-local data directory, such as a user-selected `cookies.txt`, are
-not removed.
+For development-only CUDA files under `src-tauri/runtime-dev/windows`, run
+`npm run clean:dev-runtime` when you want to remove the developer runtime. This
+does not touch models or runtimes in the user's application data.
+
+On macOS or Linux, run `npm run clean:dev-runtime:unix` to remove the current
+host's generated runtime under `src-tauri/runtime/macos` or
+`src-tauri/runtime/linux`. Run the matching platform setup script again before
+starting development.
+
+### Uninstalling and local data
+
+WhisperTube separates installed application files from user data. To remove
+models, history, jobs, saved audio, and downloaded runtimes on any platform,
+use **Settings → Reset WhisperTube data** before removing the application.
+External files such as a user-selected `cookies.txt` and exports outside
+WhisperTube storage are not removed.
+
+- **Windows NSIS setup EXE:** uninstalling from Windows Settings or from
+  `uninstall.exe` shows a cleanup prompt. Choosing cleanup removes the local
+  WhisperTube data listed above; choosing to keep data preserves it for a
+  future reinstall.
+- **macOS DMG/app:** moving the `.app` to Trash removes the application but
+  does not remove app-local data. Use the in-app reset first if a full cleanup
+  is wanted.
+- **Linux AppImage:** deleting the AppImage does not remove app-local data.
+  For Debian/Ubuntu packages, removing the package also intentionally keeps
+  user data; use the in-app reset first for a full cleanup.
+- **Development mode:** `npm run tauri:dev` has no OS uninstaller. The
+  developer-only runtime can be removed with `npm run clean:dev-runtime`.
+
+Default app-local data locations are `%LOCALAPPDATA%/app.whispertube.local`
+on Windows, `~/Library/Application Support/app.whispertube.local` on macOS,
+and `${XDG_DATA_HOME:-~/.local/share}/app.whispertube.local` on Linux.
 
 ### 8. First transcription
 

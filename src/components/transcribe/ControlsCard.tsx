@@ -320,7 +320,7 @@ export function ControlsCard({
         <AudioWaveform size={18} /> {t("controls.transcribe")}
       </button>
 
-      {!runtimeReady && (
+      {!runtimeReady && system && (
         <p className="setup-hint">
           <AlertCircle size={14} /> {t("controls.runtimeHint")}
         </p>

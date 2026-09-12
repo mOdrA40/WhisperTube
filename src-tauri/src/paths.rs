@@ -201,22 +201,26 @@ fn collect_runtime_files(
     Ok(())
 }
 
-fn runtime_manifest_matches(runtime_dir: &Path, executable: &Path, expected_version: &str) -> bool {
+fn runtime_manifest_header(
+    runtime_dir: &Path,
+    executable: &Path,
+    expected_version: &str,
+) -> Option<RuntimeManifest> {
     let Ok(runtime_metadata) = fs::symlink_metadata(runtime_dir) else {
-        return false;
+        return None;
     };
     if !runtime_metadata.is_dir() {
-        return false;
+        return None;
     }
     let manifest_path = runtime_dir.join(RUNTIME_MANIFEST_NAME);
     let Ok(metadata) = fs::symlink_metadata(&manifest_path) else {
-        return false;
+        return None;
     };
     if !metadata.is_file() || metadata.len() > MAX_RUNTIME_MANIFEST_BYTES {
-        return false;
+        return None;
     }
     let Ok(file) = File::open(&manifest_path) else {
-        return false;
+        return None;
     };
     let mut bytes = Vec::new();
     if file
@@ -225,34 +229,37 @@ fn runtime_manifest_matches(runtime_dir: &Path, executable: &Path, expected_vers
         .is_err()
         || bytes.len() as u64 > MAX_RUNTIME_MANIFEST_BYTES
     {
-        return false;
+        return None;
     }
-    let Ok(manifest) = serde_json::from_slice::<RuntimeManifest>(&bytes) else {
-        return false;
-    };
-    let Some(name) = executable.file_name().and_then(|name| name.to_str()) else {
-        return false;
-    };
+    let manifest = serde_json::from_slice::<RuntimeManifest>(&bytes).ok()?;
+    let name = executable.file_name().and_then(|name| name.to_str())?;
     if manifest.version != expected_version
         || manifest.executable != name
         || manifest.files.len() > MAX_RUNTIME_FILES
     {
-        return false;
+        return None;
     }
     let executable_relative = executable
         .strip_prefix(runtime_dir)
         .ok()
         .and_then(|path| path.to_str());
     if executable_relative.is_none_or(|path| !manifest.files.iter().any(|file| file.path == path)) {
-        return false;
+        return None;
     }
     if manifest
         .files
         .iter()
         .any(|file| !is_safe_manifest_path(&file.path))
     {
-        return false;
+        return None;
     }
+    Some(manifest)
+}
+
+fn runtime_manifest_matches(runtime_dir: &Path, executable: &Path, expected_version: &str) -> bool {
+    let Some(manifest) = runtime_manifest_header(runtime_dir, executable, expected_version) else {
+        return false;
+    };
     let mut expected = manifest.files;
     expected.sort_unstable_by(|left, right| left.path.cmp(&right.path));
     let mut actual = Vec::new();
@@ -261,6 +268,11 @@ fn runtime_manifest_matches(runtime_dir: &Path, executable: &Path, expected_vers
     }
     actual.sort_unstable_by(|left, right| left.path.cmp(&right.path));
     expected == actual
+}
+
+fn validated_user_runtime(runtime_dir: &Path, executable: &Path, expected_version: &str) -> bool {
+    is_regular_file(executable)
+        && runtime_manifest_matches(runtime_dir, executable, expected_version)
 }
 
 fn is_safe_manifest_path(value: &str) -> bool {
@@ -389,9 +401,7 @@ pub fn engine_path(app: &AppHandle, backend: &str) -> Result<PathBuf, String> {
     } else {
         CORE_RUNTIME_MANIFEST_VERSION
     };
-    if is_regular_file(&user_path)
-        && runtime_manifest_matches(&user_backend_dir, &user_path, expected_version)
-    {
+    if validated_user_runtime(&user_backend_dir, &user_path, expected_version) {
         return Ok(user_path);
     }
     #[cfg(debug_assertions)]
@@ -410,6 +420,12 @@ pub fn engine_path(app: &AppHandle, backend: &str) -> Result<PathBuf, String> {
         .join(exe_name("whisper-cli")))
 }
 
+/// Reports whether the same validated engine selected for inference is
+/// available. User-installed runtimes are fully checked against their manifest.
+pub fn engine_available(app: &AppHandle, backend: &str) -> Result<bool, String> {
+    Ok(is_regular_file(&engine_path(app, backend)?))
+}
+
 pub fn model_path(app: &AppHandle, id: &str) -> Result<PathBuf, String> {
     let _ = model_spec(id)?;
     Ok(models_dir(app)?.join(format!("ggml-{id}.bin")))
@@ -419,7 +435,7 @@ pub fn model_path(app: &AppHandle, id: &str) -> Result<PathBuf, String> {
 mod tests {
     use super::{
         clear_invalid_runtime_destination, is_regular_file, runtime_manifest_matches,
-        write_runtime_manifest,
+        validated_user_runtime, write_runtime_manifest,
     };
     use std::{
         fs,
@@ -485,9 +501,19 @@ mod tests {
             &executable,
             super::core_runtime_manifest_version()
         ));
+        assert!(validated_user_runtime(
+            &root,
+            &executable,
+            super::core_runtime_manifest_version()
+        ));
 
         fs::write(&executable, b"modified runtime").expect("runtime should be modified");
         assert!(!runtime_manifest_matches(
+            &root,
+            &executable,
+            super::core_runtime_manifest_version()
+        ));
+        assert!(!validated_user_runtime(
             &root,
             &executable,
             super::core_runtime_manifest_version()
@@ -499,6 +525,35 @@ mod tests {
         )
         .expect("modified runtime should be replaceable");
         assert!(!root.exists());
+    }
+
+    #[test]
+    fn runtime_availability_rejects_missing_manifested_dependency() {
+        let root = temporary_path("runtime-manifest-missing-dependency");
+        fs::create_dir_all(&root).expect("runtime directory should be created");
+        let executable = root.join("whisper-cli.exe");
+        let dependency = root.join("whisper.dll");
+        fs::write(&executable, b"trusted runtime").expect("runtime should be written");
+        fs::write(&dependency, b"trusted dependency").expect("dependency should be written");
+        write_runtime_manifest(
+            &root,
+            "whisper-cli.exe",
+            super::core_runtime_manifest_version(),
+        )
+        .expect("manifest should be written");
+        assert!(validated_user_runtime(
+            &root,
+            &executable,
+            super::core_runtime_manifest_version()
+        ));
+
+        fs::remove_file(&dependency).expect("dependency should be removed");
+        assert!(!validated_user_runtime(
+            &root,
+            &executable,
+            super::core_runtime_manifest_version()
+        ));
+        fs::remove_dir_all(root).expect("runtime directory should be removed");
     }
 
     #[test]

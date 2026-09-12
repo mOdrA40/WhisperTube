@@ -95,7 +95,7 @@ an imported cookies file.
 ## Job storage quota or low disk space
 
 Settings shows the current job storage usage and the 20 GiB safety quota.
-Delete old history items or turn off Keep processed audio before starting a
+Delete old history items or turn off Keep audio for retry before starting a
 new large job. WhisperTube also reserves space for the maximum media and WAV
 sizes before downloading.
 

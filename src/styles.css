@@ -2161,7 +2161,7 @@ input:focus-visible,
 .status-table > div {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
   gap: 15px;
   padding: 10px 0;
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
@@ -2170,15 +2170,30 @@ input:focus-visible,
 
 .status-table span {
   color: #8b99b0;
+  min-width: 0;
 }
 
 .status-table strong {
+  min-width: 0;
   color: #ffffff;
   text-align: right;
+  overflow-wrap: anywhere;
   max-width: 58%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+}
+
+.status-device-list {
+  display: grid;
+  flex: 0 1 58%;
+  gap: 4px;
+}
+
+.status-table .status-device {
+  display: block;
+  max-width: 100%;
+  color: #ffffff;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .ok-text {

@@ -603,15 +603,29 @@ export function SettingsPage({
           </div>
           <div>
             <span>{t("settings.gpu")}</span>
-            <strong>{system?.gpuName ?? t("hardware.notDetected")}</strong>
+            <strong title={system?.gpuName ?? undefined}>
+              {system?.gpuName ?? t("hardware.notDetected")}
+            </strong>
           </div>
           <div>
             <span>{t("settings.computeDevices")}</span>
             <strong
-              title={system?.computeDevices.map((device) => `${device.id}: ${device.name}`).join(" • ")}
+              className="status-device-list"
+              aria-label={
+                system?.computeDevices.length
+                  ? system.computeDevices.map((device) => `${device.id}: ${device.name}`).join(" • ")
+                  : t("hardware.notDetected")
+              }
             >
               {system?.computeDevices.length
-                ? system.computeDevices.map((device) => `${device.id}: ${device.name}`).join(" • ")
+                ? system.computeDevices.map((device) => {
+                    const label = `${device.id}: ${device.name}`;
+                    return (
+                      <span className="status-device" key={device.id} title={label}>
+                        {label}
+                      </span>
+                    );
+                  })
                 : t("hardware.notDetected")}
             </strong>
           </div>

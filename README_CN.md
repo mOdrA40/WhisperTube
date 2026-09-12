@@ -14,7 +14,7 @@ WhisperTube 是一款 local-first 桌面应用，使用 `yt-dlp`、FFmpeg 和 wh
 
 支持的来源包括 YouTube、TikTok、X/Twitter、Facebook、Instagram、Reddit、Twitch、Vimeo、Dailymotion、Pinterest、LinkedIn、Tumblr、Bilibili 和 VK。支持范围取决于当前 yt-dlp extractor，并可能随着平台变化而改变。
 
-为确保磁盘和内存使用可控，转录仅支持时长明确且不超过 2 小时的非直播媒体。当前 whisper.cpp 路径会处理完整 PCM 缓冲区，尚未实现分块转录。直播和即将开始的直播会在下载前被拒绝。
+为确保磁盘和内存使用可控，转录仅支持时长明确且不超过 8 小时的点播媒体和已结束的直播回放。当前 whisper.cpp 路径会处理完整 PCM 缓冲区，尚未实现分块转录。正在进行的直播和即将开始的直播会在下载前被拒绝。
 
 ## 功能
 
@@ -28,7 +28,7 @@ WhisperTube 是一款 local-first 桌面应用，使用 `yt-dlp`、FFmpeg 和 wh
 - 模型和视频下载会显示已传输的字节数，模型下载可以取消。
 - 转录期间会在平台支持时显示 CPU/GPU 使用率，下载时会显示网络速度。
 - 可以清除当前 URL、预览和转录文本，也可以永久删除单条、多条或当前列表中的全部历史记录。
-- 除非打开保留处理后音频的选项，否则处理结束后会删除临时音频和 WAV 文件。
+- 除非打开保留音频以便重试的选项，否则处理结束后会删除临时音频和 WAV 文件。转录失败时，保存的 WAV 可以在不重新下载源文件的情况下重试。
 
 ## Windows 开发设置
 

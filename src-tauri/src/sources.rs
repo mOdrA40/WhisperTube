@@ -88,6 +88,14 @@ const METADATA_RETRY_BASE_DELAY: Duration = Duration::from_millis(900);
 const METADATA_PROCESS_TIMEOUT: Duration = Duration::from_secs(45);
 const MAX_METADATA_STDOUT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_METADATA_STDERR_BYTES: usize = 256 * 1024;
+const METADATA_PRINT_TEMPLATE: &str = concat!(
+    r#"{"id":%(id|"unknown")j,"title":%(title|"Untitled video")j,"#,
+    r#""channel":%(channel|null)j,"uploader":%(uploader|null)j,"#,
+    r#""duration":%(duration|0)j,"is_live":%(is_live|false)j,"#,
+    r#""live_status":%(live_status|null)j,"thumbnail":%(thumbnail|null)j,"#,
+    r#""webpage_url":%(webpage_url|null)j,"availability":%(availability|null)j,"#,
+    r#""extractor_key":%(extractor_key|null)j,"extractor":%(extractor|null)j}"#,
+);
 const MAX_MEDIA_URL_BYTES: usize = 8 * 1024;
 const MAX_METADATA_ID_BYTES: usize = 512;
 const MAX_METADATA_TITLE_BYTES: usize = 4 * 1024;
@@ -570,7 +578,8 @@ pub async fn inspect_media(
                 let mut command = Command::new(&yt_dlp);
                 command.args([
                     "--ignore-config",
-                    "--dump-single-json",
+                    "--print",
+                    METADATA_PRINT_TEMPLATE,
                     "--skip-download",
                     "--no-playlist",
                     "--no-warnings",
@@ -654,8 +663,9 @@ mod tests {
     use super::{
         drain_bounded, metadata_error_prefix, metadata_retry_reason, safe_thumbnail,
         source_for_host, validate_media_duration, validate_media_url, MetadataRetryReason,
+        METADATA_PRINT_TEMPLATE,
     };
-    use serde_json::json;
+    use serde_json::{json, Value};
     use std::io::Cursor;
 
     #[test]
@@ -692,8 +702,8 @@ mod tests {
         assert!(validate_media_duration(0.0, false).is_err());
         assert!(validate_media_duration(f64::NAN, false).is_err());
         assert!(validate_media_duration(60.0, true).is_err());
-        assert!(validate_media_duration(2.0 * 60.0 * 60.0, false).is_ok());
-        assert!(validate_media_duration(2.0 * 60.0 * 60.0 + 1.0, false).is_err());
+        assert!(validate_media_duration(8.0 * 60.0 * 60.0, false).is_ok());
+        assert!(validate_media_duration(8.0 * 60.0 * 60.0 + 1.0, false).is_err());
     }
 
     #[test]
@@ -702,6 +712,80 @@ mod tests {
         let (captured, truncated) = drain_bounded(Cursor::new(input), 128).unwrap();
         assert_eq!(captured.len(), 128);
         assert!(truncated);
+    }
+
+    #[test]
+    fn metadata_print_template_requests_only_bounded_fields() {
+        for field in [
+            "id",
+            "title",
+            "channel",
+            "uploader",
+            "duration",
+            "is_live",
+            "live_status",
+            "thumbnail",
+            "webpage_url",
+            "availability",
+            "extractor_key",
+            "extractor",
+        ] {
+            assert!(
+                METADATA_PRINT_TEMPLATE.contains(&format!("\"{field}\"")),
+                "metadata template should contain field {field}"
+            );
+        }
+        for placeholder in [
+            r#"%(id|"unknown")j"#,
+            r#"%(title|"Untitled video")j"#,
+            "%(channel|null)j",
+            "%(uploader|null)j",
+            "%(duration|0)j",
+            "%(is_live|false)j",
+            "%(live_status|null)j",
+            "%(thumbnail|null)j",
+            "%(webpage_url|null)j",
+            "%(availability|null)j",
+            "%(extractor_key|null)j",
+            "%(extractor|null)j",
+        ] {
+            assert!(
+                METADATA_PRINT_TEMPLATE.contains(placeholder),
+                "metadata template should contain placeholder {placeholder}"
+            );
+        }
+        assert!(METADATA_PRINT_TEMPLATE.len() < 1024);
+        assert!(!METADATA_PRINT_TEMPLATE.contains("formats"));
+        assert!(!METADATA_PRINT_TEMPLATE.contains("automatic_captions"));
+    }
+
+    #[test]
+    fn metadata_print_template_renders_valid_json_with_optional_defaults() {
+        let mut rendered = METADATA_PRINT_TEMPLATE.to_string();
+        for (placeholder, value) in [
+            (r#"%(id|"unknown")j"#, r#""video-id""#),
+            (r#"%(title|"Untitled video")j"#, r#""Video title""#),
+            ("%(channel|null)j", "null"),
+            ("%(uploader|null)j", r#""Uploader""#),
+            ("%(duration|0)j", "3600"),
+            ("%(is_live|false)j", "false"),
+            ("%(live_status|null)j", "null"),
+            ("%(thumbnail|null)j", "null"),
+            ("%(webpage_url|null)j", r#""https://example.test/video""#),
+            ("%(availability|null)j", "null"),
+            ("%(extractor_key|null)j", r#""Test""#),
+            ("%(extractor|null)j", r#""test""#),
+        ] {
+            rendered = rendered.replace(placeholder, value);
+        }
+
+        let parsed: Value = serde_json::from_str(&rendered)
+            .expect("metadata print template should render valid JSON");
+        assert_eq!(parsed["id"], "video-id");
+        assert_eq!(parsed["channel"], Value::Null);
+        assert_eq!(parsed["uploader"], "Uploader");
+        assert_eq!(parsed["duration"], 3600);
+        assert_eq!(parsed["is_live"], false);
     }
 
     #[test]

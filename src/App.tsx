@@ -27,6 +27,7 @@ export default function App() {
       tab={app.tab}
       historyCount={app.historyTotalCount}
       runtimeReady={app.runtimeReady}
+      systemLoading={app.systemLoading}
       system={app.system}
       onTabChange={app.setTab}
     >

@@ -14,7 +14,7 @@ Other languages: [Bahasa Indonesia](README_ID.md) · [中文（普通话）](REA
 
 Supported source families include YouTube, TikTok, X/Twitter, Facebook, Instagram, Reddit, Twitch, Vimeo, Dailymotion, Pinterest, LinkedIn, Tumblr, Bilibili, and VK. Support is based on the current yt-dlp extractor and can change as each platform changes.
 
-For predictable disk and memory use, transcription is limited to on-demand media with a known duration of at most 2 hours. The current whisper.cpp path processes one full PCM buffer; chunked transcription is not implemented yet. Live streams and upcoming streams are rejected before download.
+For predictable disk and memory use, transcription is limited to on-demand media and completed live replays with a known duration of at most 8 hours. The current whisper.cpp path processes one full PCM buffer; chunked transcription is not implemented yet. Active live streams and upcoming streams are rejected before download.
 
 ## Features
 
@@ -38,7 +38,7 @@ For predictable disk and memory use, transcription is limited to on-demand media
 - Model and source-video download progress show transferred bytes, with cancellable model downloads.
 - Transcription progress shows CPU/GPU utilization when the platform exposes those metrics, plus download network speed.
 - Clear the current URL, preview, and transcript from the workspace; permanently delete one, multiple, or all visible history items.
-- Temporary audio and WAV files are removed after processing unless `Keep processed audio` is enabled.
+- Temporary audio and WAV files are removed after processing unless `Keep audio for retry` is enabled. A failed transcription can reuse the saved WAV without downloading the source again.
 
 ## Windows development setup
 
@@ -320,7 +320,7 @@ WhisperTube/
 
 ## Local data
 
-Tauri selects the platform-specific app-local-data directory. WhisperTube stores model files, job data, exports, and `whispertube.db` there. Temporary source audio and WAV files are deleted when `Keep processed audio` is off. Job storage has a 20 GiB safety quota and its current usage is shown in Settings.
+Tauri selects the platform-specific app-local-data directory. WhisperTube stores model files, job data, exports, and `whispertube.db` there. Temporary source audio and WAV files are deleted when `Keep audio for retry` is off. Saved failed-job audio is automatically eligible for orphan cleanup after the 24-hour grace period. Job storage has a 20 GiB safety quota and its current usage is shown in Settings.
 
 ## Security decisions
 
@@ -331,7 +331,7 @@ Tauri selects the platform-specific app-local-data directory. WhisperTube stores
 - Imported cookies are read by yt-dlp only for the selected local job.
 - Only one transcription job and one runtime installer can run at a time; job reservation is independent of child-process PID state.
 - Cancellation terminates the active process tree on Windows with `taskkill /T /F`.
-- Failed jobs clean up their temporary job folders, and runtime bootstrap downloads are pinned and checksum-verified before activation.
+- Failed jobs clean up their temporary job folders unless Keep audio for retry preserved a valid WAV; runtime bootstrap downloads are pinned and checksum-verified before activation.
 
 ## Known limitations
 

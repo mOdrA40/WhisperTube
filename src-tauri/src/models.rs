@@ -19,7 +19,7 @@ use uuid::Uuid;
 
 use crate::{
     network,
-    paths::{engine_path, model_path, models_dir, user_runtime_dir},
+    paths::{engine_available, engine_path, model_path, models_dir, user_runtime_dir},
     system,
     types::{CudaDownloadPayload, ModelDownloadPayload, ModelInfo},
 };
@@ -218,7 +218,7 @@ pub fn ensure_download_supported(
 
     if target_id == "auto" && cfg!(all(target_os = "windows", target_arch = "x86_64")) {
         let nvidia = system::detect_nvidia();
-        if crate::paths::is_regular_file(&engine_path(app, "cuda")?) {
+        if engine_available(app, "cuda")? {
             if let Some(gpu) = nvidia {
                 return ensure_vram_available(spec.id, gpu.available_memory_mb());
             }
@@ -254,7 +254,7 @@ pub fn ensure_download_supported(
         return ensure_vram_available(spec.id, gpu.available_memory_mb());
     }
 
-    if target_id == "vulkan" && !crate::paths::is_regular_file(&engine_path(app, "vulkan")?) {
+    if target_id == "vulkan" && !engine_available(app, "vulkan")? {
         return Err("Vulkan engine belum terpasang.".into());
     }
 

@@ -17,7 +17,7 @@ use tauri::AppHandle;
 
 use crate::{
     accelerators, models,
-    paths::{engine_path, is_regular_file, runtime_dir, tool_path},
+    paths::{engine_available, engine_path, is_regular_file, runtime_dir, tool_path},
     types::{ComputeDeviceInfo, SystemStatus},
 };
 
@@ -755,8 +755,8 @@ pub fn system_status(app: &AppHandle) -> Result<SystemStatus, String> {
     let runtime = runtime_dir(app)?;
     let yt_dlp = crate::paths::is_regular_file(&tool_path(app, "yt-dlp")?);
     let ffmpeg = crate::paths::is_regular_file(&tool_path(app, "ffmpeg")?);
-    let cpu_engine = crate::paths::is_regular_file(&engine_path(app, "cpu")?);
-    let cuda_engine = crate::paths::is_regular_file(&engine_path(app, "cuda")?);
+    let cpu_engine = engine_available(app, "cpu")?;
+    let cuda_engine = engine_available(app, "cuda")?;
     let nvidia_devices = detect_nvidia_devices();
     let nvidia_gpu = select_nvidia_device(&nvidia_devices);
     set_selected_nvidia_device(nvidia_gpu.as_ref());

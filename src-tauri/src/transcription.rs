@@ -1,5 +1,5 @@
 use regex::Regex;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
     fs::{self, File},
@@ -127,6 +127,7 @@ struct JobDirectoryGuard {
     path: PathBuf,
     marker: PathBuf,
     committed: bool,
+    preserve_on_failure: bool,
 }
 
 impl JobDirectoryGuard {
@@ -141,7 +142,28 @@ impl JobDirectoryGuard {
             path,
             marker,
             committed: false,
+            preserve_on_failure: false,
         })
+    }
+
+    fn resume(path: PathBuf) -> Result<Self, String> {
+        if !path.is_dir() {
+            return Err("Folder cache audio tidak valid.".into());
+        }
+        let marker = path.join(".in-progress");
+        if !fs::symlink_metadata(&marker).is_ok_and(|metadata| metadata.is_file()) {
+            return Err("Cache audio tidak memiliki marker job yang valid.".into());
+        }
+        Ok(Self {
+            path,
+            marker,
+            committed: false,
+            preserve_on_failure: true,
+        })
+    }
+
+    fn preserve_on_failure(&mut self) {
+        self.preserve_on_failure = true;
     }
 
     fn commit(mut self) {
@@ -156,7 +178,7 @@ impl JobDirectoryGuard {
 
 impl Drop for JobDirectoryGuard {
     fn drop(&mut self) {
-        if !self.committed {
+        if !self.committed && !self.preserve_on_failure {
             if let Err(error) = fs::remove_dir_all(&self.path) {
                 if error.kind() != std::io::ErrorKind::NotFound {
                     eprintln!(
@@ -197,10 +219,100 @@ fn remove_file_if_present(path: &Path, label: &str) -> Result<(), String> {
     }
 }
 
+#[derive(Deserialize, Serialize)]
+struct AudioCacheMetadata {
+    version: u8,
+    url: String,
+    duration: f64,
+}
+
+fn write_audio_cache_metadata(job_dir: &Path, request: &TranscriptRequest) -> Result<(), String> {
+    let metadata = AudioCacheMetadata {
+        version: AUDIO_CACHE_METADATA_VERSION,
+        url: request.url.clone(),
+        duration: request.duration,
+    };
+    let bytes = serde_json::to_vec(&metadata)
+        .map_err(|error| format!("Gagal serialize metadata cache audio: {error}"))?;
+    write_file_atomically(&job_dir.join(AUDIO_CACHE_METADATA_FILE), &bytes)
+}
+
+fn read_audio_cache_metadata(path: &Path) -> Option<AudioCacheMetadata> {
+    if !is_regular_file(path) {
+        return None;
+    }
+    let bytes =
+        read_bounded_file(path, MAX_AUDIO_CACHE_METADATA_BYTES, "metadata cache audio").ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn find_reusable_audio_job(
+    jobs_dir: &Path,
+    request: &TranscriptRequest,
+) -> Result<Option<PathBuf>, String> {
+    let canonical_root = fs::canonicalize(jobs_dir)
+        .map_err(|error| format!("Gagal memvalidasi folder cache audio: {error}"))?;
+    let mut candidates = Vec::new();
+    for entry in fs::read_dir(&canonical_root)
+        .map_err(|error| format!("Gagal membaca folder cache audio: {error}"))?
+    {
+        let entry = entry.map_err(|error| format!("Gagal membaca cache audio: {error}"))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("Gagal membaca tipe cache audio: {error}"))?;
+        if !file_type.is_dir() || file_type.is_symlink() {
+            continue;
+        }
+        let canonical_job_dir = match fs::canonicalize(&path) {
+            Ok(path) if path.parent() == Some(canonical_root.as_path()) => path,
+            _ => continue,
+        };
+        if !fs::symlink_metadata(canonical_job_dir.join(".in-progress"))
+            .is_ok_and(|metadata| metadata.is_file())
+        {
+            continue;
+        }
+        let Some(cache) =
+            read_audio_cache_metadata(&canonical_job_dir.join(AUDIO_CACHE_METADATA_FILE))
+        else {
+            continue;
+        };
+        if cache.version != AUDIO_CACHE_METADATA_VERSION
+            || validate_media_url(&cache.url).ok().as_deref() != Some(request.url.as_str())
+            || !cache.duration.is_finite()
+            || cache.duration <= 0.0
+            || cache.duration > MAX_MEDIA_DURATION_SECONDS
+            || (cache.duration - request.duration).abs() > 1.0
+        {
+            continue;
+        }
+        let audio = canonical_job_dir.join("audio.wav");
+        let Ok(audio_metadata) = fs::metadata(&audio) else {
+            continue;
+        };
+        if !is_regular_file(&audio)
+            || audio_metadata.len() <= 44
+            || audio_metadata.len() > pcm_wav_bytes(request.duration).saturating_add(4096)
+        {
+            continue;
+        }
+        let modified = fs::metadata(&canonical_job_dir)
+            .and_then(|metadata| metadata.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        candidates.push((modified, canonical_job_dir));
+    }
+    candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.0));
+    Ok(candidates.into_iter().next().map(|(_, path)| path))
+}
+
 const MAX_CAPTURED_STDERR_BYTES: usize = 64 * 1024;
-pub(crate) const MAX_MEDIA_DURATION_SECONDS: f64 = 2.0 * 60.0 * 60.0;
+pub(crate) const MAX_MEDIA_DURATION_SECONDS: f64 = 8.0 * 60.0 * 60.0;
 const MAX_MEDIA_DOWNLOAD_BYTES: &str = "4G";
 const MAX_MEDIA_DOWNLOAD_BYTES_VALUE: u64 = 4 * 1024 * 1024 * 1024;
+const AUDIO_CACHE_METADATA_FILE: &str = ".audio-cache.json";
+const AUDIO_CACHE_METADATA_VERSION: u8 = 1;
+const MAX_AUDIO_CACHE_METADATA_BYTES: u64 = 64 * 1024;
 const DISK_SAFETY_BUFFER_BYTES: u64 = 512 * 1024 * 1024;
 const DISK_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 const PROCESS_INACTIVITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
@@ -288,6 +400,22 @@ fn join_stderr(handle: JoinHandle<Result<String, String>>) -> Result<String, Str
 
 fn pcm_wav_bytes(duration: f64) -> u64 {
     duration.max(0.0).ceil() as u64 * 16_000 * 2 + 44
+}
+
+fn validate_audio_wav(path: &Path, duration: f64) -> Result<u64, String> {
+    if !is_regular_file(path) {
+        return Err("Audio hasil konversi tidak ditemukan.".into());
+    }
+    let size = fs::metadata(path)
+        .map_err(|error| format!("Gagal membaca ukuran WAV hasil konversi: {error}"))?
+        .len();
+    if size <= 44 {
+        return Err("Audio hasil konversi kosong atau tidak lengkap.".into());
+    }
+    if size > pcm_wav_bytes(duration).saturating_add(4096) {
+        return Err("WAV hasil konversi melebihi batas durasi media yang diizinkan.".into());
+    }
+    Ok(size)
 }
 
 fn media_disk_reservation(duration: f64) -> u64 {
@@ -1672,14 +1800,26 @@ pub fn pipeline(
         .saturating_add(model_bytes)
         .saturating_add(512 * 1024 * 1024);
     crate::resources::require_memory(inference_required, "transkripsi")?;
-    crate::resources::require_disk(
-        &jobs_dir,
-        media_disk_reservation(request.duration),
-        "download dan konversi media",
-    )?;
+    let reusable_job_dir = if request.keep_audio {
+        find_reusable_audio_job(&jobs_dir, &request)?
+    } else {
+        None
+    };
+    let disk_reservation = if reusable_job_dir.is_some() {
+        DISK_SAFETY_BUFFER_BYTES
+    } else {
+        media_disk_reservation(request.duration)
+    };
+    crate::resources::require_disk(&jobs_dir, disk_reservation, "transkripsi")?;
     ensure_job_storage_quota(&app)?;
-    let job_dir = jobs_dir.join(Uuid::new_v4().to_string());
-    let job_guard = JobDirectoryGuard::create(job_dir.clone())?;
+    let (job_dir, mut job_guard, reusing_audio) = match reusable_job_dir {
+        Some(path) => (path.clone(), JobDirectoryGuard::resume(path)?, true),
+        None => {
+            let path = jobs_dir.join(Uuid::new_v4().to_string());
+            let guard = JobDirectoryGuard::create(path.clone())?;
+            (path, guard, false)
+        }
+    };
     let usage_monitor = UsageMonitor::start();
     let context = JobContext {
         app: &app,
@@ -1689,44 +1829,58 @@ pub fn pipeline(
         capability_probe: &capability_probe,
     };
 
-    context.emit(ProgressUpdate {
-        stage: "downloading",
-        message_code: "preparing_download",
-        percent: 0.0,
-        message: "Menyiapkan download…".into(),
-        backend: None,
-        downloaded_bytes: None,
-        total_bytes: None,
-        network_bytes_per_second: None,
-    });
-    let source = run_download(&context, &request, &job_dir)?;
-    if context.is_cancelled() {
-        return Err("Job dibatalkan.".into());
-    }
-
     let wav = job_dir.join("audio.wav");
-    context.emit(ProgressUpdate {
-        stage: "converting",
-        message_code: "normalizing_audio",
-        percent: 0.0,
-        message: "Menormalisasi audio untuk Whisper…".into(),
-        backend: None,
-        downloaded_bytes: None,
-        total_bytes: None,
-        network_bytes_per_second: None,
-    });
-    run_ffmpeg(&context, &source, &wav, request.duration)?;
-    ensure_job_storage_quota(&app)?;
-    remove_file_if_present(&source, "audio sumber")?;
-    if context.is_cancelled() {
-        return Err("Job dibatalkan.".into());
-    }
-    let actual_wav_bytes = fs::metadata(&wav)
-        .map_err(|e| format!("Gagal membaca ukuran WAV hasil konversi: {e}"))?
-        .len();
-    if actual_wav_bytes > pcm_wav_bytes(request.duration).saturating_add(4096) {
-        return Err("WAV hasil konversi melebihi batas durasi media yang diizinkan.".into());
-    }
+    let actual_wav_bytes = if reusing_audio {
+        context.emit(ProgressUpdate {
+            stage: "converting",
+            message_code: "reusing_audio",
+            percent: 100.0,
+            message: "Memakai audio tersimpan; download dan konversi dilewati.".into(),
+            backend: None,
+            downloaded_bytes: None,
+            total_bytes: None,
+            network_bytes_per_second: None,
+        });
+        validate_audio_wav(&wav, request.duration)?
+    } else {
+        context.emit(ProgressUpdate {
+            stage: "downloading",
+            message_code: "preparing_download",
+            percent: 0.0,
+            message: "Menyiapkan download…".into(),
+            backend: None,
+            downloaded_bytes: None,
+            total_bytes: None,
+            network_bytes_per_second: None,
+        });
+        let source = run_download(&context, &request, &job_dir)?;
+        if context.is_cancelled() {
+            return Err("Job dibatalkan.".into());
+        }
+
+        context.emit(ProgressUpdate {
+            stage: "converting",
+            message_code: "normalizing_audio",
+            percent: 0.0,
+            message: "Menormalisasi audio untuk Whisper…".into(),
+            backend: None,
+            downloaded_bytes: None,
+            total_bytes: None,
+            network_bytes_per_second: None,
+        });
+        run_ffmpeg(&context, &source, &wav, request.duration)?;
+        ensure_job_storage_quota(&app)?;
+        let actual_wav_bytes = validate_audio_wav(&wav, request.duration)?;
+        remove_file_if_present(&source, "audio sumber")?;
+        if context.is_cancelled() {
+            return Err("Job dibatalkan.".into());
+        }
+        if request.keep_audio {
+            write_audio_cache_metadata(&job_dir, &request)?;
+            job_guard.preserve_on_failure();
+        }
+        actual_wav_bytes
+    };
     let actual_inference_required = actual_wav_bytes
         .saturating_mul(2)
         .saturating_add(model_bytes)
@@ -1839,12 +1993,12 @@ pub fn pipeline(
 #[cfg(test)]
 mod tests {
     use super::{
-        capture_stderr, ffmpeg_target_duration, normalize_utf8_bytes, parse_whisper_result,
-        read_bounded_line, remaining_disk_reservation, run_cached_probe,
+        capture_stderr, ffmpeg_target_duration, find_reusable_audio_job, normalize_utf8_bytes,
+        parse_whisper_result, read_bounded_line, remaining_disk_reservation, run_cached_probe,
         run_cuda_probe_with_vram_guard, validate_transcript_request, vulkan_device_indices,
-        whisper_inactivity_timeout, whisper_thread_count, ComputeDeviceInfo, JobDirectoryGuard,
-        CPU_INACTIVITY_TIMEOUT, DISK_SAFETY_BUFFER_BYTES, MAX_CAPTURED_STDERR_BYTES,
-        PROCESS_INACTIVITY_TIMEOUT,
+        whisper_inactivity_timeout, whisper_thread_count, write_audio_cache_metadata,
+        ComputeDeviceInfo, JobDirectoryGuard, CPU_INACTIVITY_TIMEOUT, DISK_SAFETY_BUFFER_BYTES,
+        MAX_CAPTURED_STDERR_BYTES, PROCESS_INACTIVITY_TIMEOUT,
     };
     use crate::types::TranscriptRequest;
     use std::{
@@ -1891,6 +2045,71 @@ mod tests {
             drop(guard);
         }
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn job_directory_with_saved_audio_is_preserved_for_retry() {
+        let path =
+            std::env::temp_dir().join(format!("whispertube-job-cache-test-{}", Uuid::new_v4()));
+        {
+            let mut guard = JobDirectoryGuard::create(path.clone()).unwrap();
+            fs::write(path.join("audio.wav"), b"cached audio").unwrap();
+            guard.preserve_on_failure();
+        }
+        assert!(path.exists());
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn finds_matching_saved_audio_job_without_reusing_another_video() {
+        let root =
+            std::env::temp_dir().join(format!("whispertube-audio-cache-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let job = root.join("saved-job");
+        {
+            let mut guard = JobDirectoryGuard::create(job.clone()).unwrap();
+            fs::write(job.join("audio.wav"), vec![0u8; 100]).unwrap();
+            let request = TranscriptRequest {
+                url: "https://www.youtube.com/watch?v=cache-test".into(),
+                title: "Cached video".into(),
+                channel: "Test channel".into(),
+                duration: 60.0,
+                cookies_path: None,
+                backend: "cpu".into(),
+                compute_device_id: None,
+                language: "auto".into(),
+                model_id: "base".into(),
+                keep_audio: true,
+            };
+            write_audio_cache_metadata(&job, &request).unwrap();
+            guard.preserve_on_failure();
+        }
+        let matching_request = TranscriptRequest {
+            url: "https://www.youtube.com/watch?v=cache-test".into(),
+            title: "Cached video".into(),
+            channel: "Test channel".into(),
+            duration: 60.0,
+            cookies_path: None,
+            backend: "cpu".into(),
+            compute_device_id: None,
+            language: "auto".into(),
+            model_id: "base".into(),
+            keep_audio: true,
+        };
+        let other_request = TranscriptRequest {
+            url: "https://www.youtube.com/watch?v=other-video".into(),
+            ..matching_request.clone()
+        };
+
+        assert_eq!(
+            find_reusable_audio_job(&root, &matching_request).unwrap(),
+            Some(fs::canonicalize(&job).unwrap())
+        );
+        assert_eq!(
+            find_reusable_audio_job(&root, &other_request).unwrap(),
+            None
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

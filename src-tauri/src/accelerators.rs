@@ -17,7 +17,7 @@ use tokio::io::AsyncWriteExt;
 
 use crate::{
     network,
-    paths::{engine_path, is_regular_file, model_path, user_runtime_dir},
+    paths::{engine_available, engine_path, is_regular_file, model_path, user_runtime_dir},
     process,
     types::{AcceleratorDownloadPayload, AcceleratorInfo},
 };
@@ -117,9 +117,7 @@ pub fn catalog(app: &AppHandle, gpu_detected: bool) -> Result<Vec<AcceleratorInf
             label: spec.label.into(),
             backend: spec.backend.into(),
             supported: true,
-            installed: engine_path(app, spec.backend)
-                .map(|path| crate::paths::is_regular_file(&path))
-                .unwrap_or(false),
+            installed: engine_available(app, spec.backend).unwrap_or(false),
             downloadable: spec.trusted_sha256.is_some(),
             description: spec.description.into(),
         })

@@ -106,6 +106,7 @@ export function useWhisperTube() {
   const [keepAudio, setKeepAudio] = useState(false);
   const [metadata, setMetadata] = useState<VideoMetadata | null>(null);
   const [system, setSystem] = useState<SystemStatus | null>(null);
+  const [systemChecked, setSystemChecked] = useState(false);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [historyTotalCount, setHistoryTotalCount] = useState(0);
@@ -170,6 +171,7 @@ export function useWhisperTube() {
       if (systemResult.status === "fulfilled") {
         const nextSystem = systemResult.value;
         setSystem(nextSystem);
+        setSystemChecked(true);
         if (!autoConfigured.current) {
           setModelId(nextSystem.recommendedModelId);
           setBackend(nextSystem.recommendedBackend);
@@ -177,6 +179,7 @@ export function useWhisperTube() {
           autoConfigured.current = true;
         }
       }
+      if (systemResult.status === "rejected") setSystemChecked(true);
       if (modelsResult.status === "fulfilled") setModels(modelsResult.value);
       if (historyResult.status === "fulfilled") {
         setHistory(historyResult.value.items);
@@ -777,6 +780,7 @@ export function useWhisperTube() {
     setKeepAudio,
     metadata,
     system,
+    systemLoading: !systemChecked,
     models,
     history,
     historyTotalCount,

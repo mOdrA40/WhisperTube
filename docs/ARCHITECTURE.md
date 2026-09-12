@@ -82,11 +82,12 @@ to signed 16-bit PCM WAV, mono, 16 kHz, and passes the WAV to the selected
 whisper.cpp engine. Results contain timestamped segments and are written as
 JSON, TXT, SRT, VTT, and a SQLite history row.
 
-The current full-buffer path accepts on-demand media with a known duration of
-at most two hours and a source download limit of 4 GiB. Chunked transcription
-is not implemented. The converted WAV size is checked again before inference,
-and transcript text, segment count, serialized result size, and output files
-have hard limits.
+The current full-buffer path accepts on-demand media and completed live replays
+with a known duration of at most eight hours and a source download limit of
+4 GiB. Active and upcoming live streams remain unsupported. Chunked
+transcription is not implemented. The converted WAV size is checked again
+before inference, and transcript text, segment count, serialized result size,
+and output files have hard limits.
 
 ## Operation coordination
 
@@ -139,13 +140,16 @@ Tauri application-local-data directory:
     runtime/
     whispertube.db
 
-audio.wav is retained only when Keep processed audio is enabled. Source audio
-and converted WAV files are removed after processing by default.
+audio.wav is retained when Keep audio for retry is enabled. Source audio and
+converted WAV files are removed after processing by default. If a job reaches
+the audio-ready stage and transcription fails, the saved WAV can be reused for
+a retry; orphaned failed jobs remain eligible for the existing 24-hour cleanup.
 
 Each job receives an .in-progress marker. A failed or cancelled pipeline
-cleans up its job directory. At startup, orphaned or staging directories older
-than the 24-hour grace period are removed unless a valid result file still
-belongs to a history row.
+cleans up its job directory unless Keep audio for retry was enabled after a
+valid WAV was created. At startup, orphaned or staging directories older than
+the 24-hour grace period are removed unless a valid result file still belongs
+to a history row.
 
 History creation writes result.json atomically and commits the SQLite row only
 after the result file is ready. History deletion first renames job directories

@@ -14,7 +14,7 @@ Dokumentasi utama: [README.md](README.md) (English). Dokumentasi Mandarin: [READ
 
 Platform yang dicakup antara lain YouTube, TikTok, X/Twitter, Facebook, Instagram, Reddit, Twitch, Vimeo, Dailymotion, Pinterest, LinkedIn, Tumblr, Bilibili, dan VK. Dukungan mengikuti extractor yt-dlp yang terpasang dan dapat berubah saat platform memperbarui sistemnya.
 
-Untuk menjaga pemakaian disk dan memori tetap terprediksi, transkripsi dibatasi pada media non-live yang memiliki durasi pasti maksimal 2 jam. Jalur whisper.cpp saat ini memproses satu buffer PCM penuh; transkripsi berbasis chunk belum diimplementasikan. Live stream dan siaran mendatang ditolak sebelum download.
+Untuk menjaga pemakaian disk dan memori tetap terprediksi, transkripsi dibatasi pada media non-live dan replay live yang sudah selesai dengan durasi pasti maksimal 8 jam. Jalur whisper.cpp saat ini memproses satu buffer PCM penuh; transkripsi berbasis chunk belum diimplementasikan. Live stream aktif dan siaran mendatang ditolak sebelum download.
 
 ## Fitur
 
@@ -28,7 +28,7 @@ Untuk menjaga pemakaian disk dan memori tetap terprediksi, transkripsi dibatasi 
 - Progress model dan download video menampilkan byte yang sudah dipindahkan; download model dapat dibatalkan.
 - Saat transkripsi, penggunaan CPU/GPU ditampilkan jika tersedia di platform, dan speed jaringan tampil saat download.
 - Workspace dapat dibersihkan dari URL, preview, dan transkrip; history bisa dihapus permanen satuan, beberapa, atau semua item yang tampil.
-- Audio sementara dihapus setelah proses kecuali opsi `Simpan audio hasil proses` dinyalakan.
+- Audio sementara dihapus setelah proses kecuali opsi `Simpan audio untuk retry` dinyalakan. Jika transkripsi gagal, WAV yang tersimpan dapat dipakai ulang tanpa mengunduh sumber lagi.
 
 ## Setup Windows
 

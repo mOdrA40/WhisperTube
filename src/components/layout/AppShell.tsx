@@ -16,6 +16,7 @@ type AppShellProps = {
   tab: AppTab;
   historyCount: number;
   runtimeReady: boolean;
+  systemLoading: boolean;
   system: SystemStatus | null;
   onTabChange: (tab: AppTab) => void;
   children: ReactNode;
@@ -25,6 +26,7 @@ export function AppShell({
   tab,
   historyCount,
   runtimeReady,
+  systemLoading,
   system,
   onTabChange,
   children,
@@ -85,7 +87,7 @@ export function AppShell({
             <div className="runtime-header">
               <span className={`status-dot ${runtimeReady ? "dot-online" : "dot-warning"}`} />
               <span className="runtime-label">
-                {runtimeReady ? t("status.ready") : t("status.setupNeeded")}
+                {systemLoading ? t("status.checking") : runtimeReady ? t("status.ready") : t("status.setupNeeded")}
               </span>
             </div>
 

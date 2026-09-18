@@ -28,6 +28,12 @@ const CUDA_ENGINE_VERSION: &str = "v1.9.2";
 const CUDA_ENGINE_BUILD: &str = "12.4.0";
 const CUDA_ENGINE_SHA256: &str = "443110ddaad70d4290ab2e77179e31cf712035bbc4fad56bb4519a90c917b39c";
 const MAX_CUDA_ARCHIVE_BYTES: u64 = 1024 * 1024 * 1024;
+// Keep connection establishment bounded, but allow GitHub/CDN responses and
+// slow links more time before declaring the large CUDA archive stalled.
+const CUDA_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const CUDA_RESPONSE_TIMEOUT: Duration = Duration::from_secs(120);
+const CUDA_CHUNK_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(120);
+const CUDA_DOWNLOAD_ATTEMPTS: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ModelFingerprint {
@@ -524,84 +530,192 @@ async fn download_cuda_package(
     emit_cuda_progress(app, 0.0, 0, 0, None);
     let client = AsyncClient::builder()
         .user_agent("WhisperTube/0.1")
-        .connect_timeout(Duration::from_secs(30))
+        .connect_timeout(CUDA_CONNECT_TIMEOUT)
         .build()
         .map_err(|e| format!("Gagal membuat HTTP client CUDA: {e}"))?;
-    let mut response = network::send_cancelable(
-        client.get(cuda_engine_url()),
-        cancelled,
-        Duration::from_secs(30),
-        "CUDA",
-    )
-    .await?;
-    if !response.status().is_success() {
-        return Err(format!(
-            "Server CUDA mengembalikan HTTP {}",
-            response.status()
-        ));
+    let mut downloaded = tokio::fs::metadata(zip_path)
+        .await
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    let mut total = None;
+    let mut last_error = None;
+
+    for attempt in 0..CUDA_DOWNLOAD_ATTEMPTS {
+        if cancelled.load(Ordering::SeqCst) {
+            return Err("Download CUDA dibatalkan.".into());
+        }
+        let resume_from = downloaded;
+        let mut request = client.get(cuda_engine_url());
+        if resume_from > 0 {
+            request = request.header("Range", format!("bytes={resume_from}-"));
+        }
+        let mut response =
+            match network::send_cancelable(request, cancelled, CUDA_RESPONSE_TIMEOUT, "CUDA").await
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    if cancelled.load(Ordering::SeqCst) {
+                        return Err("Download CUDA dibatalkan.".into());
+                    }
+                    last_error = Some(error);
+                    if attempt + 1 < CUDA_DOWNLOAD_ATTEMPTS {
+                        tokio::time::sleep(Duration::from_secs(2 * (attempt as u64 + 1))).await;
+                        continue;
+                    }
+                    break;
+                }
+            };
+
+        let status = response.status();
+        if status.as_u16() == 416 && resume_from > 0 {
+            tokio::fs::remove_file(zip_path).await.ok();
+            downloaded = 0;
+            total = None;
+            continue;
+        }
+        if !status.is_success() {
+            let error = format!("Server CUDA mengembalikan HTTP {status}");
+            if matches!(status.as_u16(), 408 | 429) || status.is_server_error() {
+                last_error = Some(error.clone());
+                if attempt + 1 < CUDA_DOWNLOAD_ATTEMPTS {
+                    tokio::time::sleep(Duration::from_secs(2 * (attempt as u64 + 1))).await;
+                    continue;
+                }
+            }
+            return Err(error);
+        }
+
+        let response_total = if status.as_u16() == 206 {
+            let content_range = response
+                .headers()
+                .get("content-range")
+                .and_then(|value| value.to_str().ok())
+                .ok_or_else(|| {
+                    "Server CUDA tidak mengirim Content-Range untuk resume.".to_string()
+                })?;
+            let (range, total_text) = content_range
+                .strip_prefix("bytes ")
+                .and_then(|value| value.split_once('/'))
+                .ok_or_else(|| "Content-Range CUDA tidak valid.".to_string())?;
+            let (range_start, _) = range
+                .split_once('-')
+                .and_then(|(start, end)| {
+                    Some((start.parse::<u64>().ok()?, end.parse::<u64>().ok()?))
+                })
+                .ok_or_else(|| "Content-Range CUDA tidak valid.".to_string())?;
+            if range_start != resume_from {
+                return Err(
+                    "Server CUDA melanjutkan download dari offset yang tidak sesuai.".into(),
+                );
+            }
+            total_text.parse::<u64>().ok()
+        } else {
+            if resume_from > 0 {
+                // The server ignored Range. Restart safely instead of appending
+                // a complete response to a partial archive.
+                tokio::fs::File::create(zip_path)
+                    .await
+                    .map_err(|e| format!("Gagal mengulang file download CUDA: {e}"))?;
+                downloaded = 0;
+            }
+            response.content_length()
+        };
+        if response_total.is_some() {
+            total = response_total;
+        }
+        if total.is_some_and(|size| size > MAX_CUDA_ARCHIVE_BYTES) {
+            return Err("Ukuran CUDA package dari server melebihi batas aman.".into());
+        }
+        let total_bytes = total.unwrap_or(MAX_CUDA_ARCHIVE_BYTES);
+        let remaining_download_bytes = total_bytes.saturating_sub(downloaded);
+        crate::resources::require_disk_allocations(
+            &[
+                (
+                    zip_path,
+                    remaining_download_bytes.saturating_add(crate::archive::MAX_EXTRACTED_BYTES),
+                ),
+                (staging_path, crate::archive::MAX_EXTRACTED_BYTES),
+            ],
+            "download dan ekstraksi CUDA runtime",
+        )?;
+        let mut file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(zip_path)
+            .await
+            .map_err(|e| format!("Gagal membuka file download CUDA: {e}"))?;
+        let download_started_at = Instant::now();
+        emit_cuda_progress(
+            app,
+            downloaded as f64 / total_bytes as f64 * 85.0,
+            downloaded,
+            total.unwrap_or(0),
+            None,
+        );
+        let mut stream_error = None;
+        let attempt_start_downloaded = downloaded;
+        loop {
+            if cancelled.load(Ordering::SeqCst) {
+                return Err("Download CUDA dibatalkan.".into());
+            }
+            let chunk = match network::next_chunk_cancelable(
+                &mut response,
+                cancelled,
+                CUDA_CHUNK_INACTIVITY_TIMEOUT,
+                "CUDA",
+            )
+            .await
+            {
+                Ok(chunk) => chunk,
+                Err(error) => {
+                    stream_error = Some(error);
+                    break;
+                }
+            };
+            let Some(chunk) = chunk else {
+                break;
+            };
+            if downloaded.saturating_add(chunk.len() as u64) > MAX_CUDA_ARCHIVE_BYTES {
+                return Err("Download CUDA melebihi batas ukuran aman.".into());
+            }
+            file.write_all(&chunk)
+                .await
+                .map_err(|e| format!("Gagal menyimpan CUDA package: {e}"))?;
+            downloaded += chunk.len() as u64;
+            let elapsed = download_started_at.elapsed().as_secs_f64();
+            let attempt_downloaded = downloaded.saturating_sub(attempt_start_downloaded);
+            let bytes_per_second =
+                (elapsed > 0.0).then(|| (attempt_downloaded as f64 / elapsed) as u64);
+            let percent = total.map_or(0.0, |size| downloaded as f64 / size as f64 * 85.0);
+            emit_cuda_progress(
+                app,
+                percent,
+                downloaded,
+                total.unwrap_or(0),
+                bytes_per_second,
+            );
+        }
+        file.flush()
+            .await
+            .map_err(|e| format!("Gagal menyelesaikan file CUDA: {e}"))?;
+        if stream_error.is_none() && total.is_none_or(|size| downloaded == size) {
+            return Ok(());
+        }
+        last_error = stream_error.or_else(|| {
+            Some(format!(
+                "Download CUDA berhenti sebelum selesai ({downloaded}/{} byte).",
+                total.unwrap_or(0)
+            ))
+        });
+        if attempt + 1 < CUDA_DOWNLOAD_ATTEMPTS {
+            tokio::time::sleep(Duration::from_secs(2 * (attempt as u64 + 1))).await;
+        }
     }
 
-    let total = response.content_length().unwrap_or(0);
-    if total > MAX_CUDA_ARCHIVE_BYTES {
-        return Err("Ukuran CUDA package dari server melebihi batas aman.".into());
-    }
-    let archive_bytes = if total == 0 {
-        MAX_CUDA_ARCHIVE_BYTES
-    } else {
-        total
-    };
-    crate::resources::require_disk_allocations(
-        &[
-            (
-                zip_path,
-                archive_bytes.saturating_add(crate::archive::MAX_EXTRACTED_BYTES),
-            ),
-            (staging_path, crate::archive::MAX_EXTRACTED_BYTES),
-        ],
-        "download dan ekstraksi CUDA runtime",
-    )?;
-    let mut file = tokio::fs::File::create(zip_path)
-        .await
-        .map_err(|e| format!("Gagal membuat file download CUDA: {e}"))?;
-    let mut downloaded = 0u64;
-    let download_started_at = Instant::now();
-    loop {
-        if cancelled.load(Ordering::SeqCst) {
-            return Err("Download CUDA dibatalkan.".into());
-        }
-        let chunk = network::next_chunk_cancelable(
-            &mut response,
-            cancelled,
-            Duration::from_secs(30),
-            "CUDA",
-        )
-        .await?;
-        let Some(chunk) = chunk else {
-            break;
-        };
-        if downloaded.saturating_add(chunk.len() as u64) > MAX_CUDA_ARCHIVE_BYTES {
-            return Err("Download CUDA melebihi batas ukuran aman.".into());
-        }
-        if cancelled.load(Ordering::SeqCst) {
-            return Err("Download CUDA dibatalkan.".into());
-        }
-        file.write_all(&chunk)
-            .await
-            .map_err(|e| format!("Gagal menyimpan CUDA package: {e}"))?;
-        downloaded += chunk.len() as u64;
-        let elapsed = download_started_at.elapsed().as_secs_f64();
-        let bytes_per_second = (elapsed > 0.0).then(|| (downloaded as f64 / elapsed) as u64);
-        let percent = if total > 0 {
-            downloaded as f64 / total as f64 * 85.0
-        } else {
-            0.0
-        };
-        emit_cuda_progress(app, percent, downloaded, total, bytes_per_second);
-    }
-    file.flush()
-        .await
-        .map_err(|e| format!("Gagal menyelesaikan file CUDA: {e}"))?;
-    Ok(())
+    Err(format!(
+        "Download CUDA gagal setelah {CUDA_DOWNLOAD_ATTEMPTS} percobaan. {}",
+        last_error.unwrap_or_else(|| "Tidak ada detail tambahan dari server.".into())
+    ))
 }
 
 fn finalize_cuda_engine_blocking(

@@ -24,6 +24,7 @@ use crate::{
 const USAGE_SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
 const MIN_AVAILABLE_MEMORY_AFTER_START_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_SYSTEM_PROBE_STDOUT_BYTES: usize = 1024 * 1024;
+pub const MIN_CUDA_DRIVER_VERSION: &str = "528.33";
 
 static NVIDIA_SMI_PROGRAM: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 static NVIDIA_SELECTED_DEVICE: OnceLock<Mutex<Option<usize>>> = OnceLock::new();
@@ -253,6 +254,60 @@ pub fn detect_nvidia_devices() -> Vec<GpuInfo> {
             Vec::new()
         }
     }
+}
+
+pub fn detect_nvidia_driver_version() -> Option<String> {
+    let program = nvidia_smi_program()?;
+    let mut command = Command::new(program);
+    crate::process::hide_console(&mut command);
+    command.args([
+        "--query-gpu=driver_version",
+        "--format=csv,noheader,nounits",
+    ]);
+    let output = command_output_with_timeout(command, Duration::from_secs(2))?;
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .find(|value| parse_driver_version(value).is_some())
+        .map(str::to_string)
+}
+
+fn parse_driver_version(value: &str) -> Option<(u32, u32, u32)> {
+    let mut parts = value.trim().split('.');
+    Some((
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+        parts.next().unwrap_or("0").parse().ok()?,
+    ))
+}
+
+pub fn cuda_driver_is_compatible(version: &str) -> bool {
+    let Some(actual) = parse_driver_version(version) else {
+        return false;
+    };
+    let required = parse_driver_version(MIN_CUDA_DRIVER_VERSION).expect("minimum driver is valid");
+    actual >= required
+}
+
+pub fn ensure_cuda_install_supported() -> Result<(), String> {
+    if !cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        return Err("Download CUDA otomatis saat ini hanya didukung di Windows x64.".into());
+    }
+    if detect_nvidia().is_none() {
+        return Err("NVIDIA GPU/driver tidak terdeteksi. CUDA engine tidak perlu dipasang.".into());
+    }
+    let Some(driver_version) = detect_nvidia_driver_version() else {
+        return Err(
+            "Versi driver NVIDIA tidak dapat diverifikasi. Update driver NVIDIA lalu coba lagi."
+                .into(),
+        );
+    };
+    if !cuda_driver_is_compatible(&driver_version) {
+        return Err(format!(
+            "Driver NVIDIA {driver_version} terlalu lama untuk CUDA 12.x. Minimal driver Windows yang didukung adalah {MIN_CUDA_DRIVER_VERSION}. Update driver sebelum mengunduh CUDA."
+        ));
+    }
+    Ok(())
 }
 
 fn select_nvidia_device(devices: &[GpuInfo]) -> Option<GpuInfo> {
@@ -763,9 +818,15 @@ pub fn system_status(app: &AppHandle) -> Result<SystemStatus, String> {
     let gpu = nvidia_gpu.clone().or_else(detect_generic_gpu);
     let nvidia = nvidia_gpu.is_some();
     let cuda_supported = cfg!(all(target_os = "windows", target_arch = "x86_64")) && nvidia;
+    let nvidia_driver_version = nvidia.then(detect_nvidia_driver_version).flatten();
+    let cuda_installable = cuda_supported
+        && nvidia_driver_version
+            .as_deref()
+            .is_some_and(cuda_driver_is_compatible);
     let gpu_name = gpu.as_ref().map(|info| info.name.clone());
     let gpu_memory_mb = gpu.as_ref().and_then(|info| info.total_memory_mb);
     let gpu_free_memory_mb = gpu.as_ref().and_then(|info| info.free_memory_mb);
+    let available_memory_mb = crate::resources::available_memory_mb();
     let available_vram_mb = gpu.as_ref().and_then(GpuInfo::available_memory_mb);
     let accelerators = accelerators::catalog(app, gpu.is_some())?;
     let job_storage_bytes = crate::history::job_storage_bytes(app)?;
@@ -773,7 +834,7 @@ pub fn system_status(app: &AppHandle) -> Result<SystemStatus, String> {
         .iter()
         .any(|accelerator| accelerator.backend == "vulkan" && accelerator.installed);
     let mut compute_devices = Vec::new();
-    if cuda_supported && cuda_engine {
+    if cuda_installable && cuda_engine {
         compute_devices.extend(nvidia_devices.iter().filter_map(|device| {
             let index = device.device_index?;
             Some(ComputeDeviceInfo {
@@ -799,7 +860,7 @@ pub fn system_status(app: &AppHandle) -> Result<SystemStatus, String> {
         .any(|device| device.backend == "vulkan" && !device.integrated);
     let recommended_id = models::recommended_model_id_for_system(
         available_vram_mb,
-        nvidia && cuda_supported && cuda_engine,
+        nvidia && cuda_installable && cuda_engine,
         has_discrete_vulkan,
         accelerators
             .iter()
@@ -808,7 +869,7 @@ pub fn system_status(app: &AppHandle) -> Result<SystemStatus, String> {
     );
 
     let (recommendation, recommended_model_id, recommended_backend) = if nvidia
-        && cuda_supported
+        && cuda_installable
         && cuda_engine
     {
         (
@@ -817,6 +878,16 @@ pub fn system_status(app: &AppHandle) -> Result<SystemStatus, String> {
                 gpu_name.clone().unwrap_or_else(|| "NVIDIA GPU".into()),
                 format_vram(gpu_free_memory_mb),
                 recommended_id,
+            ),
+            recommended_id,
+            "auto".to_string(),
+        )
+    } else if nvidia && cuda_supported && !cuda_installable {
+        (
+            format!(
+                "NVIDIA terdeteksi, tetapi driver {} tidak memenuhi syarat CUDA 12.x (minimal {}). Update driver sebelum memasang CUDA.",
+                nvidia_driver_version.as_deref().unwrap_or("tidak terbaca"),
+                MIN_CUDA_DRIVER_VERSION,
             ),
             recommended_id,
             "auto".to_string(),
@@ -869,6 +940,9 @@ pub fn system_status(app: &AppHandle) -> Result<SystemStatus, String> {
         gpu_name,
         gpu_memory_mb,
         gpu_free_memory_mb,
+        available_memory_mb,
+        nvidia_driver_version,
+        cuda_installable,
         cpu_threads,
         recommendation,
         recommended_model_id,
@@ -884,8 +958,9 @@ pub fn system_status(app: &AppHandle) -> Result<SystemStatus, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        capture_system_probe_stdout, memory_pressure_message, parse_nvidia_gpus,
-        parse_vulkan_devices, UsageMonitor, UsageSnapshot, MAX_SYSTEM_PROBE_STDOUT_BYTES,
+        capture_system_probe_stdout, cuda_driver_is_compatible, memory_pressure_message,
+        parse_nvidia_gpus, parse_vulkan_devices, UsageMonitor, UsageSnapshot,
+        MAX_SYSTEM_PROBE_STDOUT_BYTES,
     };
     use std::io::Cursor;
 
@@ -904,6 +979,14 @@ mod tests {
         let gpu = parse_nvidia_gpus(output).expect("GPU should be parsed");
         assert_eq!(gpu.name, "First GPU");
         assert_eq!(gpu.device_index, Some(0));
+    }
+
+    #[test]
+    fn enforces_cuda_driver_minimum() {
+        assert!(!cuda_driver_is_compatible("528.32"));
+        assert!(cuda_driver_is_compatible("528.33"));
+        assert!(cuda_driver_is_compatible("551.61"));
+        assert!(!cuda_driver_is_compatible("not-a-version"));
     }
 
     #[test]

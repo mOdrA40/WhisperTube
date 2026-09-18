@@ -59,6 +59,7 @@ export default function App() {
           metadata={app.metadata}
           hasResult={Boolean(app.result)}
           progress={app.progress}
+          transcriptionElapsedMs={app.transcriptionElapsedMs}
           selectedModel={app.selectedModel}
           backend={app.backend}
           system={app.system}

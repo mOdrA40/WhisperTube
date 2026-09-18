@@ -115,6 +115,9 @@ export function useWhisperTube() {
   const [result, setResult] = useState<TranscriptResult | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [progress, setProgress] = useState<ProgressPayload>(initialProgress);
+  const [transcriptionElapsedMs, setTranscriptionElapsedMs] = useState<number | null>(null);
+  const [transcriptionTimerActive, setTranscriptionTimerActive] = useState(false);
+  const transcriptionStartedAtRef = useRef<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [inspecting, setInspecting] = useState(false);
   const [cancellingInspection, setCancellingInspection] = useState(false);
@@ -140,6 +143,17 @@ export function useWhisperTube() {
   const autoConfigured = useRef(false);
   const refreshingSystemRef = useRef(false);
 
+  useEffect(() => {
+    if (!busy || !transcriptionTimerActive || transcriptionStartedAtRef.current === null) return;
+    const updateElapsed = () => {
+      const startedAt = transcriptionStartedAtRef.current;
+      if (startedAt !== null) setTranscriptionElapsedMs(performance.now() - startedAt);
+    };
+    updateElapsed();
+    const timer = window.setInterval(updateElapsed, 250);
+    return () => window.clearInterval(timer);
+  }, [busy, transcriptionTimerActive]);
+
   const selectedModel = models.find((model) => model.id === modelId);
   const runtimeReady = Boolean(
     system?.ytDlp &&
@@ -147,13 +161,13 @@ export function useWhisperTube() {
       (backend === "cpu"
         ? system.cpuEngine
         : backend === "cuda"
-          ? system.cudaSupported && system.nvidia && system.cudaEngine
+          ? system.cudaInstallable && system.nvidia && system.cudaEngine
           : backend === "metal"
             ? system.accelerators.some((accelerator) => accelerator.backend === "metal" && accelerator.installed)
             : backend === "vulkan"
               ? system.accelerators.some((accelerator) => accelerator.backend === "vulkan" && accelerator.installed)
               : system.cpuEngine ||
-                (system.cudaSupported && system.nvidia && system.cudaEngine) ||
+                (system.cudaInstallable && system.nvidia && system.cudaEngine) ||
                 system.accelerators.some((accelerator) => accelerator.installed)),
   );
 
@@ -246,6 +260,11 @@ export function useWhisperTube() {
       });
 
     const unlistenProgress = subscribeToProgress((payload) => {
+      if (payload.stage === "transcribing" && transcriptionStartedAtRef.current === null) {
+        transcriptionStartedAtRef.current = performance.now();
+        setTranscriptionElapsedMs(0);
+        setTranscriptionTimerActive(true);
+      }
       setProgress(payload);
       setNetworkSpeedBytesPerSecond(
         payload.stage === "downloading" ? payload.networkBytesPerSecond : null,
@@ -360,8 +379,15 @@ export function useWhisperTube() {
   );
   const vramWarning = useMemo(() => {
     if (!selectedModel || backend === "cpu" || backend === "metal" || backend === "vulkan" || !system) return null;
+    const cudaTarget = backend === "cuda" || (backend === "auto" && system.cudaInstallable && system.cudaEngine);
+    if (!cudaTarget) return null;
     if (backend === "cuda" && (!system.cudaSupported || !system.nvidia)) {
       return t("error.cudaUnavailable");
+    }
+    if (backend === "cuda" && !system.cudaInstallable) {
+      return t("settings.cudaDriverIncompatible", {
+        driver: system.nvidiaDriverVersion ?? t("hardware.notDetected"),
+      });
     }
     if (!system.nvidia || !system.cudaSupported) return null;
     if (!system.cudaEngine) return null;
@@ -369,7 +395,7 @@ export function useWhisperTube() {
       ? system.computeDevices.find((device) => device.id === computeTargetId)
       : null;
     const available = selectedCudaDevice?.freeMemoryMb ?? system.gpuFreeMemoryMb;
-    if ((backend === "cuda" || (backend === "auto" && system.cudaEngine)) && !available) {
+    if (!available) {
       return t("error.vramUnreadable");
     }
     if (available !== null && available !== undefined && available < selectedModel.vramRequiredMb) {
@@ -397,7 +423,7 @@ export function useWhisperTube() {
   const canStart = Boolean(!operationActive && metadata && selectedModel?.installed && runtimeReady && !vramWarning && !acceleratorWarning);
   const modelDownloadBlockReasons = useMemo<Record<string, string>>(() => {
     const reasons: Record<string, string> = {};
-    const cudaTarget = backend === "cuda" || (backend === "auto" && system?.cudaEngine);
+    const cudaTarget = backend === "cuda" || (backend === "auto" && system?.cudaInstallable && system.cudaEngine);
     if (!system || !cudaTarget) return reasons;
     const selectedCudaDevice = computeTargetId.startsWith("cuda:")
       ? system.computeDevices.find((device) => device.id === computeTargetId)
@@ -534,6 +560,12 @@ export function useWhisperTube() {
       setError(t("error.cudaUnavailable"));
       return;
     }
+    if (!system.cudaInstallable) {
+      setError(t("settings.cudaDriverIncompatible", {
+        driver: system.nvidiaDriverVersion ?? t("hardware.notDetected"),
+      }));
+      return;
+    }
     if (installingAccelerator !== null) {
       setError(t("error.installerBusy"));
       return;
@@ -576,6 +608,13 @@ export function useWhisperTube() {
     }
   }
 
+  function stopTranscriptionTimer() {
+    const startedAt = transcriptionStartedAtRef.current;
+    if (startedAt !== null) setTranscriptionElapsedMs(performance.now() - startedAt);
+    transcriptionStartedAtRef.current = null;
+    setTranscriptionTimerActive(false);
+  }
+
   async function handleStartTranscription() {
     if (operationActive) return;
     if (!metadata) {
@@ -600,6 +639,9 @@ export function useWhisperTube() {
     }
 
     setBusy(true);
+    transcriptionStartedAtRef.current = null;
+    setTranscriptionElapsedMs(null);
+    setTranscriptionTimerActive(false);
     setError(null);
     setResult(null);
     setNetworkSpeedBytesPerSecond(null);
@@ -628,6 +670,7 @@ export function useWhisperTube() {
         modelId,
         keepAudio,
       });
+      stopTranscriptionTimer();
       setResult(completedResult);
       setSearchQuery("");
       await refreshAfterSuccessfulOperation();
@@ -644,6 +687,7 @@ export function useWhisperTube() {
         );
       }
     } finally {
+      stopTranscriptionTimer();
       setBusy(false);
     }
   }
@@ -661,7 +705,9 @@ export function useWhisperTube() {
     setHistoryOperation("reading");
     setError(null);
     try {
-      setResult(await loadHistory(id));
+      const loadedResult = await loadHistory(id);
+      setResult(loadedResult);
+      setTranscriptionElapsedMs(null);
       setTab("transcribe");
       setSearchQuery("");
     } catch (cause) {
@@ -790,6 +836,7 @@ export function useWhisperTube() {
     searchQuery,
     setSearchQuery,
     progress,
+    transcriptionElapsedMs,
     busy,
     operationActive,
     resettingData,

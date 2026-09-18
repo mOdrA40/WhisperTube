@@ -1,6 +1,6 @@
-import { Activity, CircleStop, Gauge, LoaderCircle, Wifi } from "lucide-react";
+import { Activity, CircleStop, Gauge, LoaderCircle, Timer, Wifi } from "lucide-react";
 import { getProgressMessage, getProgressStageLabel, useI18n } from "../../i18n";
-import { formatBytes } from "../../lib/format";
+import { formatBytes, formatElapsedDuration } from "../../lib/format";
 import type { BackendChoice, ModelInfo, ProgressPayload } from "../../types";
 
 type ProgressCardProps = {
@@ -8,10 +8,11 @@ type ProgressCardProps = {
   selectedModel: ModelInfo | undefined;
   backend: BackendChoice;
   networkSpeedBytesPerSecond: number | null;
+  transcriptionElapsedMs: number | null;
   onCancel: () => void;
 };
 
-export function ProgressCard({ progress, selectedModel, backend, networkSpeedBytesPerSecond, onCancel }: ProgressCardProps) {
+export function ProgressCard({ progress, selectedModel, backend, networkSpeedBytesPerSecond, transcriptionElapsedMs, onCancel }: ProgressCardProps) {
   const { t } = useI18n();
   const percent = Math.max(0, Math.min(100, progress.percent));
   const actualBackend = progress.backend ?? (backend === "auto" ? null : backend);
@@ -53,6 +54,11 @@ export function ProgressCard({ progress, selectedModel, backend, networkSpeedByt
                 <strong>{formatBytes(networkSpeed)}/s</strong>
               </div>
             )}
+            <div className="progress-metric">
+              <Timer size={13} />
+              <span>{t("progress.elapsedTime")}</span>
+              <strong>{formatElapsedDuration(transcriptionElapsedMs)}</strong>
+            </div>
           </div>
         </div>
         <strong>{Math.round(progress.percent)}%</strong>

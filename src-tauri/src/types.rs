@@ -69,6 +69,11 @@ pub struct AcceleratorInfo {
     pub supported: bool,
     pub installed: bool,
     pub downloadable: bool,
+    pub memory_available_mb: Option<u64>,
+    pub memory_required_mb: Option<u64>,
+    pub memory_sufficient: bool,
+    pub preflight_checked: bool,
+    pub preflight_compatible: bool,
     pub description: String,
 }
 
@@ -97,6 +102,9 @@ pub struct SystemStatus {
     pub gpu_name: Option<String>,
     pub gpu_memory_mb: Option<u64>,
     pub gpu_free_memory_mb: Option<u64>,
+    pub available_memory_mb: u64,
+    pub nvidia_driver_version: Option<String>,
+    pub cuda_installable: bool,
     pub cpu_threads: usize,
     pub recommendation: String,
     pub recommended_model_id: String,

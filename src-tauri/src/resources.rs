@@ -7,6 +7,10 @@ pub fn available_memory_bytes() -> u64 {
     system.available_memory()
 }
 
+pub fn available_memory_mb() -> u64 {
+    available_memory_bytes() / 1024 / 1024
+}
+
 pub fn available_disk_bytes(path: &Path) -> Option<u64> {
     let disks = Disks::new_with_refreshed_list();
     disks

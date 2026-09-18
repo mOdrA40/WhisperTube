@@ -24,6 +24,7 @@ type TranscribePageProps = {
   metadata: VideoMetadata | null;
   hasResult: boolean;
   progress: ProgressPayload;
+  transcriptionElapsedMs: number | null;
   selectedModel: ModelInfo | undefined;
   canStart: boolean;
   modelDownloadBlocked: boolean;
@@ -80,6 +81,7 @@ export function TranscribePage({
   metadata,
   hasResult,
   progress,
+  transcriptionElapsedMs,
   selectedModel,
   canStart,
   modelDownloadBlocked,
@@ -142,10 +144,11 @@ export function TranscribePage({
           onClear={onClear}
           onOpenSettings={() => onTabChange("settings")}
         />
-        {busy && <ProgressCard progress={progress} selectedModel={selectedModel} backend={backend} networkSpeedBytesPerSecond={networkSpeedBytesPerSecond} onCancel={onCancelTranscription} />}
+        {busy && <ProgressCard progress={progress} selectedModel={selectedModel} backend={backend} networkSpeedBytesPerSecond={networkSpeedBytesPerSecond} transcriptionElapsedMs={transcriptionElapsedMs} onCancel={onCancelTranscription} />}
         {result && !busy && (
           <TranscriptCard
             result={result}
+            transcriptionElapsedMs={transcriptionElapsedMs}
             copied={copied}
             searchQuery={searchQuery}
             filteredSegments={filteredSegments}

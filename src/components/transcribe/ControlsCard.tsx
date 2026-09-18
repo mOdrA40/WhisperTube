@@ -118,12 +118,12 @@ export function ControlsCard({
       computeTargetOptions.push({ value: "metal", label: getAcceleratorCopy(accelerator, t).label });
     }
   }
-  if (system?.cudaEngine && system.cudaSupported && !computeTargetOptions.some((option) => option.value.startsWith("cuda:"))) {
+  if (system?.cudaEngine && system.cudaInstallable && !computeTargetOptions.some((option) => option.value.startsWith("cuda:"))) {
     computeTargetOptions.push({ value: "cuda", label: t("backend.cuda") });
   }
   const memoryRequirementKey: "controls.cudaRequirement" | "controls.memoryEstimate" =
     computeTargetId.startsWith("cuda") ||
-    (computeTargetId === "auto" && system?.cudaSupported && system.cudaEngine)
+    (computeTargetId === "auto" && system?.cudaInstallable && system.cudaEngine)
       ? "controls.cudaRequirement"
       : "controls.memoryEstimate";
   return (
@@ -203,11 +203,18 @@ export function ControlsCard({
             <Sparkles size={16} />
             <span>{t("controls.nvidiaHint")}</span>
           </div>
+          {!system.cudaInstallable && (
+            <small className="model-download-block-reason">
+              {t("settings.cudaDriverIncompatible", {
+                driver: system.nvidiaDriverVersion ?? t("hardware.notDetected"),
+              })}
+            </small>
+          )}
           <button
             type="button"
             className="download-button"
             onClick={onInstallCuda}
-            disabled={installingCuda || installingAccelerator !== null || modelDownloadActive || controlsDisabled}
+            disabled={!system.cudaInstallable || installingCuda || installingAccelerator !== null || modelDownloadActive || controlsDisabled}
           >
             {installingCuda ? <LoaderCircle className="spin" size={17} /> : <Download size={17} />}
             {installingCuda
@@ -229,7 +236,10 @@ export function ControlsCard({
 
       {accelerators
         .filter((accelerator) => accelerator.supported && accelerator.downloadable && !accelerator.installed)
-        .map((accelerator) => (
+        .map((accelerator) => {
+          const memoryBlocked = accelerator.backend === "vulkan" && !accelerator.memorySufficient;
+          const compatibilityUnknown = accelerator.backend === "vulkan" && !accelerator.preflightChecked;
+          return (
           <div key={accelerator.id}>
             <div className="info-box">
               <Download size={16} />
@@ -243,7 +253,7 @@ export function ControlsCard({
                   accelerator.backend as Exclude<BackendChoice, "auto" | "cpu" | "cuda">
                 )
               }
-              disabled={installingAccelerator !== null || installingCuda || modelDownloadActive || controlsDisabled}
+              disabled={memoryBlocked || installingAccelerator !== null || installingCuda || modelDownloadActive || controlsDisabled}
             >
               {installingAccelerator === accelerator.backend ? <LoaderCircle className="spin" size={17} /> : <Download size={17} />}
               {installingAccelerator === accelerator.backend
@@ -260,13 +270,27 @@ export function ControlsCard({
                     accelerator: getAcceleratorCopy(accelerator, t).label,
                   })}
             </button>
+            {memoryBlocked && (
+              <small className="model-download-block-reason">
+                {t("settings.acceleratorRamTooLow", {
+                  available: formatMemory(accelerator.memoryAvailableMb, t("hardware.notDetected")),
+                  required: formatMemory(accelerator.memoryRequiredMb, t("hardware.notDetected")),
+                })}
+              </small>
+            )}
+            {compatibilityUnknown && (
+              <small className="settings-note">
+                {t("settings.acceleratorCompatibilityUnknown")}
+              </small>
+            )}
             {installingAccelerator === accelerator.backend && (
               <button type="button" className="danger-ghost" onClick={onCancelAccelerator}>
                 <CircleStop size={16} /> {t("controls.cancelAccelerator")}
               </button>
             )}
           </div>
-        ))}
+          );
+        })}
 
       <div className="divider" />
 

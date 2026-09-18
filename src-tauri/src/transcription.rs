@@ -23,7 +23,10 @@ use crate::{
     paths::{engine_path, is_regular_file, jobs_dir, model_path, tool_path},
     process, resources,
     sources::{js_runtime_args, validate_media_duration, validate_media_url},
-    system::{detect_gpu, detect_nvidia, detect_nvidia_device, UsageMonitor},
+    system::{
+        cuda_driver_is_compatible, detect_gpu, detect_nvidia, detect_nvidia_device,
+        detect_nvidia_driver_version, ensure_cuda_install_supported, UsageMonitor,
+    },
     types::{
         ComputeDeviceInfo, ProgressPayload, Segment, TranscriptRequest, TranscriptResult,
         MAX_TRANSCRIPT_RESULT_BYTES, MAX_TRANSCRIPT_SEGMENTS, MAX_TRANSCRIPT_TEXT_BYTES,
@@ -1321,6 +1324,8 @@ fn choose_backend(
                 Err("CUDA hanya tersedia pada build Windows yang didukung.".into())
             } else if !nvidia {
                 Err("CUDA dipilih tetapi NVIDIA GPU/driver tidak terdeteksi.".into())
+            } else if let Err(error) = ensure_cuda_install_supported() {
+                Err(error)
             } else if !is_regular_file(&cuda) {
                 Err("CUDA engine belum terpasang. Install CUDA acceleration dari Settings terlebih dahulu.".into())
             } else {
@@ -1373,6 +1378,9 @@ fn choose_backend(
         "auto" => {
             if nvidia
                 && cfg!(all(target_os = "windows", target_arch = "x86_64"))
+                && detect_nvidia_driver_version()
+                    .as_deref()
+                    .is_some_and(cuda_driver_is_compatible)
                 && is_regular_file(&cuda)
             {
                 let device_index = nvidia_gpu.as_ref().and_then(|gpu| gpu.device_index);

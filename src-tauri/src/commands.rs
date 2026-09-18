@@ -46,14 +46,7 @@ pub async fn download_model(
 
 #[tauri::command]
 pub async fn install_cuda_engine(app: AppHandle, state: State<'_, AppState>) -> CommandResult<()> {
-    if !cfg!(all(target_os = "windows", target_arch = "x86_64")) {
-        return Err(
-            "CUDA engine otomatis saat ini hanya tersedia pada build Windows yang didukung.".into(),
-        );
-    }
-    if system::detect_nvidia().is_none() {
-        return Err("NVIDIA GPU/driver tidak terdeteksi. CUDA engine tidak perlu dipasang.".into());
-    }
+    system::ensure_cuda_install_supported()?;
     let _operation = OperationGuard::reserve_runtime_install(&state, "cuda".into())?;
     let result = models::install_cuda_engine(app, state.runtime_cancelled.clone()).await;
     Ok(result?)
@@ -65,6 +58,7 @@ pub async fn install_accelerator(
     state: State<'_, AppState>,
     backend: String,
 ) -> CommandResult<()> {
+    accelerators::ensure_install_memory(&backend)?;
     let _operation = OperationGuard::reserve_runtime_install(&state, backend.clone())?;
     let result = accelerators::install(app, backend, state.runtime_cancelled.clone()).await;
     Ok(result?)

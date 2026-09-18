@@ -224,6 +224,9 @@ CUDA model guardrails use free NVIDIA VRAM as a conservative preflight:
 approximately 2 GiB for Fast, 4 GiB for Balanced, and 7 GiB for Accurate.
 These thresholds are not a universal guarantee because other GPU processes
 can consume memory.
+CUDA installation additionally requires a detected Windows x64 NVIDIA GPU and
+an NVIDIA driver compatible with the packaged CUDA 12.x runtime; the current
+minimum driver gate is 528.33.
 
 GPU telemetry follows the resolved target where the platform exposes a reliable
 mapping. CUDA uses the selected NVIDIA device index. Linux reports Vulkan GPU
@@ -234,6 +237,12 @@ Vulkan devices therefore receive a conservative shared-system-memory guard,
 while discrete devices rely on capability probing plus the runtime memory
 monitor. The execution monitor also checks available system memory and
 child-process RSS during download, conversion, probing, and inference.
+The Vulkan installer also blocks before downloading when available host RAM is
+below 2.5 GiB, the minimum preflight budget for the Fast model plus headroom.
+Vulkan driver/device capability remains unknown before installation because
+the application uses the downloaded whisper.cpp engine to enumerate devices;
+the UI warns about this and the backend runs a real capability probe before
+manual Vulkan inference.
 
 Auto and explicit GPU selection run a bounded capability probe with the
 installed engine, model, and a generated one-second silent WAV. Only

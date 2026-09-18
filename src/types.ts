@@ -27,6 +27,11 @@ export type AcceleratorInfo = {
   supported: boolean;
   installed: boolean;
   downloadable: boolean;
+  memoryAvailableMb: number | null;
+  memoryRequiredMb: number | null;
+  memorySufficient: boolean;
+  preflightChecked: boolean;
+  preflightCompatible: boolean;
   description: string;
 };
 
@@ -40,6 +45,9 @@ export type SystemStatus = {
   gpuName: string | null;
   gpuMemoryMb: number | null;
   gpuFreeMemoryMb: number | null;
+  availableMemoryMb: number;
+  nvidiaDriverVersion: string | null;
+  cudaInstallable: boolean;
   cpuThreads: number;
   recommendation: string;
   recommendedModelId: string;

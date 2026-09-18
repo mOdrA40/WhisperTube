@@ -44,6 +44,9 @@ const system: SystemStatus = {
   gpuName: null,
   gpuMemoryMb: null,
   gpuFreeMemoryMb: null,
+  availableMemoryMb: 8192,
+  nvidiaDriverVersion: null,
+  cudaInstallable: false,
   cpuThreads: 8,
   recommendation: "CPU",
   recommendedModelId: "base",
@@ -124,6 +127,52 @@ describe("useWhisperTube", () => {
     expect(result.current.result).toEqual(transcript);
     expect(result.current.error).toContain("operation succeeded");
     expect(result.current.error).toContain("History tidak tersedia");
+  });
+
+  it("does not block Auto on CUDA VRAM when CUDA is not installable", async () => {
+    const autoFallbackSystem: SystemStatus = {
+      ...system,
+      cudaEngine: true,
+      cudaSupported: true,
+      cudaInstallable: false,
+      nvidia: true,
+      gpuName: "NVIDIA GeForce RTX 2050",
+      gpuMemoryMb: 4096,
+      gpuFreeMemoryMb: 1024,
+      accelerators: [{
+        id: "vulkan",
+        label: "Vulkan",
+        backend: "vulkan",
+        supported: true,
+        installed: true,
+        downloadable: true,
+        memoryAvailableMb: 8192,
+        memoryRequiredMb: 2560,
+        memorySufficient: true,
+        preflightChecked: false,
+        preflightCompatible: true,
+        description: "GPU acceleration",
+      }],
+      computeDevices: [{
+        id: "vulkan:0",
+        backend: "vulkan",
+        name: "NVIDIA GeForce RTX 2050",
+        vendor: "nvidia",
+        deviceIndex: 0,
+        integrated: false,
+        totalMemoryMb: null,
+        freeMemoryMb: null,
+      }],
+    };
+    services.getSystemStatus.mockResolvedValueOnce(autoFallbackSystem);
+    services.listModels.mockResolvedValueOnce([{ ...models[0], vramRequiredMb: 2048 }]);
+
+    const { result } = renderHook(() => useWhisperTube(), { wrapper });
+    await waitFor(() => expect(result.current.system).toEqual(autoFallbackSystem));
+    act(() => result.current.setUrl(metadata.webpageUrl));
+    await act(async () => result.current.inspectVideo());
+
+    expect(result.current.canStart).toBe(true);
   });
 
   it("does not report a user-cancelled metadata inspection as an error", async () => {

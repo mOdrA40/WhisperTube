@@ -118,6 +118,21 @@ Install the optional engine from Settings, or run:
 Restart the application after installation. The downloaded archive is
 checksum-verified and self-tested before activation.
 
+The CUDA archive is large (roughly 670 MB for the pinned release). Connection
+establishment remains bounded at 30 seconds; after the response starts, the
+download is allowed up to 120 seconds without receiving a new chunk. This is
+an inactivity watchdog, not a total download-duration limit. A timeout after a
+long idle period usually indicates an unstable connection, proxy/VPN issue, or
+an exhausted network path. Failed installs clean up their temporary archive and
+staging directory. The application retries CUDA up to four times and resumes
+from the partial archive when the server supports HTTP Range; retry after
+checking the connection and available disk space.
+
+CUDA installation is blocked when the NVIDIA driver is missing, unreadable, or
+older than 528.33 on Windows. The packaged CUDA 12.x runtime does not require
+the full CUDA developer toolkit, but it does require a compatible NVIDIA
+driver. Update the driver before attempting the large download.
+
 ## Metal or Vulkan is unavailable
 
 The application offers only a pack matching the current operating system,
@@ -128,6 +143,17 @@ irrelevant accelerator option.
 If an accelerator download fails, verify that the public accelerator release
 contains the expected asset and SHA-256 sidecar. The application has no GitHub
 credential and cannot download a private release.
+
+The Vulkan install button is disabled when available system RAM is below the
+2.5 GiB preflight floor. This is a conservative minimum for the Fast model on
+shared-memory Vulkan plus basic headroom; it is not a guarantee that every
+model and video duration will fit. Close memory-heavy applications and use
+Re-check components before retrying.
+
+When RAM is sufficient, the UI warns that Vulkan compatibility cannot be fully
+verified before the engine is installed. The installed engine then enumerates
+real Vulkan devices and runs a capability probe with the selected model. Use
+Auto to allow CPU fallback if that probe fails.
 
 ## Model checksum mismatch
 

@@ -608,6 +608,10 @@ export function SettingsPage({
             </strong>
           </div>
           <div>
+            <span>{t("settings.nvidiaDriver")}</span>
+            <strong>{system?.nvidiaDriverVersion ?? t("hardware.notDetected")}</strong>
+          </div>
+          <div>
             <span>{t("settings.computeDevices")}</span>
             <strong
               className="status-device-list"
@@ -638,11 +642,15 @@ export function SettingsPage({
             <strong>{formatMemory(system?.gpuFreeMemoryMb, t("hardware.notDetected"))}</strong>
           </div>
           <div>
+            <span>{t("settings.availableRam")}</span>
+            <strong>{formatMemory(system?.availableMemoryMb, t("hardware.notDetected"))}</strong>
+          </div>
+          <div>
             <span>{t("settings.cudaEngine")}</span>
-            <strong className={system?.cudaSupported && system.cudaEngine ? "ok-text" : "muted-text"}>
-              {system?.cudaSupported && system.cudaEngine
+            <strong className={system?.cudaInstallable && system.cudaEngine ? "ok-text" : "muted-text"}>
+              {system?.cudaInstallable && system.cudaEngine
                 ? t("settings.installed")
-                : system?.cudaSupported
+                : system?.cudaSupported && system.cudaInstallable
                   ? t("settings.optional")
                 : t("settings.unavailable")}
             </strong>
@@ -667,11 +675,18 @@ export function SettingsPage({
               <Download size={16} />
               <span>{t("settings.cudaInfo")}</span>
             </div>
+            {!system.cudaInstallable && (
+              <small className="model-download-block-reason">
+                {t("settings.cudaDriverIncompatible", {
+                  driver: system.nvidiaDriverVersion ?? t("hardware.notDetected"),
+                })}
+              </small>
+            )}
             <button
               type="button"
               className="secondary-button full"
               onClick={onInstallCuda}
-              disabled={installingCuda || installingAccelerator !== null || modelDownloadActive || system.cudaEngine || busy}
+              disabled={!system.cudaInstallable || installingCuda || installingAccelerator !== null || modelDownloadActive || system.cudaEngine || busy}
             >
               {installingCuda ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}
               {installingCuda
@@ -699,6 +714,8 @@ export function SettingsPage({
 
         {accelerators.filter((accelerator) => accelerator.supported).map((accelerator) => {
           const copy = getAcceleratorCopy(accelerator, t);
+          const memoryBlocked = accelerator.backend === "vulkan" && !accelerator.memorySufficient;
+          const compatibilityUnknown = accelerator.backend === "vulkan" && !accelerator.preflightChecked;
           return (
           <div className="info-box" key={accelerator.id}>
             <Download size={16} />
@@ -706,25 +723,40 @@ export function SettingsPage({
               {copy.label}: {accelerator.installed ? t("settings.acceleratorInstalled") : copy.description}
             </span>
             {!accelerator.installed && accelerator.downloadable && (
-              <button
-                type="button"
-                className="secondary-button compact"
-                onClick={() =>
-                  onInstallAccelerator(
-                    accelerator.backend as Exclude<BackendChoice, "auto" | "cpu" | "cuda">
-                  )
-                }
-                disabled={installingAccelerator !== null || installingCuda || modelDownloadActive || busy}
-              >
-                {installingAccelerator === accelerator.backend
-                  ? (
-                    <span className="download-progress-copy">
-                      <span>{t("settings.acceleratorInstalling", { percent: Math.round(acceleratorDownloadPercent) })}</span>
-                      {networkSpeedBytesPerSecond !== null && <small>{formatBytes(networkSpeedBytesPerSecond)}/s</small>}
-                    </span>
-                  )
-                  : t("settings.acceleratorInstall")}
-              </button>
+              <>
+                <button
+                  type="button"
+                  className="secondary-button compact"
+                  onClick={() =>
+                    onInstallAccelerator(
+                      accelerator.backend as Exclude<BackendChoice, "auto" | "cpu" | "cuda">
+                    )
+                  }
+                  disabled={memoryBlocked || installingAccelerator !== null || installingCuda || modelDownloadActive || busy}
+                >
+                  {installingAccelerator === accelerator.backend
+                    ? (
+                      <span className="download-progress-copy">
+                        <span>{t("settings.acceleratorInstalling", { percent: Math.round(acceleratorDownloadPercent) })}</span>
+                        {networkSpeedBytesPerSecond !== null && <small>{formatBytes(networkSpeedBytesPerSecond)}/s</small>}
+                      </span>
+                    )
+                    : t("settings.acceleratorInstall")}
+                </button>
+                {memoryBlocked && (
+                  <small className="model-download-block-reason">
+                    {t("settings.acceleratorRamTooLow", {
+                      available: formatMemory(accelerator.memoryAvailableMb, t("hardware.notDetected")),
+                      required: formatMemory(accelerator.memoryRequiredMb, t("hardware.notDetected")),
+                    })}
+                  </small>
+                )}
+                {compatibilityUnknown && (
+                  <small className="settings-note">
+                    {t("settings.acceleratorCompatibilityUnknown")}
+                  </small>
+                )}
+              </>
             )}
           </div>
           );

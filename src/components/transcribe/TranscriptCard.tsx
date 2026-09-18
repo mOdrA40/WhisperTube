@@ -1,7 +1,8 @@
-import { Check, Copy, FileText, FolderOpen, Play, Search } from "lucide-react";
+import { Check, Copy, FileText, FolderOpen, Play, Search, Timer } from "lucide-react";
 import { Virtuoso } from "react-virtuoso";
 import type { Segment, TranscriptResult } from "../../types";
 import { getModelLabel, useI18n } from "../../i18n";
+import { formatElapsedDuration } from "../../lib/format";
 
 type TranscriptCardProps = {
   result: TranscriptResult;
@@ -13,6 +14,7 @@ type TranscriptCardProps = {
   onExport: (kind: "txt" | "srt" | "vtt") => void;
   onRevealAudio: () => void;
   onSearchChange: (query: string) => void;
+  transcriptionElapsedMs: number | null;
 };
 
 export function TranscriptCard({
@@ -25,6 +27,7 @@ export function TranscriptCard({
   onExport,
   onRevealAudio,
   onSearchChange,
+  transcriptionElapsedMs,
 }: TranscriptCardProps) {
   const { t } = useI18n();
 
@@ -38,6 +41,9 @@ export function TranscriptCard({
           <h3>{result.title}</h3>
           <p>
             {result.language.toUpperCase()} • {getModelLabel(result.model, t)} • {result.backend.toUpperCase()}
+            {transcriptionElapsedMs !== null && (
+              <> • <Timer size={13} aria-hidden="true" /> {t("transcript.processingTime")}: {formatElapsedDuration(transcriptionElapsedMs)}</>
+            )}
           </p>
         </div>
         <div className="toolbar-actions">

@@ -102,6 +102,9 @@ describe("SettingsPage local data reset", () => {
       gpuName: "NVIDIA GeForce RTX 4050 Laptop GPU",
       gpuMemoryMb: 6144,
       gpuFreeMemoryMb: 5632,
+      availableMemoryMb: 8192,
+      nvidiaDriverVersion: "551.61",
+      cudaInstallable: true,
       cpuThreads: 16,
       recommendation: "",
       recommendedModelId: "base",
@@ -149,5 +152,49 @@ describe("SettingsPage local data reset", () => {
       const label = `${device.id}: ${device.name}`;
       expect(screen.getByTitle(label).textContent).toBe(label);
     }
+  });
+
+  it("disables Vulkan installation when available RAM is below the preflight floor", () => {
+    const system: SystemStatus = {
+      ytDlp: true,
+      ffmpeg: true,
+      cpuEngine: true,
+      cudaEngine: false,
+      cudaSupported: false,
+      nvidia: false,
+      gpuName: "AMD Radeon 780M Graphics",
+      gpuMemoryMb: null,
+      gpuFreeMemoryMb: null,
+      availableMemoryMb: 1024,
+      nvidiaDriverVersion: null,
+      cudaInstallable: false,
+      cpuThreads: 8,
+      recommendation: "",
+      recommendedModelId: "base",
+      recommendedBackend: "auto",
+      accelerators: [{
+        id: "vulkan",
+        label: "Vulkan",
+        backend: "vulkan",
+        supported: true,
+        installed: false,
+        downloadable: true,
+        memoryAvailableMb: 1024,
+        memoryRequiredMb: 2560,
+        memorySufficient: false,
+        preflightChecked: true,
+        preflightCompatible: false,
+        description: "GPU acceleration",
+      }],
+      computeDevices: [],
+      jobStorageBytes: 0,
+      jobStorageLimitBytes: 20 * 1024 * 1024 * 1024,
+    };
+
+    renderSettingsPage({ system, accelerators: system.accelerators });
+
+    const installButton = screen.getByRole("button", { name: "Install" });
+    expect((installButton as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText(/Vulkan disabled: 1\.0 GB RAM available/)).toBeTruthy();
   });
 });

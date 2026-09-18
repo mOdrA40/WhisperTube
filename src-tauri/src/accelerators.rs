@@ -25,6 +25,9 @@ use crate::{
 const RELEASE_REPOSITORY: &str = "mOdrA40/WhisperTube";
 const RELEASE_TAG: &str = "accelerators-v0.1.2";
 const MAX_ACCELERATOR_ARCHIVE_BYTES: u64 = 1024 * 1024 * 1024;
+// The lightest supported model needs about 2 GiB for shared-memory Vulkan;
+// keep an additional 512 MiB headroom for the process and operating system.
+pub const MIN_VULKAN_INSTALL_MEMORY_MB: u64 = 2_560;
 
 // These values are filled by scripts/sync-accelerator-hashes.ps1 after the
 // matching public GitHub Release has been built and reviewed. Keeping the
@@ -112,16 +115,59 @@ pub fn catalog(app: &AppHandle, gpu_detected: bool) -> Result<Vec<AcceleratorInf
     Ok(pack_specs()
         .into_iter()
         .filter(|_| cfg!(target_os = "macos") || gpu_detected)
-        .map(|spec| AcceleratorInfo {
-            id: spec.backend.into(),
-            label: spec.label.into(),
-            backend: spec.backend.into(),
-            supported: true,
-            installed: engine_available(app, spec.backend).unwrap_or(false),
-            downloadable: spec.trusted_sha256.is_some(),
-            description: spec.description.into(),
+        .map(|spec| {
+            let (memory_available_mb, memory_required_mb, memory_sufficient) =
+                install_memory_status(spec.backend);
+            let is_vulkan = spec.backend == "vulkan";
+            AcceleratorInfo {
+                id: spec.backend.into(),
+                label: spec.label.into(),
+                backend: spec.backend.into(),
+                supported: true,
+                installed: engine_available(app, spec.backend).unwrap_or(false),
+                downloadable: spec.trusted_sha256.is_some(),
+                memory_available_mb,
+                memory_required_mb,
+                memory_sufficient,
+                // Vulkan's driver/device capability can only be probed after
+                // this engine has been downloaded. RAM is the only blocking
+                // preflight we can prove before installation.
+                preflight_checked: !is_vulkan || !memory_sufficient,
+                preflight_compatible: memory_sufficient,
+                description: spec.description.into(),
+            }
         })
         .collect())
+}
+
+fn install_memory_status(backend: &str) -> (Option<u64>, Option<u64>, bool) {
+    if backend != "vulkan" {
+        return (None, None, true);
+    }
+    install_memory_status_for(backend, crate::resources::available_memory_mb())
+}
+
+fn install_memory_status_for(backend: &str, available_mb: u64) -> (Option<u64>, Option<u64>, bool) {
+    if backend != "vulkan" {
+        return (None, None, true);
+    }
+    (
+        Some(available_mb),
+        Some(MIN_VULKAN_INSTALL_MEMORY_MB),
+        available_mb >= MIN_VULKAN_INSTALL_MEMORY_MB,
+    )
+}
+
+pub fn ensure_install_memory(backend: &str) -> Result<(), String> {
+    let (available_mb, required_mb, sufficient) = install_memory_status(backend);
+    if backend == "vulkan" && !sufficient {
+        return Err(format!(
+            "RAM tersedia tidak cukup untuk memasang Vulkan. Diperlukan minimal {} GB RAM tersedia, tetapi hanya {} GB yang tersedia. Tutup aplikasi lain lalu coba lagi.",
+            required_mb.unwrap_or(MIN_VULKAN_INSTALL_MEMORY_MB) as f64 / 1024.0,
+            available_mb.unwrap_or_default() as f64 / 1024.0,
+        ));
+    }
+    Ok(())
 }
 
 fn emit_progress(
@@ -595,6 +641,7 @@ pub async fn install(
     backend: String,
     cancelled: Arc<AtomicBool>,
 ) -> Result<(), String> {
+    ensure_install_memory(&backend)?;
     let spec = pack_specs()
         .into_iter()
         .find(|spec| spec.backend == backend)
@@ -694,7 +741,7 @@ pub async fn install(
 
 #[cfg(test)]
 mod tests {
-    use super::pack_specs;
+    use super::{install_memory_status_for, pack_specs, MIN_VULKAN_INSTALL_MEMORY_MB};
 
     #[test]
     fn pack_asset_matches_target_platform() {
@@ -720,5 +767,21 @@ mod tests {
             asset_name.strip_suffix(".zip").unwrap_or(asset_name)
         );
         assert_eq!(checksum_name, "whispertube-windows-x64-vulkan.sha256");
+    }
+
+    #[test]
+    fn vulkan_install_is_blocked_below_memory_floor() {
+        let below =
+            install_memory_status_for("vulkan", MIN_VULKAN_INSTALL_MEMORY_MB.saturating_sub(1));
+        assert!(!below.2);
+        assert_eq!(below.1, Some(MIN_VULKAN_INSTALL_MEMORY_MB));
+
+        let at_floor = install_memory_status_for("vulkan", MIN_VULKAN_INSTALL_MEMORY_MB);
+        assert!(at_floor.2);
+    }
+
+    #[test]
+    fn non_vulkan_install_has_no_host_memory_gate() {
+        assert_eq!(install_memory_status_for("metal", 0), (None, None, true));
     }
 }

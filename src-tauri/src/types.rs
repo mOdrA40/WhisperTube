@@ -232,6 +232,13 @@ pub struct HistoryPageResult {
     pub total_count: i64,
 }
 
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryDeleteOutcome {
+    pub deleted_ids: Vec<i64>,
+    pub cleanup_warnings: Vec<String>,
+}
+
 #[derive(Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct TranscriptRequest {

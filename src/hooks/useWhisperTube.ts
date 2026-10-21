@@ -4,6 +4,7 @@ import {
   checkForAppUpdate,
   deleteHistory as deleteHistoryRequest,
   deleteModel,
+  disposeAppUpdate,
   downloadModel,
   exportTranscriptFile,
   getSystemStatus,
@@ -140,6 +141,8 @@ export function useWhisperTube() {
   });
   const [appUpdateError, setAppUpdateError] = useState<string | null>(null);
   const [refreshingSystem, setRefreshingSystem] = useState(false);
+  const [deletingModel, setDeletingModel] = useState(false);
+  const appUpdateCheckRequest = useRef(0);
   const autoConfigured = useRef(false);
   const refreshingSystemRef = useRef(false);
 
@@ -285,6 +288,8 @@ export function useWhisperTube() {
 
     return () => {
       disposed = true;
+      appUpdateCheckRequest.current += 1;
+      void disposeAppUpdate();
       unlistenProgress.then((unlisten) => unlisten());
       unlistenModel.then((unlisten) => unlisten());
       unlistenCuda.then((unlisten) => unlisten());
@@ -293,13 +298,17 @@ export function useWhisperTube() {
   }, [refreshSystem]);
 
   async function handleCheckForAppUpdate() {
+    if (appUpdateStatus === "installing") return;
+    const request = ++appUpdateCheckRequest.current;
     setAppUpdateStatus("checking");
     setAppUpdateError(null);
     try {
       const update = await checkForAppUpdate();
+      if (request !== appUpdateCheckRequest.current) return;
       setAppUpdate(update);
       setAppUpdateStatus(update ? "available" : "up-to-date");
     } catch (cause) {
+      if (request !== appUpdateCheckRequest.current) return;
       setAppUpdateStatus("idle");
       setAppUpdateError(friendlyError(cause));
     }
@@ -307,6 +316,8 @@ export function useWhisperTube() {
 
   async function handleInstallAppUpdate() {
     if (!appUpdate || operationActive) return;
+    // A check already in flight must not overwrite the install lifecycle.
+    appUpdateCheckRequest.current += 1;
     setAppUpdateStatus("installing");
     setAppUpdateError(null);
     setAppUpdateProgress({ downloadedBytes: 0, totalBytes: null, percent: 0 });
@@ -375,12 +386,10 @@ export function useWhisperTube() {
   const modelDownloadActive = Object.keys(downloadingModel).length > 0;
   const appUpdateInstalling = appUpdateStatus === "installing";
   const operationActive = Boolean(
-    busy || inspecting || resettingData || historyOperation || modelDownloadActive || installingCuda || installingAccelerator || appUpdateInstalling || refreshingSystem,
+    busy || inspecting || resettingData || deletingModel || historyOperation || modelDownloadActive || installingCuda || installingAccelerator || appUpdateInstalling || refreshingSystem,
   );
   const vramWarning = useMemo(() => {
-    if (!selectedModel || backend === "cpu" || backend === "metal" || backend === "vulkan" || !system) return null;
-    const cudaTarget = backend === "cuda" || (backend === "auto" && system.cudaInstallable && system.cudaEngine);
-    if (!cudaTarget) return null;
+    if (!selectedModel || backend !== "cuda" || !system) return null;
     if (backend === "cuda" && (!system.cudaSupported || !system.nvidia)) {
       return t("error.cudaUnavailable");
     }
@@ -423,7 +432,7 @@ export function useWhisperTube() {
   const canStart = Boolean(!operationActive && metadata && selectedModel?.installed && runtimeReady && !vramWarning && !acceleratorWarning);
   const modelDownloadBlockReasons = useMemo<Record<string, string>>(() => {
     const reasons: Record<string, string> = {};
-    const cudaTarget = backend === "cuda" || (backend === "auto" && system?.cudaInstallable && system.cudaEngine);
+    const cudaTarget = backend === "cuda";
     if (!system || !cudaTarget) return reasons;
     const selectedCudaDevice = computeTargetId.startsWith("cuda:")
       ? system.computeDevices.find((device) => device.id === computeTargetId)
@@ -517,6 +526,7 @@ export function useWhisperTube() {
 
   async function handleRemoveModel(id: string) {
     if (operationActive) return;
+    setDeletingModel(true);
     setError(null);
     try {
       await deleteModel(id);
@@ -525,6 +535,8 @@ export function useWhisperTube() {
     } catch (cause) {
       setError(friendlyError(cause));
       throw cause;
+    } finally {
+      setDeletingModel(false);
     }
   }
 
@@ -733,13 +745,16 @@ export function useWhisperTube() {
     setHistoryOperation("deleting");
     setError(null);
     try {
-      await deleteHistoryRequest(ids);
-      if (result && ids.includes(result.historyId)) {
+      const outcome = await deleteHistoryRequest(ids);
+      if (result && outcome.deletedIds.includes(result.historyId)) {
         setResult(null);
         setSearchQuery("");
         setCopied(false);
       }
       await refreshAfterSuccessfulOperation();
+      if (outcome.cleanupWarnings.length > 0) {
+        setError((previous) => [previous, ...outcome.cleanupWarnings].filter(Boolean).join("\n"));
+      }
     } catch (cause) {
       const message = friendlyError(cause);
       await refreshHistoryAfterMutationFailure();

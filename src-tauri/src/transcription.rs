@@ -18,7 +18,8 @@ use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
 
 use crate::{
-    cookies::args as cookie_args,
+    checkpoint,
+    cookies::CookieJar,
     history, models,
     paths::{engine_path, is_regular_file, jobs_dir, model_path, tool_path},
     process, resources,
@@ -33,12 +34,15 @@ use crate::{
     },
 };
 
+#[derive(Clone, Copy)]
 struct JobContext<'a> {
     app: &'a AppHandle,
     usage: &'a UsageMonitor,
     active_pid: &'a Arc<Mutex<Option<u32>>>,
     cancelled: &'a Arc<AtomicBool>,
     capability_probe: &'a Arc<Mutex<HashSet<String>>>,
+    progress_start: f64,
+    progress_end: f64,
 }
 
 struct ProgressUpdate<'a> {
@@ -67,7 +71,14 @@ impl JobContext<'_> {
             ProgressPayload {
                 stage: update.stage.to_string(),
                 message_code: update.message_code.into(),
-                percent: update.percent.clamp(0.0, 100.0),
+                percent: if update.stage == "transcribing" {
+                    self.progress_start
+                        + (self.progress_end - self.progress_start)
+                            * update.percent.clamp(0.0, 100.0)
+                            / 100.0
+                } else {
+                    update.percent.clamp(0.0, 100.0)
+                },
                 message: update.message,
                 backend: update.backend.map(str::to_string),
                 downloaded_bytes: update.downloaded_bytes,
@@ -227,13 +238,24 @@ struct AudioCacheMetadata {
     version: u8,
     url: String,
     duration: f64,
+    #[serde(default = "audio_ready_default")]
+    audio_ready: bool,
 }
 
-fn write_audio_cache_metadata(job_dir: &Path, request: &TranscriptRequest) -> Result<(), String> {
+fn audio_ready_default() -> bool {
+    true
+}
+
+fn write_audio_cache_metadata(
+    job_dir: &Path,
+    request: &TranscriptRequest,
+    audio_ready: bool,
+) -> Result<(), String> {
     let metadata = AudioCacheMetadata {
         version: AUDIO_CACHE_METADATA_VERSION,
         url: request.url.clone(),
         duration: request.duration,
+        audio_ready,
     };
     let bytes = serde_json::to_vec(&metadata)
         .map_err(|error| format!("Gagal serialize metadata cache audio: {error}"))?;
@@ -252,6 +274,7 @@ fn read_audio_cache_metadata(path: &Path) -> Option<AudioCacheMetadata> {
 fn find_reusable_audio_job(
     jobs_dir: &Path,
     request: &TranscriptRequest,
+    committed_jobs: &HashSet<PathBuf>,
 ) -> Result<Option<PathBuf>, String> {
     let canonical_root = fs::canonicalize(jobs_dir)
         .map_err(|error| format!("Gagal memvalidasi folder cache audio: {error}"))?;
@@ -281,7 +304,7 @@ fn find_reusable_audio_job(
         else {
             continue;
         };
-        if cache.version != AUDIO_CACHE_METADATA_VERSION
+        if !matches!(cache.version, 1 | AUDIO_CACHE_METADATA_VERSION)
             || validate_media_url(&cache.url).ok().as_deref() != Some(request.url.as_str())
             || !cache.duration.is_finite()
             || cache.duration <= 0.0
@@ -290,15 +313,16 @@ fn find_reusable_audio_job(
         {
             continue;
         }
-        let audio = canonical_job_dir.join("audio.wav");
-        let Ok(audio_metadata) = fs::metadata(&audio) else {
+        // SQLite decides whether the job committed. A result file alone may
+        // have been written immediately before a transaction rolled back.
+        if committed_jobs.contains(&canonical_job_dir) {
             continue;
-        };
-        if !is_regular_file(&audio)
-            || audio_metadata.len() <= 44
-            || audio_metadata.len() > pcm_wav_bytes(request.duration).saturating_add(4096)
-        {
-            continue;
+        }
+        if cache.audio_ready {
+            let audio = canonical_job_dir.join("audio.wav");
+            if checkpoint::PcmAudio::inspect(&audio, request.duration, || false).is_err() {
+                continue;
+            }
         }
         let modified = fs::metadata(&canonical_job_dir)
             .and_then(|metadata| metadata.modified())
@@ -314,7 +338,7 @@ pub(crate) const MAX_MEDIA_DURATION_SECONDS: f64 = 8.0 * 60.0 * 60.0;
 const MAX_MEDIA_DOWNLOAD_BYTES: &str = "4G";
 const MAX_MEDIA_DOWNLOAD_BYTES_VALUE: u64 = 4 * 1024 * 1024 * 1024;
 const AUDIO_CACHE_METADATA_FILE: &str = ".audio-cache.json";
-const AUDIO_CACHE_METADATA_VERSION: u8 = 1;
+const AUDIO_CACHE_METADATA_VERSION: u8 = 2;
 const MAX_AUDIO_CACHE_METADATA_BYTES: u64 = 64 * 1024;
 const DISK_SAFETY_BUFFER_BYTES: u64 = 512 * 1024 * 1024;
 const DISK_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
@@ -600,15 +624,16 @@ fn run_download(
     let template = job_dir.join("source.%(ext)s");
     let mut command = Command::new(yt_dlp);
     process::hide_console(&mut command);
-    let cookie_args = cookie_args(request.cookies_path.as_deref()).map_err(|error| {
-        if request.cookies_path.is_some() {
-            format!("media_source_cookie_file:{error}")
-        } else {
-            error
-        }
-    })?;
+    let cookie_jar =
+        CookieJar::prepare(context.app, request.cookies_path.as_deref()).map_err(|error| {
+            if request.cookies_path.is_some() {
+                format!("media_source_cookie_file:{error}")
+            } else {
+                error
+            }
+        })?;
     command
-        .args(["--ignore-config", "--no-playlist", "--match-filter"])
+        .args(["--ignore-config", "--continue", "--part", "--no-playlist", "--match-filter"])
         .arg(format!(
             "!is_live & duration <= {}",
             MAX_MEDIA_DURATION_SECONDS as u64
@@ -626,8 +651,8 @@ fn run_download(
             "-o",
         ])
         .arg(&template)
-        .args(js_runtime_args())
-        .args(cookie_args)
+        .args(js_runtime_args(context.active_pid, context.cancelled)?)
+        .args(cookie_jar.args())
         .arg(&request.url)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1223,18 +1248,14 @@ fn vulkan_device_indices(devices: &[ComputeDeviceInfo]) -> Vec<usize> {
         .collect::<Vec<_>>()
 }
 
-fn available_vulkan_device_indices(app: &AppHandle) -> Vec<usize> {
-    vulkan_device_indices(&crate::system::detect_vulkan_devices(app))
-}
-
 fn ensure_vulkan_host_memory(
-    context: &JobContext,
+    devices: &[ComputeDeviceInfo],
     model_id: &str,
     wav: &Path,
     device_index: usize,
 ) -> Result<(), String> {
-    let Some(device) = crate::system::detect_vulkan_devices(context.app)
-        .into_iter()
+    let Some(device) = devices
+        .iter()
         .find(|device| device.device_index == Some(device_index))
     else {
         return Ok(());
@@ -1264,14 +1285,18 @@ fn probe_vulkan_devices(
     model: &Path,
     model_id: &str,
     wav: &Path,
-    device_indices: &[usize],
+    devices: &[ComputeDeviceInfo],
+    requested_index: Option<usize>,
 ) -> Result<usize, String> {
+    let device_indices = requested_index
+        .map(|index| vec![index])
+        .unwrap_or_else(|| vulkan_device_indices(devices));
     if device_indices.is_empty() {
         return Err("Tidak ada device Vulkan nyata yang lolos enumerasi.".into());
     }
     let mut errors = Vec::new();
-    for device_index in device_indices {
-        if let Err(error) = ensure_vulkan_host_memory(context, model_id, wav, *device_index) {
+    for device_index in &device_indices {
+        if let Err(error) = ensure_vulkan_host_memory(devices, model_id, wav, *device_index) {
             errors.push(format!("device {device_index}: {error}"));
             continue;
         }
@@ -1295,6 +1320,8 @@ where
     probe()
 }
 
+type BackendSelection = (String, PathBuf, Option<String>, Option<usize>);
+
 fn choose_backend(
     context: &JobContext,
     requested: &str,
@@ -1302,17 +1329,11 @@ fn choose_backend(
     model: &Path,
     wav: &Path,
     model_id: &str,
-) -> Result<(String, PathBuf, Option<String>, Option<usize>), String> {
+) -> Result<BackendSelection, String> {
     let app = context.app;
-    let cpu = engine_path(app, "cpu")?;
-    let cuda = engine_path(app, "cuda")?;
-    let metal = engine_path(app, "metal")?;
-    let vulkan = engine_path(app, "vulkan")?;
-    let nvidia_gpu = detect_nvidia();
-    let nvidia = nvidia_gpu.is_some();
-    let gpu_detected = nvidia || detect_gpu().is_some();
     match requested {
         "cpu" => {
+            let cpu = engine_path(app, "cpu")?;
             if !is_regular_file(&cpu) {
                 Err("CPU whisper engine belum terpasang.".into())
             } else {
@@ -1320,6 +1341,8 @@ fn choose_backend(
             }
         }
         "cuda" => {
+            let nvidia = detect_nvidia().is_some();
+            let cuda = engine_path(app, "cuda")?;
             if !cfg!(all(target_os = "windows", target_arch = "x86_64")) {
                 Err("CUDA hanya tersedia pada build Windows yang didukung.".into())
             } else if !nvidia {
@@ -1343,6 +1366,7 @@ fn choose_backend(
             }
         }
         "metal" => {
+            let metal = engine_path(app, "metal")?;
             if !cfg!(target_os = "macos") {
                 Err("Apple Metal hanya tersedia di macOS.".into())
             } else if !is_regular_file(&metal) {
@@ -1353,6 +1377,8 @@ fn choose_backend(
             }
         }
         "vulkan" => {
+            let gpu_detected = detect_nvidia().is_some() || detect_gpu().is_some();
+            let vulkan = engine_path(app, "vulkan")?;
             if !cfg!(any(target_os = "windows", target_os = "linux")) {
                 Err("Vulkan accelerator saat ini tersedia di Windows/Linux.".into())
             } else if !gpu_detected {
@@ -1364,126 +1390,62 @@ fn choose_backend(
                 )
             } else {
                 let requested_device_index = requested_device_index(requested_device_id, "vulkan")?;
-                let device_indices = requested_device_index
-                    .map(|index| vec![index])
-                    .unwrap_or_else(|| available_vulkan_device_indices(app));
-                let device_index =
-                    probe_vulkan_devices(context, &vulkan, model, model_id, wav, &device_indices)
-                        .map_err(|error| {
-                        format!("Vulkan dipilih tetapi capability probe gagal: {error}")
-                    })?;
-                Ok(("vulkan".into(), vulkan, None, Some(device_index)))
-            }
-        }
-        "auto" => {
-            if nvidia
-                && cfg!(all(target_os = "windows", target_arch = "x86_64"))
-                && detect_nvidia_driver_version()
-                    .as_deref()
-                    .is_some_and(cuda_driver_is_compatible)
-                && is_regular_file(&cuda)
-            {
-                let device_index = nvidia_gpu.as_ref().and_then(|gpu| gpu.device_index);
-                let Some(gpu) = nvidia_gpu.as_ref() else {
-                    return Err("NVIDIA GPU/driver tidak terdeteksi.".into());
-                };
-                match run_cuda_probe_with_vram_guard(model_id, gpu, || {
-                    ensure_backend_probe(context, "cuda", &cuda, model, device_index)
-                }) {
-                    Ok(()) => Ok(("cuda".into(), cuda, None, device_index)),
-                    Err(cuda_error) if context.is_cancelled() => Err(cuda_error),
-                    Err(cuda_error)
-                        if cfg!(any(target_os = "windows", target_os = "linux"))
-                            && gpu_detected
-                            && is_regular_file(&vulkan) =>
-                    {
-                        match probe_vulkan_devices(
-                            context,
-                            &vulkan,
-                            model,
-                            model_id,
-                            wav,
-                            &available_vulkan_device_indices(app),
-                        ) {
-                            Ok(device_index) => {
-                                Ok((
-                                    "vulkan".into(),
-                                    vulkan,
-                                    Some(format!(
-                                        "CUDA capability probe gagal ({cuda_error}); Auto beralih ke Vulkan."
-                                    )),
-                                    Some(device_index),
-                                ))
-                            }
-                            Err(vulkan_error) if is_regular_file(&cpu) => Ok((
-                                "cpu".into(),
-                                cpu,
-                                Some(format!(
-                                    "CUDA dan Vulkan tidak lolos capability probe ({cuda_error}; {vulkan_error}); transkripsi dilanjutkan dengan CPU."
-                                )),
-                                None,
-                            )),
-                            Err(vulkan_error) => Err(format!(
-                                "CUDA dan Vulkan tidak lolos capability probe: {cuda_error}; {vulkan_error}"
-                            )),
-                        }
-                    }
-                    Err(cuda_error) if is_regular_file(&cpu) => Ok((
-                        "cpu".into(),
-                        cpu,
-                        Some(format!(
-                            "CUDA tidak lolos capability probe ({cuda_error}); transkripsi dilanjutkan dengan CPU."
-                        )),
-                        None,
-                    )),
-                    Err(cuda_error) => Err(format!(
-                        "CUDA tidak lolos capability probe dan CPU engine tidak tersedia: {cuda_error}"
-                    )),
-                }
-            } else if cfg!(target_os = "macos") && is_regular_file(&metal) {
-                ensure_backend_probe(context, "metal", &metal, model, None)?;
-                Ok(("metal".into(), metal, None, None))
-            } else if cfg!(any(target_os = "windows", target_os = "linux"))
-                && gpu_detected
-                && is_regular_file(&vulkan)
-            {
-                match probe_vulkan_devices(
+                let devices = crate::system::detect_vulkan_devices_from_engine(&vulkan);
+                let device_index = probe_vulkan_devices(
                     context,
                     &vulkan,
                     model,
                     model_id,
                     wav,
-                    &available_vulkan_device_indices(app),
-                ) {
-                    Ok(device_index) => Ok(("vulkan".into(), vulkan, None, Some(device_index))),
-                    Err(error) if is_regular_file(&cpu) => Ok((
-                        "cpu".into(),
-                        cpu,
-                        Some(format!(
-                            "Vulkan tidak lolos capability probe ({error}); transkripsi dilanjutkan dengan CPU."
-                        )),
-                        None,
-                    )),
-                    Err(error) => Err(format!(
-                        "Vulkan tidak lolos capability probe dan CPU engine tidak tersedia: {error}"
-                    )),
-                }
-            } else if nvidia && cfg!(all(target_os = "windows", target_arch = "x86_64")) {
-                if is_regular_file(&cpu) {
-                    Ok((
-                        "cpu".into(),
-                        cpu,
-                        Some("CUDA engine belum terpasang; Auto melanjutkan dengan CPU.".into()),
-                        None,
-                    ))
-                } else {
-                    Err("NVIDIA GPU terdeteksi tetapi CUDA engine belum terpasang dan CPU engine tidak tersedia.".into())
-                }
-            } else if is_regular_file(&cpu) {
-                Ok(("cpu".into(), cpu, None, None))
-            } else {
-                Err("Tidak ada whisper engine yang siap digunakan.".into())
+                    &devices,
+                    requested_device_index,
+                )
+                .map_err(|error| {
+                    format!("Vulkan dipilih tetapi capability probe gagal: {error}")
+                })?;
+                Ok(("vulkan".into(), vulkan, None, Some(device_index)))
             }
+        }
+        "auto" => {
+            let nvidia = detect_nvidia().is_some();
+            let gpu_detected = nvidia || detect_gpu().is_some();
+            let mut candidates = Vec::new();
+            if cfg!(all(target_os = "windows", target_arch = "x86_64"))
+                && nvidia
+                && detect_nvidia_driver_version()
+                    .as_deref()
+                    .is_some_and(cuda_driver_is_compatible)
+            {
+                candidates.push("cuda");
+            }
+            if cfg!(target_os = "macos") {
+                candidates.push("metal");
+            }
+            if cfg!(any(target_os = "windows", target_os = "linux")) && gpu_detected {
+                candidates.push("vulkan");
+            }
+            candidates.push("cpu");
+            let mut failures = Vec::new();
+            for backend in candidates {
+                if context.is_cancelled() {
+                    return Err("Transkripsi dibatalkan.".into());
+                }
+                // Resolve and hash only the candidate we are about to use.
+                // Explicit selection keeps its normal integrity/VRAM/probe guards.
+                match choose_backend(context, backend, None, model, wav, model_id) {
+                    Ok((backend, engine, _, device)) => {
+                        let message = (!failures.is_empty())
+                            .then(|| format!("Auto beralih ke {backend}: {}", failures.join("; ")));
+                        return Ok((backend, engine, message, device));
+                    }
+                    Err(error) if context.is_cancelled() => return Err(error),
+                    Err(error) => failures.push(format!("{backend}: {error}")),
+                }
+            }
+            Err(format!(
+                "Tidak ada whisper engine yang siap digunakan: {}",
+                failures.join("; ")
+            ))
         }
         _ => Err("Compute backend tidak dikenal.".into()),
     }
@@ -1495,15 +1457,30 @@ fn run_whisper(
     output_prefix: &Path,
     model: &Path,
     config: WhisperConfig<'_>,
+    resolved: &mut Option<BackendSelection>,
 ) -> Result<String, String> {
-    let (resolved_backend, engine, fallback_message, device_index) = choose_backend(
-        context,
-        config.backend,
-        config.compute_device_id,
-        model,
-        wav,
-        config.model_id,
-    )?;
+    let (resolved_backend, engine, fallback_message, device_index) = match resolved {
+        Some(selection) => {
+            // Every chunk starts a new native process. Revalidate the selected
+            // runtime at that execution boundary, without resolving other GPUs.
+            if engine_path(context.app, &selection.0)? != selection.1 {
+                return Err("Runtime berubah atau gagal verifikasi selama transkripsi. Coba lagi untuk memilih backend ulang.".into());
+            }
+            selection.clone()
+        }
+        None => {
+            let selection = choose_backend(
+                context,
+                config.backend,
+                config.compute_device_id,
+                model,
+                wav,
+                config.model_id,
+            )?;
+            *resolved = Some(selection.clone());
+            selection
+        }
+    };
     if let Some(message) = fallback_message {
         context.emit(ProgressUpdate {
             stage: "transcribing",
@@ -1543,7 +1520,7 @@ fn run_whisper(
         .arg(wav)
         .args(["-l", config.language, "-t"])
         .arg(threads.to_string())
-        .args(["-pp", "-oj", "-otxt", "-osrt", "-ovtt", "-of"])
+        .args(["-pp", "-oj", "-of"])
         .arg(output_prefix)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -1802,32 +1779,51 @@ pub fn pipeline(
     models::verify_model_file(&model, &request.model_id)?;
     let jobs_dir = jobs_dir(&app)?;
     let duration_seconds = request.duration.max(0.0).ceil() as u64;
-    let inference_bytes = duration_seconds.saturating_mul(16_000).saturating_mul(4);
-    let model_bytes = model.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+    let inference_bytes = duration_seconds
+        .min(checkpoint::CHUNK_SECONDS + 1)
+        .saturating_mul(16_000)
+        .saturating_mul(4);
+    let model_bytes = model
+        .metadata()
+        .map_err(|error| format!("Gagal membaca ukuran model untuk guard RAM: {error}"))?
+        .len();
     let inference_required = inference_bytes
         .saturating_add(model_bytes)
         .saturating_add(512 * 1024 * 1024);
-    crate::resources::require_memory(inference_required, "transkripsi")?;
-    let reusable_job_dir = if request.keep_audio {
-        find_reusable_audio_job(&jobs_dir, &request)?
-    } else {
-        None
-    };
-    let disk_reservation = if reusable_job_dir.is_some() {
+    let committed_jobs = history::referenced_job_directories(&app)?;
+    let reusable_job_dir = find_reusable_audio_job(&jobs_dir, &request, &committed_jobs)?;
+    let audio_ready = reusable_job_dir
+        .as_ref()
+        .and_then(|path| read_audio_cache_metadata(&path.join(AUDIO_CACHE_METADATA_FILE)))
+        .is_some_and(|cache| cache.audio_ready);
+    if !audio_ready {
+        crate::resources::require_memory(inference_required, "transkripsi")?;
+    }
+    let disk_reservation = if audio_ready {
         DISK_SAFETY_BUFFER_BYTES
+    } else if let Some(path) = &reusable_job_dir {
+        media_disk_reservation(request.duration)
+            .saturating_sub(directory_file_bytes(path)?)
+            .max(DISK_SAFETY_BUFFER_BYTES)
     } else {
         media_disk_reservation(request.duration)
     };
     crate::resources::require_disk(&jobs_dir, disk_reservation, "transkripsi")?;
     ensure_job_storage_quota(&app)?;
-    let (job_dir, mut job_guard, reusing_audio) = match reusable_job_dir {
-        Some(path) => (path.clone(), JobDirectoryGuard::resume(path)?, true),
+    let (job_dir, mut job_guard) = match reusable_job_dir {
+        Some(path) => (path.clone(), JobDirectoryGuard::resume(path)?),
         None => {
             let path = jobs_dir.join(Uuid::new_v4().to_string());
             let guard = JobDirectoryGuard::create(path.clone())?;
-            (path, guard, false)
+            (path, guard)
         }
     };
+    // Preserve stage files on failure/cancel regardless of the final keep-audio
+    // preference. Startup expires abandoned jobs after 24 hours.
+    if !audio_ready {
+        write_audio_cache_metadata(&job_dir, &request, false)?;
+    }
+    job_guard.preserve_on_failure();
     let usage_monitor = UsageMonitor::start();
     let context = JobContext {
         app: &app,
@@ -1835,10 +1831,12 @@ pub fn pipeline(
         active_pid: &active_pid,
         cancelled: &cancelled,
         capability_probe: &capability_probe,
+        progress_start: 0.0,
+        progress_end: 100.0,
     };
 
     let wav = job_dir.join("audio.wav");
-    let actual_wav_bytes = if reusing_audio {
+    if audio_ready {
         context.emit(ProgressUpdate {
             stage: "converting",
             message_code: "reusing_audio",
@@ -1849,7 +1847,7 @@ pub fn pipeline(
             total_bytes: None,
             network_bytes_per_second: None,
         });
-        validate_audio_wav(&wav, request.duration)?
+        validate_audio_wav(&wav, request.duration)?;
     } else {
         context.emit(ProgressUpdate {
             stage: "downloading",
@@ -1878,22 +1876,17 @@ pub fn pipeline(
         });
         run_ffmpeg(&context, &source, &wav, request.duration)?;
         ensure_job_storage_quota(&app)?;
-        let actual_wav_bytes = validate_audio_wav(&wav, request.duration)?;
-        remove_file_if_present(&source, "audio sumber")?;
+        validate_audio_wav(&wav, request.duration)?;
         if context.is_cancelled() {
             return Err("Job dibatalkan.".into());
         }
-        if request.keep_audio {
-            write_audio_cache_metadata(&job_dir, &request)?;
-            job_guard.preserve_on_failure();
-        }
-        actual_wav_bytes
+        // Commit readiness only after FFmpeg succeeded and the WAV validates.
+        // A killed conversion is never eligible as completed audio.
+        checkpoint::PcmAudio::inspect(&wav, request.duration, || context.is_cancelled())?;
+        write_audio_cache_metadata(&job_dir, &request, true)?;
     };
-    let actual_inference_required = actual_wav_bytes
-        .saturating_mul(2)
-        .saturating_add(model_bytes)
-        .saturating_add(512 * 1024 * 1024);
-    crate::resources::require_memory(actual_inference_required, "inference Whisper")?;
+    // Retry cleanup even when a completed WAV bypasses download/conversion.
+    history::cleanup_source_audio(&job_dir)?;
 
     let output_prefix = job_dir.join("transcript");
     context.emit(ProgressUpdate {
@@ -1906,29 +1899,48 @@ pub fn pipeline(
         total_bytes: None,
         network_bytes_per_second: None,
     });
-    let resolved_backend = run_whisper(
-        &context,
-        &wav,
-        &output_prefix,
-        &model,
-        WhisperConfig {
-            language: &request.language,
-            backend: &request.backend,
-            compute_device_id: request.compute_device_id.as_deref(),
-            model_id: &request.model_id,
+    let audio = checkpoint::PcmAudio::open(&wav, request.duration, || context.is_cancelled())?;
+    let mut resolved_engine = None;
+    let completed = checkpoint::transcribe(
+        &audio,
+        &job_dir,
+        &request,
+        |chunk_wav, prefix, language, span| {
+            let required = fs::metadata(chunk_wav)
+                .map_err(|e| format!("Gagal membaca potongan audio: {e}"))?.len()
+                .saturating_mul(2).saturating_add(model_bytes).saturating_add(512 * 1024 * 1024);
+            resources::require_memory(required, "inference potongan Whisper")?;
+            let chunk_context = JobContext { progress_start: span.0, progress_end: span.1, ..context };
+            let backend = run_whisper(
+                &chunk_context, chunk_wav, prefix, &model,
+                WhisperConfig { language, backend: &request.backend,
+                    compute_device_id: request.compute_device_id.as_deref(), model_id: &request.model_id },
+                &mut resolved_engine,
+            )?;
+            normalize_output_utf8(&prefix.with_extension("json"), checkpoint::MAX_CHECKPOINT_BYTES)?;
+            let (language, segments, _) = parse_whisper_result(&prefix.with_extension("json"))?;
+            Ok(checkpoint::ChunkOutput { language, backend, segments })
         },
-    )?;
+        || context.is_cancelled(),
+        |percent, reused| {
+            context.emit(ProgressUpdate {
+                stage: "transcribing",
+                message_code: if reused { "resuming_transcription" } else { "checkpoint_progress" },
+                percent,
+                message: if reused { "Melanjutkan hasil bagian yang sudah tersimpan.".into() }
+                    else { "Memproses audio per bagian; progres selesai disimpan otomatis.".into() },
+                backend: None, downloaded_bytes: None, total_bytes: None, network_bytes_per_second: None,
+            });
+        },
+    ).map_err(|error| format!("{error} Bagian yang selesai tersimpan; coba transkripsi lagi dengan sumber dan pengaturan yang sama untuk melanjutkan."))?;
     if context.is_cancelled() {
         return Err("Job dibatalkan.".into());
     }
-
-    for extension in ["json", "txt", "srt", "vtt"] {
-        normalize_output_utf8(
-            &output_prefix.with_extension(extension),
-            MAX_TRANSCRIPT_RESULT_BYTES,
-        )?;
-    }
-
+    checkpoint::write_exports(&output_prefix, &completed)?;
+    let resolved_backend = completed.backend;
+    let language = completed.language;
+    let segments = completed.segments;
+    let text = completed.text;
     context.emit(ProgressUpdate {
         stage: "finalizing",
         message_code: "finalizing_result",
@@ -1939,16 +1951,11 @@ pub fn pipeline(
         total_bytes: None,
         network_bytes_per_second: None,
     });
-    let json_path = output_prefix.with_extension("json");
     let txt_path = output_prefix.with_extension("txt");
     let srt_path = output_prefix.with_extension("srt");
     let vtt_path = output_prefix.with_extension("vtt");
-    let (language, segments, text) = parse_whisper_result(&json_path)?;
     ensure_job_storage_quota(&app)?;
     let result_store_path = job_dir.join("result.json");
-    if !request.keep_audio {
-        remove_file_if_present(&wav, "WAV hasil konversi")?;
-    }
     let mut result = TranscriptResult {
         history_id: 0,
         title: request.title.clone(),
@@ -1983,6 +1990,15 @@ pub fn pipeline(
         },
     )?;
 
+    // History is committed: cleanup errors must not turn it into a failed job.
+    if let Err(error) = checkpoint::cleanup(&job_dir) {
+        eprintln!("WhisperTube checkpoint cleanup warning: {error}");
+    }
+    if !request.keep_audio {
+        if let Err(error) = remove_file_if_present(&wav, "WAV hasil konversi") {
+            eprintln!("WhisperTube audio cleanup warning: {error}");
+        }
+    }
     context.emit(ProgressUpdate {
         stage: "done",
         message_code: "complete",
@@ -2076,7 +2092,10 @@ mod tests {
         let job = root.join("saved-job");
         {
             let mut guard = JobDirectoryGuard::create(job.clone()).unwrap();
-            fs::write(job.join("audio.wav"), vec![0u8; 100]).unwrap();
+            let mut audio = fs::File::create(job.join("audio.wav")).unwrap();
+            crate::checkpoint::write_wav_header(&mut audio, 32_000).unwrap();
+            audio.set_len(32_044).unwrap();
+            drop(audio);
             let request = TranscriptRequest {
                 url: "https://www.youtube.com/watch?v=cache-test".into(),
                 title: "Cached video".into(),
@@ -2089,7 +2108,7 @@ mod tests {
                 model_id: "base".into(),
                 keep_audio: true,
             };
-            write_audio_cache_metadata(&job, &request).unwrap();
+            write_audio_cache_metadata(&job, &request, true).unwrap();
             guard.preserve_on_failure();
         }
         let matching_request = TranscriptRequest {
@@ -2110,11 +2129,51 @@ mod tests {
         };
 
         assert_eq!(
-            find_reusable_audio_job(&root, &matching_request).unwrap(),
+            find_reusable_audio_job(&root, &matching_request, &HashSet::new()).unwrap(),
             Some(fs::canonicalize(&job).unwrap())
         );
         assert_eq!(
-            find_reusable_audio_job(&root, &other_request).unwrap(),
+            find_reusable_audio_job(&root, &other_request, &HashSet::new()).unwrap(),
+            None
+        );
+        // Resume is independent of the preference to keep audio after success.
+        let no_keep_request = TranscriptRequest {
+            keep_audio: false,
+            ..matching_request.clone()
+        };
+        // Legacy audio-only caches remain reusable after upgrading.
+        fs::write(
+            job.join(super::AUDIO_CACHE_METADATA_FILE),
+            serde_json::to_vec(&serde_json::json!({
+                "version": 1, "url": matching_request.url, "duration": matching_request.duration
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            find_reusable_audio_job(&root, &no_keep_request, &HashSet::new()).unwrap(),
+            Some(fs::canonicalize(&job).unwrap())
+        );
+        // An interrupted download has metadata but no completed WAV yet.
+        let saved_audio = fs::read(job.join("audio.wav")).unwrap();
+        fs::remove_file(job.join("audio.wav")).unwrap();
+        write_audio_cache_metadata(&job, &matching_request, false).unwrap();
+        assert_eq!(
+            find_reusable_audio_job(&root, &no_keep_request, &HashSet::new()).unwrap(),
+            Some(fs::canonicalize(&job).unwrap())
+        );
+        fs::write(job.join("audio.wav"), saved_audio).unwrap();
+        write_audio_cache_metadata(&job, &matching_request, true).unwrap();
+        // A result written before a rolled-back commit must still resume.
+        fs::write(job.join("result.json"), b"uncommitted result").unwrap();
+        assert_eq!(
+            find_reusable_audio_job(&root, &no_keep_request, &HashSet::new()).unwrap(),
+            Some(fs::canonicalize(&job).unwrap())
+        );
+        // A committed row, even with a marker left by a crash, prevents duplication.
+        let committed = HashSet::from([fs::canonicalize(&job).unwrap()]);
+        assert_eq!(
+            find_reusable_audio_job(&root, &no_keep_request, &committed).unwrap(),
             None
         );
         fs::remove_dir_all(root).unwrap();

@@ -1,12 +1,21 @@
 param(
-    [string]$Repository = "mOdrA40/WhisperTube",
-    [string]$ReleaseTag = "accelerators-v0.1.0",
+    [string]$Repository,
+    [string]$ReleaseTag,
     [switch]$Apply
 )
 
 $ErrorActionPreference = "Stop"
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot ".." )).Path
 $sourcePath = Join-Path $projectRoot "src-tauri\src\accelerators.rs"
+$source = Get-Content -LiteralPath $sourcePath -Raw
+$catalogRepository = [regex]::Match($source, 'const RELEASE_REPOSITORY:\s*&str\s*=\s*"([^"]+)";').Groups[1].Value
+$catalogTag = [regex]::Match($source, 'const RELEASE_TAG:\s*&str\s*=\s*"([^"]+)";').Groups[1].Value
+if (-not $catalogRepository -or -not $catalogTag) { throw 'Identitas release katalog tidak ditemukan.' }
+if (-not $Repository) { $Repository = $catalogRepository }
+if (-not $ReleaseTag) { $ReleaseTag = $catalogTag }
+if ($Apply -and ($Repository -cne $catalogRepository -or $ReleaseTag -cne $catalogTag)) {
+    throw "-Apply harus memakai release katalog $catalogRepository/$catalogTag. Ubah identitas katalog terlebih dahulu bila berpindah release."
+}
 $apiUrl = "https://api.github.com/repos/$Repository/releases/tags/$ReleaseTag"
 $headers = @{ "User-Agent" = "WhisperTube-maintenance" }
 
@@ -63,7 +72,8 @@ if (-not $Apply) {
     exit 0
 }
 
-$source = Get-Content -LiteralPath $sourcePath -Raw
+$latestSource = Get-Content -LiteralPath $sourcePath -Raw
+if ($latestSource -cne $source) { throw 'Katalog berubah selama pengambilan hash. Ulangi sinkronisasi.' }
 $replacements = @{
     "METAL_MACOS_ARM64_SHA256" = $hashes["whispertube-macos-arm64-metal.zip"]
     "METAL_MACOS_X64_SHA256" = $hashes["whispertube-macos-x64-metal.zip"]

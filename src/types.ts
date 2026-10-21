@@ -168,6 +168,11 @@ export type HistoryItem = {
   backend: string;
 };
 
+export type HistoryDeleteOutcome = {
+  deletedIds: number[];
+  cleanupWarnings: string[];
+};
+
 export type HistoryPageResult = {
   items: HistoryItem[];
   hasMore: boolean;

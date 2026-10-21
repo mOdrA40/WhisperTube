@@ -111,7 +111,11 @@ fn executable_name() -> &'static str {
     }
 }
 
-pub fn catalog(app: &AppHandle, gpu_detected: bool) -> Result<Vec<AcceleratorInfo>, String> {
+pub fn catalog(
+    app: &AppHandle,
+    gpu_detected: bool,
+    vulkan_engine: Option<&Path>,
+) -> Result<Vec<AcceleratorInfo>, String> {
     Ok(pack_specs()
         .into_iter()
         .filter(|_| cfg!(target_os = "macos") || gpu_detected)
@@ -124,7 +128,11 @@ pub fn catalog(app: &AppHandle, gpu_detected: bool) -> Result<Vec<AcceleratorInf
                 label: spec.label.into(),
                 backend: spec.backend.into(),
                 supported: true,
-                installed: engine_available(app, spec.backend).unwrap_or(false),
+                installed: if is_vulkan {
+                    vulkan_engine.is_some_and(is_regular_file)
+                } else {
+                    engine_available(app, spec.backend).unwrap_or(false)
+                },
                 downloadable: spec.trusted_sha256.is_some(),
                 memory_available_mb,
                 memory_required_mb,

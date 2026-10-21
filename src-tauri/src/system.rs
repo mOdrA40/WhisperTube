@@ -68,6 +68,48 @@ pub struct ProcessMonitorGuard<'a> {
 struct CpuSampler {
     #[cfg(target_os = "windows")]
     previous: Option<CpuTimes>,
+    #[cfg(target_os = "linux")]
+    linux: LinuxCpuSampler,
+}
+
+// /proc/stat aggregate counters already include all CPUs. Guest time is
+// included in user/nice, so only the first eight counters are summed.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Default)]
+struct LinuxCpuSampler {
+    previous: Option<[u64; 8]>,
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl LinuxCpuSampler {
+    fn sample(&mut self, stat: &str) -> Option<f64> {
+        let current = stat.lines().find_map(|line| {
+            let mut fields = line.split_whitespace();
+            if fields.next()? != "cpu" {
+                return None;
+            }
+            let mut counters = [0; 8];
+            let mut count = 0;
+            for (slot, field) in counters.iter_mut().zip(fields) {
+                *slot = field.parse::<u64>().ok()?;
+                count += 1;
+            }
+            (count >= 4).then_some(counters)
+        });
+        let previous = std::mem::replace(&mut self.previous, current)?;
+        let current = current?;
+        let mut deltas = [0; 8];
+        for ((delta, current), previous) in deltas.iter_mut().zip(current).zip(previous) {
+            // A reset, rollover or decreasing iowait invalidates this interval.
+            *delta = current.checked_sub(previous)?;
+        }
+        let total = deltas.into_iter().try_fold(0u64, u64::checked_add)?;
+        let idle = deltas[3].checked_add(deltas[4])?;
+        if total == 0 {
+            return None;
+        }
+        Some(((total - idle) as f64 / total as f64 * 100.0).clamp(0.0, 100.0))
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -452,11 +494,22 @@ fn parse_vulkan_devices(stderr: &str) -> Vec<ComputeDeviceInfo> {
         .collect()
 }
 
+fn vulkan_probe_command(engine: &Path) -> Command {
+    let command = Command::new(engine);
+    #[cfg(target_os = "windows")]
+    let command = {
+        let mut command = command;
+        crate::process::hide_console(&mut command);
+        command
+    };
+    command
+}
+
 pub fn detect_vulkan_devices_from_engine(engine: &Path) -> Vec<ComputeDeviceInfo> {
     if !is_regular_file(engine) {
         return Vec::new();
     }
-    let mut command = Command::new(engine);
+    let mut command = vulkan_probe_command(engine);
     command.arg("--help");
     crate::process::run_with_timeout_captured(&mut command, Duration::from_secs(3), 256 * 1024)
         .map(|(_, stderr)| parse_vulkan_devices(&stderr))
@@ -685,7 +738,19 @@ fn sample_cpu_usage(sampler: &mut CpuSampler) -> Option<f64> {
     Some(((total_delta - idle_delta) as f64 / total_delta as f64 * 100.0).clamp(0.0, 100.0))
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(target_os = "linux")]
+fn sample_cpu_usage(sampler: &mut CpuSampler) -> Option<f64> {
+    match fs::read_to_string("/proc/stat") {
+        Ok(stat) => sampler.linux.sample(&stat),
+        Err(_) => {
+            // Do not reuse an old baseline after an unavailable sample.
+            sampler.linux.previous = None;
+            None
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn sample_cpu_usage(_sampler: &mut CpuSampler) -> Option<f64> {
     let mut command = Command::new("ps");
     crate::process::hide_console(&mut command);
@@ -828,7 +893,12 @@ pub fn system_status(app: &AppHandle) -> Result<SystemStatus, String> {
     let gpu_free_memory_mb = gpu.as_ref().and_then(|info| info.free_memory_mb);
     let available_memory_mb = crate::resources::available_memory_mb();
     let available_vram_mb = gpu.as_ref().and_then(GpuInfo::available_memory_mb);
-    let accelerators = accelerators::catalog(app, gpu.is_some())?;
+    let vulkan_engine = if gpu.is_some() && cfg!(any(target_os = "windows", target_os = "linux")) {
+        Some(engine_path(app, "vulkan")?)
+    } else {
+        None
+    };
+    let accelerators = accelerators::catalog(app, gpu.is_some(), vulkan_engine.as_deref())?;
     let job_storage_bytes = crate::history::job_storage_bytes(app)?;
     let vulkan_installed = accelerators
         .iter()
@@ -850,7 +920,9 @@ pub fn system_status(app: &AppHandle) -> Result<SystemStatus, String> {
         }));
     }
     if vulkan_installed {
-        compute_devices.extend(detect_vulkan_devices(app));
+        if let Some(engine) = &vulkan_engine {
+            compute_devices.extend(detect_vulkan_devices_from_engine(engine));
+        }
     }
     let cpu_threads = std::thread::available_parallelism()
         .map(|value| value.get())
@@ -963,6 +1035,101 @@ mod tests {
         MAX_SYSTEM_PROBE_STDOUT_BYTES,
     };
     use std::io::Cursor;
+
+    #[test]
+    fn linux_cpu_usage_uses_interval_aggregate_and_excludes_guest_time() {
+        let mut sampler = super::LinuxCpuSampler::default();
+        assert_eq!(
+            sampler.sample("cpu 100 0 0 900 0 0 0 0 100 0\ncpu0 100 0 0 900"),
+            None
+        );
+        assert_eq!(sampler.sample("cpu 150 0 0 950 0 0 0 0 150 0"), Some(50.0));
+        assert_eq!(sampler.sample("cpu 150 0 0 1050 0 0 0 0"), Some(0.0));
+        assert_eq!(sampler.sample("cpu 250 0 0 1050 0 0 0 0"), Some(100.0));
+    }
+
+    #[test]
+    fn linux_cpu_usage_rebaselines_after_missing_invalid_or_reset_counters() {
+        let mut sampler = super::LinuxCpuSampler::default();
+        assert_eq!(sampler.sample("cpu 100 0 0 100 10 0 0 0"), None);
+        assert_eq!(sampler.sample("cpu 100 0 0 100 10 0 0 0"), None);
+        assert_eq!(sampler.sample("cpu 110 0 0 110 9 0 0 0"), None);
+        assert!(sampler
+            .sample("cpu 120 0 0 120 9 0 0 0")
+            .unwrap()
+            .is_finite());
+        for invalid in [
+            "",
+            "cpu0 1 2 3 4",
+            "cpu 1 2 3",
+            "cpu 1 2 3 -1",
+            "cpu 1 2 3 nope",
+        ] {
+            assert_eq!(sampler.sample(invalid), None);
+            assert_eq!(sampler.sample("cpu 1 0 0 1"), None);
+            assert_eq!(sampler.sample("cpu 2 0 0 2"), Some(50.0));
+        }
+        assert_eq!(sampler.sample("cpu 0 0 0 0"), None);
+        assert_eq!(sampler.sample("cpu 1 0 0 1"), Some(50.0));
+        assert_eq!(
+            sampler.sample(&format!("cpu {} 0 0 {}", u64::MAX, u64::MAX)),
+            None
+        );
+        assert_eq!(sampler.sample("cpu 0 0 0 0"), None);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn vulkan_probe_child_has_no_console_and_captures_stderr() {
+        const CHILD: &str = "WHISPERTUBE_VULKAN_CONSOLE_TEST_CHILD";
+        if let Some(mode) = std::env::var_os(CHILD) {
+            #[link(name = "kernel32")]
+            unsafe extern "system" {
+                fn GetConsoleWindow() -> *mut std::ffi::c_void;
+            }
+            assert!(unsafe { GetConsoleWindow() }.is_null());
+            eprintln!("hidden-probe-ok");
+            if mode == "sleep" {
+                std::thread::sleep(std::time::Duration::from_secs(10));
+            }
+            return;
+        }
+        let mut command = super::vulkan_probe_command(&std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "system::tests::vulkan_probe_child_has_no_console_and_captures_stderr",
+                "--nocapture",
+            ])
+            .env(CHILD, "1");
+        let (status, stderr) = crate::process::run_with_timeout_captured(
+            &mut command,
+            std::time::Duration::from_secs(10),
+            4096,
+        )
+        .unwrap();
+        assert!(status.success(), "{stderr}");
+        assert!(stderr.contains("hidden-probe-ok"));
+
+        command.env(CHILD, "sleep");
+        let error = crate::process::run_with_timeout_captured(
+            &mut command,
+            std::time::Duration::from_millis(250),
+            4096,
+        )
+        .unwrap_err();
+        assert!(error.contains("melewati batas waktu"));
+
+        let cancelled = std::sync::atomic::AtomicBool::new(true);
+        let error = crate::process::run_with_timeout_captured_cancelable(
+            &mut command,
+            std::time::Duration::from_secs(10),
+            4096,
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(error.contains("dibatalkan"));
+    }
 
     #[test]
     fn selects_nvidia_device_with_the_most_free_memory() {

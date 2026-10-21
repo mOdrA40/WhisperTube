@@ -222,15 +222,6 @@ pub fn ensure_download_supported(
     let spec = model_spec(model_id)?;
     let target_id = compute_device_id.unwrap_or("auto");
 
-    if target_id == "auto" && cfg!(all(target_os = "windows", target_arch = "x86_64")) {
-        let nvidia = system::detect_nvidia();
-        if engine_available(app, "cuda")? {
-            if let Some(gpu) = nvidia {
-                return ensure_vram_available(spec.id, gpu.available_memory_mb());
-            }
-        }
-    }
-
     if let Some(index) = target_id.strip_prefix("cuda:") {
         let index = index
             .parse::<usize>()

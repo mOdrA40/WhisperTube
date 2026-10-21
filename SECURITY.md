@@ -59,10 +59,32 @@ TAURI_SIGNING_PRIVATE_KEY.
 
 ## Dependency audit status
 
-The current Rust lockfile has no known vulnerability advisory, but Linux builds
-inherit GTK3 `glib 0.18.5` through the Tauri/WebKitGTK stack. RustSec reports an
-unsound `VariantStrIter` implementation for that range. The current Tauri and
-Wry releases still resolve this Linux stack to GTK3, so the project must not
-silently ignore the advisory or claim Linux is fully hardened until the
-upstream stack moves to a fixed GLib line or a reviewed compatible patch is
-available.
+Dependency status is a dated observation, not a permanent assurance. Run
+`npm audit --audit-level=high` and `cargo audit --file src-tauri/Cargo.lock`
+against the checked-in lockfiles and a current advisory database. Run both
+locally before pushing release changes; GitHub Actions does not run dependency
+audits or a separate quality gate. Do not suppress audit failures to publish a release.
+Check the resolved versions and enabled features as well as the advisory count.
+
+The remediation baseline checked on 2026-10-21 reports zero npm vulnerabilities
+and zero Cargo vulnerability matches. Cargo still reports nine unmaintained
+package warnings and one unsoundness warning. In particular, Linux builds
+inherit GTK3 `glib 0.18.5` through Tauri/WebKitGTK; RUSTSEC-2024-0429 concerns
+its `VariantStrIter` implementation. No compatible fixed GTK3 dependency line
+has been applied here. This residual requires upstream tracking and native
+Linux validation; a passing audit exit code does not mean Linux is fully
+hardened or that the application is free of vulnerabilities.
+
+The application ZIP reader uses ZIP 9.0.5 or newer. The updater's optional
+Windows ZIP / Linux gzip support is disabled: the application release workflow
+publishes signed raw `.exe` and `.AppImage` updater payloads. macOS
+`.app.tar.gz` support remains enabled through the updater's unconditional
+macOS dependencies. Keep these feature choices and
+`.github/workflows/build-application-bundles.yml` in sync when changing formats.
+
+For each advisory, document the affected dependency path, enabled platform and
+features, attack prerequisites, available patch, and remaining uncertainty.
+Prefer compatible patched versions. Any exception must be specific, reviewed,
+and explain its residual risk; neither a scanner warning nor its absence alone
+establishes exploitability. Native runtime binaries, OS distribution trust,
+and untested platforms require separate verification from npm/Cargo audits.

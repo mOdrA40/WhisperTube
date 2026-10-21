@@ -12,8 +12,12 @@ const services = vi.hoisted(() => ({
   inspectMedia: vi.fn(),
   startTranscription: vi.fn(),
   deleteHistory: vi.fn(),
+  deleteModel: vi.fn(),
+  loadHistory: vi.fn(),
   resetUserData: vi.fn(),
   checkForAppUpdate: vi.fn(),
+  disposeAppUpdate: vi.fn().mockResolvedValue(undefined),
+  installAppUpdate: vi.fn(),
   subscribeToProgress: vi.fn(),
   subscribeToModelDownload: vi.fn(),
   subscribeToCudaDownload: vi.fn(),
@@ -23,13 +27,10 @@ const services = vi.hoisted(() => ({
 vi.mock("../services/tauri", () => ({
   ...services,
   cancelJob: vi.fn(),
-  deleteModel: vi.fn(),
   downloadModel: vi.fn(),
   exportTranscriptFile: vi.fn(),
   installAccelerator: vi.fn(),
   installCudaEngine: vi.fn(),
-  installAppUpdate: vi.fn(),
-  loadHistory: vi.fn(),
   pickCookiesFile: vi.fn(),
   revealAudioFile: vi.fn(),
 }));
@@ -106,12 +107,42 @@ describe("useWhisperTube", () => {
     services.listHistory.mockResolvedValue({ items: [], hasMore: false, totalCount: 0 });
     services.inspectMedia.mockResolvedValue(metadata);
     services.startTranscription.mockResolvedValue(transcript);
+    services.loadHistory.mockResolvedValue(transcript);
+    services.deleteHistory.mockResolvedValue({ deletedIds: [1], cleanupWarnings: [] });
     services.checkForAppUpdate.mockResolvedValue(null);
     const unlisten = vi.fn();
     services.subscribeToProgress.mockResolvedValue(unlisten);
     services.subscribeToModelDownload.mockResolvedValue(unlisten);
     services.subscribeToCudaDownload.mockResolvedValue(unlisten);
     services.subscribeToAcceleratorDownload.mockResolvedValue(unlisten);
+  });
+
+  it("disposes updater ownership when the application hook unmounts", async () => {
+    const { result, unmount } = renderHook(() => useWhisperTube(), { wrapper });
+    await waitFor(() => expect(result.current.system).toEqual(system));
+    expect(services.disposeAppUpdate).not.toHaveBeenCalled();
+    unmount();
+    expect(services.disposeAppUpdate).toHaveBeenCalledOnce();
+  });
+
+  it("does not let a late update check overwrite the installing status", async () => {
+    const update = { version: "0.3.0", notes: null, date: null };
+    services.checkForAppUpdate.mockResolvedValueOnce(update);
+    let finishCheck!: (value: typeof update) => void;
+    let finishInstall!: () => void;
+    const { result } = renderHook(() => useWhisperTube(), { wrapper });
+    await waitFor(() => expect(result.current.appUpdate).toEqual(update));
+    services.checkForAppUpdate.mockReturnValueOnce(new Promise((resolve) => { finishCheck = resolve; }));
+    services.installAppUpdate.mockReturnValueOnce(new Promise<void>((resolve) => { finishInstall = resolve; }));
+    let checking!: Promise<void>;
+    let installing!: Promise<void>;
+    act(() => { checking = result.current.checkForAppUpdate(); });
+    act(() => { installing = result.current.installAppUpdate(); });
+    expect(result.current.appUpdateStatus).toBe("installing");
+    await act(async () => { finishCheck(update); await checking; });
+    expect(result.current.appUpdateStatus).toBe("installing");
+    await act(async () => { finishInstall(); await installing; });
+    expect(result.current.appUpdateStatus).toBe("up-to-date");
   });
 
   it("keeps a completed transcription when the following history refresh fails", async () => {
@@ -186,7 +217,61 @@ describe("useWhisperTube", () => {
     expect(result.current.error).toBeNull();
   });
 
-  it("reconciles history after a delete that changed storage but returned a cleanup error", async () => {
+  it.each([1024, null])("lets Auto fall back when installable CUDA has insufficient or unknown VRAM (%s)", async (free) => {
+    services.getSystemStatus.mockResolvedValue({ ...system, cudaEngine: true, cudaSupported: true,
+      cudaInstallable: true, nvidia: true, gpuFreeMemoryMb: free, gpuMemoryMb: free });
+    services.listModels.mockResolvedValue([{ ...models[0], vramRequiredMb: 4096 }]);
+    const { result } = renderHook(() => useWhisperTube(), { wrapper });
+    await waitFor(() => expect(result.current.system?.cudaInstallable).toBe(true));
+    act(() => result.current.setUrl(metadata.webpageUrl));
+    await act(async () => result.current.inspectVideo());
+    expect(result.current.canStart).toBe(true);
+    await act(async () => result.current.startTranscription());
+    expect(services.startTranscription).toHaveBeenCalledOnce();
+  });
+
+  it("keeps model deletion busy until it settles and releases busy on failure", async () => {
+    let fail!: (error: Error) => void;
+    services.deleteModel.mockReturnValueOnce(new Promise((_, reject) => { fail = reject; }));
+    const { result } = renderHook(() => useWhisperTube(), { wrapper });
+    await waitFor(() => expect(result.current.system).toEqual(system));
+    let removing!: Promise<void>;
+    act(() => { removing = result.current.removeModel("base"); });
+    expect(result.current.operationActive).toBe(true);
+    await act(async () => {
+      fail(new Error("File terkunci"));
+      await expect(removing).rejects.toThrow("File terkunci");
+    });
+    expect(result.current.operationActive).toBe(false);
+    expect(result.current.error).toContain("File terkunci");
+  });
+
+  it("clears an active result after committed deletion even when file cleanup is deferred", async () => {
+    services.deleteHistory.mockResolvedValueOnce({ deletedIds: [1], cleanupWarnings: ["Pembersihan tertunda"] });
+    const { result } = renderHook(() => useWhisperTube(), { wrapper });
+    await waitFor(() => expect(result.current.system).toEqual(system));
+    act(() => result.current.setUrl(metadata.webpageUrl));
+    await act(async () => result.current.inspectVideo());
+    await act(async () => result.current.startTranscription());
+    expect(result.current.result).toEqual(transcript);
+    await act(async () => result.current.deleteHistory([1]));
+    expect(result.current.result).toBeNull();
+    expect(result.current.error).toContain("Pembersihan tertunda");
+  });
+
+  it("preserves an active result when deletion fails before commit", async () => {
+    services.deleteHistory.mockRejectedValueOnce(new Error("Database terkunci"));
+    const { result } = renderHook(() => useWhisperTube(), { wrapper });
+    await waitFor(() => expect(result.current.system).toEqual(system));
+    act(() => result.current.setUrl(metadata.webpageUrl));
+    await act(async () => result.current.inspectVideo());
+    await act(async () => result.current.startTranscription());
+    await act(async () => { await expect(result.current.deleteHistory([1])).rejects.toThrow("Database terkunci"); });
+    expect(result.current.result).toEqual(transcript);
+    expect(result.current.error).toContain("Database terkunci");
+  });
+
+  it("refreshes history after a rejected database mutation", async () => {
     const historyItem = {
       id: 1,
       title: "Test video",
@@ -199,7 +284,7 @@ describe("useWhisperTube", () => {
       backend: "cpu",
     };
     services.listHistory.mockResolvedValueOnce({ items: [historyItem], hasMore: false, totalCount: 1 });
-    services.deleteHistory.mockRejectedValueOnce(new Error("History sudah dihapus dari database, tetapi file sementara gagal dibersihkan"));
+    services.deleteHistory.mockRejectedValueOnce(new Error("Database tidak tersedia"));
     const { result } = renderHook(() => useWhisperTube(), { wrapper });
     await waitFor(() => expect(result.current.history).toEqual([historyItem]));
     services.listHistory.mockResolvedValueOnce({ items: [], hasMore: false, totalCount: 0 });
@@ -213,7 +298,7 @@ describe("useWhisperTube", () => {
     });
 
     expect(result.current.history).toEqual([]);
-    expect(result.current.error).toContain("History sudah dihapus dari database");
+    expect(result.current.error).toContain("Database tidak tersedia");
   });
 
   it("surfaces a manual refresh failure instead of leaking an unhandled rejection", async () => {

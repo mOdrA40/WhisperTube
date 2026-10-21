@@ -22,7 +22,7 @@ fn remove_dir_if_present(path: &Path) -> Result<(), String> {
 
 fn cleanup_targets(root: &Path) -> Vec<String> {
     let mut errors = Vec::new();
-    for path in ["models", "jobs", "runtime"] {
+    for path in ["models", "jobs", "runtime", "cookie-jars"] {
         if let Err(error) = remove_dir_if_present(&root.join(path)) {
             errors.push(error);
         }

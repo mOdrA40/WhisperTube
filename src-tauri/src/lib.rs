@@ -1,5 +1,6 @@
 mod accelerators;
 mod archive;
+mod checkpoint;
 mod commands;
 mod cookies;
 mod history;
@@ -48,6 +49,9 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle().clone();
             history::init_db(&handle).map_err(std::io::Error::other)?;
+            if let Err(error) = cookies::cleanup_stale(&handle) {
+                eprintln!("WhisperTube cookie storage cleanup warning: {error}");
+            }
             if let Err(error) = history::cleanup_job_storage(&handle) {
                 eprintln!("WhisperTube startup cleanup warning: {error}");
             }

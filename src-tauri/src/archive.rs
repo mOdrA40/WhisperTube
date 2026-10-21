@@ -38,7 +38,7 @@ pub fn extract_zip_safely(
             return Err(format!("Isi archive {label} melebihi batas ukuran aman."));
         }
         let target = destination.join(relative);
-        if entry.name().ends_with('/') {
+        if entry.is_dir() {
             fs::create_dir_all(&target)
                 .map_err(|e| format!("Gagal membuat folder {label}: {e}"))?;
             continue;
@@ -83,4 +83,56 @@ pub fn copy_tree(source: &Path, destination: &Path, label: &str) -> Result<(), S
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
+
+    fn fixture(root: &Path, name: &str, method: CompressionMethod) -> PathBuf {
+        let path = root.join("fixture.zip");
+        let mut writer = ZipWriter::new(File::create(&path).unwrap());
+        writer
+            .add_directory("engine/", SimpleFileOptions::default())
+            .unwrap();
+        writer
+            .start_file(
+                name,
+                SimpleFileOptions::default().compression_method(method),
+            )
+            .unwrap();
+        writer.write_all(b"runtime fixture").unwrap();
+        writer.finish().unwrap();
+        path
+    }
+
+    #[test]
+    fn extracts_stored_and_deflated_nested_runtime_files() {
+        let root =
+            std::env::temp_dir().join(format!("whispertube-zip-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        for method in [CompressionMethod::Stored, CompressionMethod::Deflated] {
+            let path = fixture(&root, "engine/whisper-cli", method);
+            let target = root.join(format!("output-{method:?}"));
+            extract_zip_safely(&path, &target, "test").unwrap();
+            assert_eq!(
+                fs::read(target.join("engine/whisper-cli")).unwrap(),
+                b"runtime fixture"
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejects_parent_traversal_without_writing_outside_destination() {
+        let root =
+            std::env::temp_dir().join(format!("whispertube-zip-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let path = fixture(&root, "../outside.txt", CompressionMethod::Stored);
+        assert!(extract_zip_safely(&path, &root.join("output"), "test").is_err());
+        assert!(!root.join("outside.txt").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
 }

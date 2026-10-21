@@ -32,8 +32,11 @@ The Rust dependency audit also requires cargo-audit:
     cargo install cargo-audit --locked
     cargo audit --file src-tauri/Cargo.lock
 
-The GitHub Actions quality gate runs these checks on a clean Windows runner and
-also runs Bash parser checks for the macOS and Linux scripts.
+Run these checks locally before pushing. GitHub Actions only builds and
+publishes application bundles and accelerator packs; there is no separate CI
+quality gate. Application packaging still builds the frontend, including its
+TypeScript check, because the resulting assets are required by the installer.
+Check Unix script syntax locally with `bash -n scripts/<script-name>.sh`.
 
 ## Node.js, Rust, or Cargo is not recognized
 

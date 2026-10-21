@@ -153,6 +153,7 @@ try {
     Push-Location $Root
     try {
         npm ci
+        if ($LASTEXITCODE -ne 0) { throw "Instalasi dependency gagal (npm exit code $LASTEXITCODE)." }
     } finally {
         Pop-Location
     }

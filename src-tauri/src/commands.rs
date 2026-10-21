@@ -5,8 +5,8 @@ use crate::{
     state::{AppState, JobGuard, OperationGuard},
     system, transcription,
     types::{
-        ErrorPayload, HistoryPageResult, ModelInfo, SystemStatus, TranscriptRequest,
-        TranscriptResult, VideoMetadata,
+        ErrorPayload, HistoryDeleteOutcome, HistoryPageResult, ModelInfo, SystemStatus,
+        TranscriptRequest, TranscriptResult, VideoMetadata,
     },
     user_data,
 };
@@ -177,7 +177,7 @@ pub async fn delete_history(
     app: AppHandle,
     state: State<'_, AppState>,
     ids: Vec<i64>,
-) -> CommandResult<()> {
+) -> CommandResult<HistoryDeleteOutcome> {
     let operation = OperationGuard::reserve_history_delete(&state)?;
     Ok(tokio::task::spawn_blocking(move || {
         let _operation = operation;

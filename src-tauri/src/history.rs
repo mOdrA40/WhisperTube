@@ -11,12 +11,11 @@ use std::{
 };
 use tauri::AppHandle;
 use tauri_plugin_opener::OpenerExt;
-use uuid::Uuid;
 
 use crate::{
     paths::app_data_dir,
     types::{
-        HistoryItem, HistoryPageResult, TranscriptRequest, TranscriptResult,
+        HistoryDeleteOutcome, HistoryItem, HistoryPageResult, TranscriptRequest, TranscriptResult,
         MAX_TRANSCRIPT_RESULT_BYTES, MAX_TRANSCRIPT_SEGMENTS, MAX_TRANSCRIPT_TEXT_BYTES,
     },
 };
@@ -105,8 +104,14 @@ pub fn init_db(app: &AppHandle) -> Result<PathBuf, String> {
     let db_path = database_path(app)?;
     let conn = Connection::open(&db_path).map_err(|e| format!("Gagal membuka database: {e}"))?;
     configure_connection(&conn)?;
+    initialize_schema(&conn)?;
+    Ok(db_path)
+}
+
+fn initialize_schema(conn: &Connection) -> Result<(), String> {
     conn.execute_batch(
         "
+        CREATE TABLE IF NOT EXISTS pending_job_deletions (job_name TEXT PRIMARY KEY NOT NULL);
         CREATE TABLE IF NOT EXISTS history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             title TEXT NOT NULL,
@@ -122,7 +127,7 @@ pub fn init_db(app: &AppHandle) -> Result<PathBuf, String> {
         ",
     )
     .map_err(|e| format!("Gagal inisialisasi database: {e}"))?;
-    Ok(db_path)
+    Ok(())
 }
 
 fn open_connection(app: &AppHandle) -> Result<Connection, String> {
@@ -259,7 +264,32 @@ fn decode_history_result(bytes: &[u8]) -> Result<TranscriptResult, String> {
 
 fn job_dir_for_result(app: &AppHandle, result_path: &str) -> Result<Option<PathBuf>, String> {
     let jobs_root = crate::paths::jobs_dir(app)?;
-    let canonical_jobs_root = fs::canonicalize(&jobs_root)
+    job_dir_for_result_in(&jobs_root, result_path)
+}
+
+// A result file is written inside the SQLite transaction. After a crash it
+// can exist without a committed row, so file existence cannot decide whether
+// a checkpoint job is finished.
+pub fn referenced_job_directories(app: &AppHandle) -> Result<HashSet<PathBuf>, String> {
+    let conn = open_connection(app)?;
+    let mut statement = conn
+        .prepare("SELECT result_path FROM history")
+        .map_err(|e| format!("Gagal membaca referensi history untuk resume: {e}"))?;
+    let paths = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|e| format!("Gagal query referensi history untuk resume: {e}"))?;
+    let mut directories = HashSet::new();
+    for path in paths {
+        let path = path.map_err(|e| format!("Path history untuk resume tidak valid: {e}"))?;
+        if let Some(directory) = job_dir_for_result(app, &path)? {
+            directories.insert(directory);
+        }
+    }
+    Ok(directories)
+}
+
+fn job_dir_for_result_in(jobs_root: &Path, result_path: &str) -> Result<Option<PathBuf>, String> {
+    let canonical_jobs_root = fs::canonicalize(jobs_root)
         .map_err(|e| format!("Gagal memvalidasi history storage: {e}"))?;
     let result_path = PathBuf::from(result_path);
     if result_path.file_name() != Some(OsStr::new("result.json")) {
@@ -292,9 +322,83 @@ fn is_older_than(path: &Path, age: Duration) -> bool {
 
 pub fn cleanup_job_storage(app: &AppHandle) -> Result<(), String> {
     let root = crate::paths::jobs_dir(app)?;
-    let canonical_root =
-        fs::canonicalize(&root).map_err(|e| format!("Gagal memvalidasi job storage: {e}"))?;
     let conn = open_connection(app)?;
+    let result = cleanup_job_storage_in(&conn, &root);
+    invalidate_job_storage_cache();
+    result
+}
+
+pub(crate) fn cleanup_source_audio(job_dir: &Path) -> Result<(), String> {
+    for entry in fs::read_dir(job_dir)
+        .map_err(|e| format!("Gagal membaca audio sumber untuk cleanup: {e}"))?
+    {
+        let entry = entry.map_err(|e| format!("Gagal membaca entry audio sumber: {e}"))?;
+        if entry.file_name().to_string_lossy().starts_with("source.") {
+            // Unlink only direct source files, never recurse into a matching directory.
+            match fs::remove_file(entry.path()) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(format!("Gagal menghapus audio sumber: {error}")),
+            }
+        }
+    }
+    Ok(())
+}
+
+fn cleanup_committed_job(job_dir: &Path) -> Result<(), String> {
+    // A committed row authorizes source cleanup independently of WAV retention,
+    // including jobs whose marker and other temporary artifacts are already gone.
+    cleanup_source_audio(job_dir)?;
+    let marker = job_dir.join(".in-progress");
+    let wav = job_dir.join("audio.wav");
+    if !marker
+        .try_exists()
+        .map_err(|e| format!("Gagal membaca marker history: {e}"))?
+        && !job_dir
+            .join(".checkpoints")
+            .try_exists()
+            .map_err(|e| format!("Gagal membaca checkpoint history: {e}"))?
+        && !wav
+            .try_exists()
+            .map_err(|e| format!("Gagal membaca audio history: {e}"))?
+    {
+        return Ok(());
+    }
+    // Only a committed history row authorizes this cleanup. A result file on
+    // its own may belong to a rolled-back transaction and must remain resumable.
+    let result_path = fs::canonicalize(job_dir.join("result.json"))
+        .map_err(|e| format!("Gagal memvalidasi hasil untuk cleanup history: {e}"))?;
+    if result_path.parent() != Some(job_dir) {
+        return Err("File history berada di luar folder job WhisperTube.".into());
+    }
+    let file = fs::File::open(result_path)
+        .map_err(|e| format!("Gagal membuka hasil untuk cleanup history: {e}"))?;
+    let mut bytes = Vec::new();
+    file.take(MAX_TRANSCRIPT_RESULT_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("Gagal membaca hasil untuk cleanup history: {e}"))?;
+    let result = decode_history_result(&bytes)?;
+    crate::checkpoint::cleanup(job_dir)?;
+    if result.audio_path.is_none() {
+        match fs::remove_file(&wav) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("Gagal membersihkan audio history: {error}")),
+        }
+    }
+    // Keep the marker until all cleanup succeeds; retries also inspect the
+    // artifacts themselves to recover jobs whose marker was already removed.
+    match fs::remove_file(marker) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("Gagal membersihkan marker history: {error}")),
+    }
+}
+
+fn cleanup_job_storage_in(conn: &Connection, root: &Path) -> Result<(), String> {
+    let canonical_root =
+        fs::canonicalize(root).map_err(|e| format!("Gagal memvalidasi job storage: {e}"))?;
+    let mut warnings = cleanup_pending_deletions(conn, root)?;
     let mut statement = conn
         .prepare("SELECT result_path FROM history")
         .map_err(|e| format!("Gagal membaca referensi history: {e}"))?;
@@ -309,11 +413,14 @@ pub fn cleanup_job_storage(app: &AppHandle) -> Result<(), String> {
         .into_iter()
         .filter_map(|path| fs::canonicalize(path).ok())
         .collect::<HashSet<_>>();
-    let entries = fs::read_dir(&root).map_err(|e| format!("Gagal membaca job storage: {e}"))?;
+    let entries = fs::read_dir(root).map_err(|e| format!("Gagal membaca job storage: {e}"))?;
     for entry in entries {
         let entry = entry.map_err(|e| format!("Gagal membaca entry job storage: {e}"))?;
         let path = entry.path();
-        if !path.is_dir() || !is_older_than(&path, ORPHAN_JOB_GRACE) {
+        let kind = entry
+            .file_type()
+            .map_err(|e| format!("Gagal membaca tipe job storage: {e}"))?;
+        if !kind.is_dir() || kind.is_symlink() {
             continue;
         }
         let canonical_job_dir =
@@ -326,134 +433,158 @@ pub fn cleanup_job_storage(app: &AppHandle) -> Result<(), String> {
             .map(|result| valid_results.contains(&result))
             .unwrap_or(false);
         if has_valid_history {
-            let marker = path.join(".in-progress");
-            if marker.exists() {
-                fs::remove_file(marker)
-                    .map_err(|e| format!("Gagal membersihkan marker history: {e}"))?;
+            if let Err(error) = cleanup_committed_job(&canonical_job_dir) {
+                warnings.push(format!(
+                    "Pembersihan history {} tertunda: {error}",
+                    path.display()
+                ));
             }
             continue;
         }
-        fs::remove_dir_all(&path)
-            .map_err(|e| format!("Gagal membersihkan job storage orphan: {e}"))?;
-    }
-    Ok(())
-}
-
-struct StagedDeletion {
-    original: PathBuf,
-    trash: PathBuf,
-}
-
-fn restore_staged_deletions(staged: &mut [StagedDeletion]) -> Result<(), String> {
-    let mut errors = Vec::new();
-    for item in staged.iter().rev() {
-        if !item.trash.exists() {
-            continue;
-        }
-        if let Err(error) = fs::rename(&item.trash, &item.original) {
-            errors.push(format!("{}: {error}", item.original.display()));
+        if is_older_than(&path, ORPHAN_JOB_GRACE) {
+            if let Err(error) = fs::remove_dir_all(&path) {
+                warnings.push(format!(
+                    "Gagal membersihkan job storage orphan {}: {error}",
+                    path.display()
+                ));
+            }
         }
     }
-    if errors.is_empty() {
+    if warnings.is_empty() {
         Ok(())
     } else {
-        Err(format!(
-            "Sebagian file history gagal dipulihkan: {}",
-            errors.join("; ")
-        ))
+        Err(warnings.join("; "))
     }
 }
 
-pub fn delete_history(app: &AppHandle, ids: &[i64]) -> Result<(), String> {
-    if ids.is_empty() {
-        return Ok(());
-    }
+// Delete intent and rows commit together. Files are removed only after commit;
+// interrupted cleanup is replayed at startup, including partially removed folders.
+fn queue_history_deletion(
+    conn: &mut Connection,
+    root: &Path,
+    ids: &[i64],
+) -> Result<Vec<i64>, String> {
     if ids.len() > 100 || ids.iter().any(|id| *id <= 0) {
         return Err("Daftar history yang akan dihapus tidak valid.".into());
     }
-
-    let unique_ids = ids.iter().copied().collect::<BTreeSet<_>>();
-    let mut conn = open_connection(app)?;
-    let mut job_dirs = Vec::new();
-    for id in &unique_ids {
-        let result_path: String = conn
+    let ids = ids.iter().copied().collect::<BTreeSet<_>>();
+    let transaction = conn
+        .transaction()
+        .map_err(|e| format!("Gagal memulai penghapusan: {e}"))?;
+    for id in &ids {
+        let path: String = transaction
             .query_row(
                 "SELECT result_path FROM history WHERE id = ?1",
                 [id],
                 |row| row.get(0),
             )
             .map_err(|e| format!("History {id} tidak ditemukan: {e}"))?;
-        if let Some(job_dir) = job_dir_for_result(app, &result_path)? {
-            if !job_dirs.contains(&job_dir) {
-                job_dirs.push(job_dir);
+        if let Some(dir) = job_dir_for_result_in(root, &path)? {
+            let name = dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| "Nama folder history tidak valid.".to_string())?;
+            transaction
+                .execute(
+                    "INSERT OR IGNORE INTO pending_job_deletions(job_name) VALUES (?1)",
+                    [name],
+                )
+                .map_err(|e| format!("Gagal menyimpan intent penghapusan: {e}"))?;
+        }
+        transaction
+            .execute("DELETE FROM history WHERE id = ?1", [id])
+            .map_err(|e| format!("Gagal menghapus history {id}: {e}"))?;
+    }
+    transaction
+        .commit()
+        .map_err(|e| format!("Gagal menyelesaikan penghapusan: {e}"))?;
+    Ok(ids.into_iter().collect())
+}
+
+fn cleanup_pending_deletions(conn: &Connection, root: &Path) -> Result<Vec<String>, String> {
+    let root = fs::canonicalize(root).map_err(|e| format!("Gagal memvalidasi job storage: {e}"))?;
+    let names = conn
+        .prepare("SELECT job_name FROM pending_job_deletions")
+        .and_then(|mut statement| {
+            statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .map_err(|e| format!("Gagal membaca intent penghapusan: {e}"))?;
+    let references = conn
+        .prepare("SELECT result_path FROM history")
+        .and_then(|mut statement| {
+            statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .map_err(|e| format!("Gagal membaca referensi history: {e}"))?;
+    let mut live_dirs = HashSet::new();
+    for path in references {
+        if let Some(dir) = job_dir_for_result_in(&root, &path)? {
+            live_dirs.insert(dir);
+        }
+    }
+    let mut warnings = Vec::new();
+    for name in names {
+        let cleanup = || -> Result<(), String> {
+            let mut components = Path::new(&name).components();
+            if !matches!(components.next(), Some(std::path::Component::Normal(_)))
+                || components.next().is_some()
+            {
+                return Err("Nama folder pada intent penghapusan tidak aman.".into());
             }
-        }
-    }
-
-    let jobs_root = crate::paths::jobs_dir(app)?;
-    let mut staged = Vec::new();
-    for original in job_dirs {
-        let trash = jobs_root.join(format!(".deleted-{}", Uuid::new_v4()));
-        if let Err(error) = fs::rename(&original, &trash) {
-            let restore_error = restore_staged_deletions(&mut staged).err();
-            return Err(match restore_error {
-                Some(restore_error) => {
-                    format!("Gagal menyiapkan penghapusan history: {error}. {restore_error}")
+            let target = root.join(&name);
+            match fs::symlink_metadata(&target) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(format!("Gagal membaca folder tertunda: {e}")),
+                Ok(metadata) => {
+                    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                        return Err("Folder tertunda bukan direktori biasa.".into());
+                    }
+                    let canonical = fs::canonicalize(&target)
+                        .map_err(|e| format!("Gagal memvalidasi folder tertunda: {e}"))?;
+                    if canonical.parent() != Some(root.as_path()) || live_dirs.contains(&canonical)
+                    {
+                        return Err(
+                            "Folder tertunda berada di luar storage atau masih dirujuk history."
+                                .into(),
+                        );
+                    }
+                    fs::remove_dir_all(&target)
+                        .map_err(|e| format!("Gagal membersihkan file history: {e}"))?;
                 }
-                None => format!("Gagal menyiapkan penghapusan history: {error}"),
-            });
-        }
-        staged.push(StagedDeletion { original, trash });
-    }
-
-    let transaction = match conn.transaction() {
-        Ok(transaction) => transaction,
-        Err(error) => {
-            let restore_error = restore_staged_deletions(&mut staged).err();
-            return Err(match restore_error {
-                Some(restore_error) => {
-                    format!("Gagal memulai penghapusan history: {error}. {restore_error}")
-                }
-                None => format!("Gagal memulai penghapusan history: {error}"),
-            });
-        }
-    };
-    for id in &unique_ids {
-        if let Err(error) = transaction.execute("DELETE FROM history WHERE id = ?1", [id]) {
-            drop(transaction);
-            let restore_error = restore_staged_deletions(&mut staged).err();
-            return Err(match restore_error {
-                Some(restore_error) => {
-                    format!("Gagal menghapus history {id}: {error}. {restore_error}")
-                }
-                None => format!("Gagal menghapus history {id}: {error}"),
-            });
-        }
-    }
-    if let Err(error) = transaction.commit() {
-        let restore_error = restore_staged_deletions(&mut staged).err();
-        return Err(match restore_error {
-            Some(restore_error) => {
-                format!("Gagal menyelesaikan penghapusan history: {error}. {restore_error}")
             }
-            None => format!("Gagal menyelesaikan penghapusan history: {error}"),
-        });
-    }
-
-    let mut cleanup_errors = Vec::new();
-    for item in &staged {
-        if let Err(error) = fs::remove_dir_all(&item.trash) {
-            cleanup_errors.push(format!("{}: {error}", item.trash.display()));
+            conn.execute(
+                "DELETE FROM pending_job_deletions WHERE job_name = ?1",
+                [&name],
+            )
+            .map_err(|e| format!("Gagal menyelesaikan intent penghapusan: {e}"))?;
+            Ok(())
+        };
+        if let Err(error) = cleanup() {
+            warnings.push(format!(
+                "History telah dihapus; pembersihan {name} tertunda: {error}"
+            ));
         }
     }
+    Ok(warnings)
+}
+
+pub fn delete_history(app: &AppHandle, ids: &[i64]) -> Result<HistoryDeleteOutcome, String> {
+    let mut conn = open_connection(app)?;
+    let root = crate::paths::jobs_dir(app)?;
+    let deleted_ids = queue_history_deletion(&mut conn, &root, ids)?;
+    let cleanup_warnings = cleanup_pending_deletions(&conn, &root).unwrap_or_else(|error| {
+        vec![format!(
+            "History telah dihapus; pembersihan tertunda: {error}"
+        )]
+    });
     invalidate_job_storage_cache();
-    if !cleanup_errors.is_empty() {
-        return Err(format!(
-            "History sudah dihapus dari database, tetapi file sementara gagal dibersihkan: {}",
-            cleanup_errors.join("; ")
-        ));
-    }
-    Ok(())
+    Ok(HistoryDeleteOutcome {
+        deleted_ids,
+        cleanup_warnings,
+    })
 }
 
 pub fn copy_export(app: &AppHandle, source: &str, target: &str) -> Result<(), String> {
@@ -541,7 +672,364 @@ pub fn reveal_audio(app: &AppHandle, audio_path: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::decode_history_result;
+    use super::{
+        cleanup_job_storage_in, cleanup_pending_deletions, cleanup_source_audio, initialize_schema,
+        queue_history_deletion,
+    };
     use crate::types::MAX_TRANSCRIPT_RESULT_BYTES;
+    use rusqlite::Connection;
+    use std::{fs, path::PathBuf};
+
+    struct Fixture {
+        root: PathBuf,
+        database: PathBuf,
+    }
+    impl Fixture {
+        fn new() -> Self {
+            let root =
+                std::env::temp_dir().join(format!("history-delete-{}", uuid::Uuid::new_v4()));
+            fs::create_dir(&root).unwrap();
+            Self {
+                database: root.join("history.db"),
+                root,
+            }
+        }
+        fn open(&self) -> Connection {
+            let conn = Connection::open(&self.database).unwrap();
+            initialize_schema(&conn).unwrap();
+            conn
+        }
+        fn insert(&self, conn: &Connection, name: &str) -> i64 {
+            let dir = self.root.join(name);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("result.json"), b"result").unwrap();
+            conn.execute("INSERT INTO history(title,channel,source_url,created_at,duration,language,model,backend,result_path)
+                VALUES ('title','channel','url','date',1,'id','base','cpu',?1)",
+                [dir.join("result.json").to_str().unwrap()]).unwrap();
+            conn.last_insert_rowid()
+        }
+
+        fn completed_job(&self, conn: &Connection, name: &str, keep_audio: bool) -> PathBuf {
+            let id = self.insert(conn, name);
+            let job = self.root.join(name);
+            let result = crate::types::TranscriptResult {
+                history_id: id,
+                title: "title".into(),
+                channel: "channel".into(),
+                language: "id".into(),
+                duration: 1.0,
+                model: "base".into(),
+                backend: "cpu".into(),
+                segments: vec![],
+                text: "saved transcript".into(),
+                txt_path: job.join("transcript.txt").to_string_lossy().into_owned(),
+                srt_path: job.join("transcript.srt").to_string_lossy().into_owned(),
+                vtt_path: job.join("transcript.vtt").to_string_lossy().into_owned(),
+                audio_path: keep_audio
+                    .then(|| job.join("audio.wav").to_string_lossy().into_owned()),
+            };
+            fs::write(
+                job.join("result.json"),
+                serde_json::to_vec(&result).unwrap(),
+            )
+            .unwrap();
+            for extension in ["txt", "srt", "vtt"] {
+                fs::write(job.join(format!("transcript.{extension}")), b"saved export").unwrap();
+            }
+            fs::write(job.join("audio.wav"), b"saved audio").unwrap();
+            fs::write(job.join(".in-progress"), b"checkpoint").unwrap();
+            fs::create_dir(job.join(".checkpoints")).unwrap();
+            fs::write(job.join(".checkpoints/0000.json"), b"saved chunk").unwrap();
+            job
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.root).unwrap();
+        }
+    }
+
+    fn expire_job(path: &std::path::Path) {
+        let mut options = fs::OpenOptions::new();
+        options.read(true).write(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            options.custom_flags(0x02000000); // FILE_FLAG_BACKUP_SEMANTICS opens a directory.
+        }
+        #[cfg(not(windows))]
+        options.write(false);
+        options
+            .open(path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(
+                std::time::SystemTime::now() - std::time::Duration::from_secs(48 * 3600),
+            ))
+            .unwrap();
+    }
+
+    #[test]
+    fn startup_recovers_committed_cleanup_and_preserves_retained_audio_and_exports() {
+        let fixture = Fixture::new();
+        let conn = fixture.open();
+        let discard = fixture.completed_job(&conn, "discard", false);
+        let retain = fixture.completed_job(&conn, "retain", true);
+        let no_marker = fixture.completed_job(&conn, "no-marker", false);
+        // A cleanup failure may have been logged before commit() removed the marker.
+        fs::remove_file(no_marker.join(".in-progress")).unwrap();
+        // Recover both fresh and expired committed jobs without the orphan grace.
+        expire_job(&discard);
+        drop(conn);
+        let conn = fixture.open();
+        cleanup_job_storage_in(&conn, &fixture.root).unwrap();
+        assert!(!discard.join("audio.wav").exists());
+        assert!(!no_marker.join("audio.wav").exists());
+        assert_eq!(fs::read(retain.join("audio.wav")).unwrap(), b"saved audio");
+        for job in [&discard, &retain, &no_marker] {
+            assert!(!job.join(".checkpoints").exists());
+            assert!(!job.join(".in-progress").exists());
+            assert!(job.join("result.json").exists());
+            for extension in ["txt", "srt", "vtt"] {
+                assert_eq!(
+                    fs::read(job.join(format!("transcript.{extension}"))).unwrap(),
+                    b"saved export"
+                );
+            }
+        }
+        cleanup_job_storage_in(&conn, &fixture.root).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM history", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
+    }
+
+    #[test]
+    fn startup_removes_leftover_sources_only_from_committed_jobs() {
+        let fixture = Fixture::new();
+        let conn = fixture.open();
+        let discard = fixture.completed_job(&conn, "discard", false);
+        let retain = fixture.completed_job(&conn, "retain", true);
+        // Simulate a completed retry that already removed every other temporary artifact.
+        for job in [&discard, &retain] {
+            fs::remove_file(job.join(".in-progress")).unwrap();
+            fs::remove_dir_all(job.join(".checkpoints")).unwrap();
+            fs::write(job.join("source.webm"), b"leftover download").unwrap();
+            fs::write(job.join("source.webm.part"), b"leftover fragment").unwrap();
+        }
+        fs::remove_file(discard.join("audio.wav")).unwrap();
+        let pending = fixture.root.join("pending");
+        fs::create_dir(&pending).unwrap();
+        fs::write(pending.join("source.webm"), b"resumable download").unwrap();
+        cleanup_job_storage_in(&conn, &fixture.root).unwrap();
+        cleanup_job_storage_in(&conn, &fixture.root).unwrap();
+        for job in [&discard, &retain] {
+            assert!(!job.join("source.webm").exists());
+            assert!(!job.join("source.webm.part").exists());
+            assert_eq!(
+                fs::read(job.join("transcript.txt")).unwrap(),
+                b"saved export"
+            );
+            assert!(job.join("result.json").exists());
+        }
+        assert_eq!(fs::read(retain.join("audio.wav")).unwrap(), b"saved audio");
+        assert_eq!(
+            fs::read(pending.join("source.webm")).unwrap(),
+            b"resumable download"
+        );
+    }
+
+    #[test]
+    fn source_cleanup_reports_failure_without_recursing_and_can_be_retried() {
+        let fixture = Fixture::new();
+        let blocked = fixture.root.join("source.webm");
+        fs::create_dir(&blocked).unwrap();
+        fs::write(blocked.join("preserve.txt"), b"preserve").unwrap();
+        assert!(cleanup_source_audio(&fixture.root).is_err());
+        assert_eq!(fs::read(blocked.join("preserve.txt")).unwrap(), b"preserve");
+        fs::remove_dir_all(&blocked).unwrap();
+        fs::write(&blocked, b"download").unwrap();
+        cleanup_source_audio(&fixture.root).unwrap();
+        cleanup_source_audio(&fixture.root).unwrap();
+        assert!(!blocked.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn source_cleanup_retries_after_a_lock_with_ready_audio_preserved() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let fixture = Fixture::new();
+        let source = fixture.root.join("source.webm");
+        let wav = fixture.root.join("audio.wav");
+        let metadata = fixture.root.join(".audio-cache.json");
+        fs::write(&source, b"download").unwrap();
+        fs::write(&wav, b"completed WAV").unwrap();
+        fs::write(&metadata, br#"{"audio_ready":true}"#).unwrap();
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&source)
+            .unwrap();
+        assert!(cleanup_source_audio(&fixture.root).is_err());
+        drop(lock);
+        cleanup_source_audio(&fixture.root).unwrap();
+        cleanup_source_audio(&fixture.root).unwrap();
+        assert!(!source.exists());
+        assert_eq!(fs::read(&wav).unwrap(), b"completed WAV");
+        assert_eq!(fs::read(&metadata).unwrap(), br#"{"audio_ready":true}"#);
+    }
+
+    #[test]
+    fn pending_deletion_warning_does_not_block_orphan_expiry_or_committed_cleanup() {
+        let fixture = Fixture::new();
+        let conn = fixture.open();
+        conn.execute("INSERT INTO pending_job_deletions VALUES ('../unsafe')", [])
+            .unwrap();
+        let committed = fixture.completed_job(&conn, "committed", false);
+        let expired = fixture.root.join("expired");
+        fs::create_dir(&expired).unwrap();
+        fs::write(expired.join("audio.wav"), b"expired audio").unwrap();
+        expire_job(&expired);
+        // Even a result file cannot authorize cleanup without a committed row.
+        let recent = fixture.root.join("recent");
+        fs::create_dir(&recent).unwrap();
+        fs::copy(committed.join("result.json"), recent.join("result.json")).unwrap();
+        fs::write(recent.join("audio.wav"), b"resumable audio").unwrap();
+        let error = cleanup_job_storage_in(&conn, &fixture.root).unwrap_err();
+        assert!(error.contains("Nama folder pada intent penghapusan tidak aman"));
+        assert!(!expired.exists());
+        assert!(!committed.join("audio.wav").exists());
+        assert_eq!(
+            fs::read(recent.join("audio.wav")).unwrap(),
+            b"resumable audio"
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM pending_job_deletions", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn failed_committed_cleanup_is_retried_after_reopen() {
+        let fixture = Fixture::new();
+        let conn = fixture.open();
+        let job = fixture.completed_job(&conn, "job", false);
+        fs::remove_dir_all(job.join(".checkpoints")).unwrap();
+        fs::write(job.join(".checkpoints"), b"blocked").unwrap();
+        assert!(cleanup_job_storage_in(&conn, &fixture.root).is_err());
+        assert!(job.join(".in-progress").exists());
+        assert!(job.join("audio.wav").exists());
+        drop(conn);
+        fs::remove_file(job.join(".checkpoints")).unwrap();
+        let conn = fixture.open();
+        cleanup_job_storage_in(&conn, &fixture.root).unwrap();
+        assert!(!job.join("audio.wav").exists());
+        assert!(!job.join(".in-progress").exists());
+        assert!(job.join("result.json").exists());
+    }
+
+    #[test]
+    fn unreadable_retention_metadata_preserves_audio_and_does_not_block_other_jobs() {
+        let fixture = Fixture::new();
+        let conn = fixture.open();
+        let broken = fixture.completed_job(&conn, "broken", true);
+        let healthy = fixture.completed_job(&conn, "healthy", false);
+        fs::write(broken.join("result.json"), b"{truncated").unwrap();
+        assert!(cleanup_job_storage_in(&conn, &fixture.root).is_err());
+        assert!(broken.join("audio.wav").exists());
+        assert!(broken.join(".checkpoints").exists());
+        assert!(broken.join(".in-progress").exists());
+        assert!(!healthy.join("audio.wav").exists());
+        assert!(!healthy.join(".checkpoints").exists());
+    }
+
+    #[test]
+    fn committed_delete_is_replayed_after_database_reopen() {
+        let fixture = Fixture::new();
+        let mut conn = fixture.open();
+        let id = fixture.insert(&conn, "job");
+        assert_eq!(
+            queue_history_deletion(&mut conn, &fixture.root, &[id, id]).unwrap(),
+            [id]
+        );
+        assert!(fixture.root.join("job/result.json").exists());
+        drop(conn); // Simulate termination after commit, before file cleanup.
+        let conn = fixture.open();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM history", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert!(cleanup_pending_deletions(&conn, &fixture.root)
+            .unwrap()
+            .is_empty());
+        assert!(!fixture.root.join("job").exists());
+        assert!(cleanup_pending_deletions(&conn, &fixture.root)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn failed_transaction_preserves_rows_and_files() {
+        let fixture = Fixture::new();
+        let mut conn = fixture.open();
+        let id = fixture.insert(&conn, "job");
+        assert!(queue_history_deletion(&mut conn, &fixture.root, &[id, id + 1]).is_err());
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM history", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM pending_job_deletions", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert!(fixture.root.join("job/result.json").exists());
+    }
+
+    #[test]
+    fn cleanup_failures_remain_durable_and_do_not_delete_live_or_external_data() {
+        let fixture = Fixture::new();
+        let mut conn = fixture.open();
+        let id = fixture.insert(&conn, "job");
+        queue_history_deletion(&mut conn, &fixture.root, &[id]).unwrap();
+        // Deterministic cleanup error, independent of OS permissions.
+        fs::remove_dir_all(fixture.root.join("job")).unwrap();
+        fs::write(fixture.root.join("job"), b"blocked").unwrap();
+        conn.execute(
+            "INSERT INTO pending_job_deletions VALUES ('../outside')",
+            [],
+        )
+        .unwrap();
+        fixture.insert(&conn, "live");
+        conn.execute("INSERT INTO pending_job_deletions VALUES ('live')", [])
+            .unwrap();
+        assert_eq!(
+            cleanup_pending_deletions(&conn, &fixture.root)
+                .unwrap()
+                .len(),
+            3
+        );
+        assert!(fixture.root.join("live/result.json").exists());
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM pending_job_deletions", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
+        fs::remove_file(fixture.root.join("job")).unwrap();
+        assert_eq!(
+            cleanup_pending_deletions(&conn, &fixture.root)
+                .unwrap()
+                .len(),
+            2
+        );
+    }
 
     #[test]
     fn rejects_history_result_before_deserializing_an_oversized_file() {

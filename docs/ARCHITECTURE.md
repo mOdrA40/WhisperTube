@@ -275,8 +275,10 @@ The repository has two separate release paths:
    packs from pinned whisper.cpp source and publishes ZIP files with SHA-256
    sidecars for accelerators-v* tags.
 
-Both release workflows call the reusable CI quality gate before native build
-jobs. Accelerator assets must be public before a shipped application can
+Both release workflows start their native build jobs directly. Tests, lint,
+secret scans, and dependency audits are run locally before pushing; there is
+no separate CI quality gate. Application packaging still builds its frontend
+assets. Accelerator assets must be public before a shipped application can
 download them without a GitHub credential.
 
 The accelerator hash helper reads the four public release assets without

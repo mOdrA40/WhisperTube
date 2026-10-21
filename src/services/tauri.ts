@@ -10,6 +10,7 @@ import type {
   AcceleratorDownloadPayload,
   BackendChoice,
   CudaDownloadPayload,
+  HistoryDeleteOutcome,
   HistoryPageResult,
   ModelDownloadPayload,
   ModelInfo,
@@ -21,12 +22,15 @@ import type {
 } from "../types";
 
 let pendingAppUpdate: Update | null = null;
+let activeAppUpdate: Update | null = null;
+let installingAppUpdate = false;
+let updateCheckGeneration = 0;
+let pendingUpdateCheck: Promise<AppUpdateInfo | null> | null = null;
+const UPDATE_CHECK_TIMEOUT_MS = 30_000;
+const UPDATE_DOWNLOAD_TIMEOUT_MS = 15 * 60_000;
 
-export async function checkForAppUpdate(): Promise<AppUpdateInfo | null> {
-  const update = await check();
-  pendingAppUpdate = update;
+function appUpdateInfo(update: Update | null): AppUpdateInfo | null {
   if (!update) return null;
-
   return {
     version: update.version,
     notes: update.body?.trim() || null,
@@ -34,19 +38,78 @@ export async function checkForAppUpdate(): Promise<AppUpdateInfo | null> {
   };
 }
 
-export async function installAppUpdate(onProgress: (progress: AppUpdateProgress) => void) {
-  const update = pendingAppUpdate ?? await check();
-  if (!update) throw new Error("NO_UPDATE_AVAILABLE");
-
-  await invoke("begin_app_update");
+async function closeAppUpdate(update: Update | null) {
+  if (!update) return;
   try {
-    await installPendingUpdate(update, onProgress);
-  } finally {
-    try {
-      await invoke("end_app_update");
-    } catch (cause) {
-      console.warn("Gagal melepaskan reservation update aplikasi.", cause);
+    await update.close();
+  } catch (cause) {
+    // A cleanup failure must not hide the original check/install error.
+    console.warn("Gagal menutup resource update aplikasi.", cause);
+  }
+}
+
+function acquirePendingAppUpdate(): Promise<AppUpdateInfo | null> {
+  if (pendingUpdateCheck) return pendingUpdateCheck;
+  const generation = updateCheckGeneration;
+  const request = (async () => {
+    const update = await check({ timeout: UPDATE_CHECK_TIMEOUT_MS });
+    if (generation !== updateCheckGeneration || activeAppUpdate) {
+      await closeAppUpdate(update);
+      return appUpdateInfo(activeAppUpdate);
     }
+    const previous = pendingAppUpdate;
+    pendingAppUpdate = update;
+    await closeAppUpdate(previous);
+    return appUpdateInfo(update);
+  })();
+  pendingUpdateCheck = request;
+  const clearRequest = () => {
+    if (pendingUpdateCheck === request) pendingUpdateCheck = null;
+  };
+  // Use both handlers rather than an unobserved rejecting finally promise.
+  void request.then(clearRequest, clearRequest);
+  return request;
+}
+
+export function checkForAppUpdate(): Promise<AppUpdateInfo | null> {
+  if (installingAppUpdate) return Promise.resolve(appUpdateInfo(activeAppUpdate ?? pendingAppUpdate));
+  return acquirePendingAppUpdate();
+}
+
+export async function disposeAppUpdate() {
+  updateCheckGeneration += 1;
+  pendingUpdateCheck = null;
+  const update = pendingAppUpdate;
+  pendingAppUpdate = null;
+  // An installing handle is owned exclusively by installAppUpdate's finally.
+  await closeAppUpdate(update);
+}
+
+export async function installAppUpdate(onProgress: (progress: AppUpdateProgress) => void) {
+  if (installingAppUpdate) throw new Error("APP_UPDATE_IN_PROGRESS");
+  installingAppUpdate = true;
+  let update: Update | null = null;
+  try {
+    if (!pendingAppUpdate) await acquirePendingAppUpdate();
+    update = pendingAppUpdate;
+    pendingAppUpdate = null;
+    activeAppUpdate = update;
+    if (!update) throw new Error("NO_UPDATE_AVAILABLE");
+
+    await invoke("begin_app_update");
+    try {
+      await installPendingUpdate(update, onProgress);
+    } finally {
+      try {
+        await invoke("end_app_update");
+      } catch (cause) {
+        console.warn("Gagal melepaskan reservation update aplikasi.", cause);
+      }
+    }
+  } finally {
+    await closeAppUpdate(update);
+    activeAppUpdate = null;
+    installingAppUpdate = false;
   }
 }
 
@@ -68,9 +131,8 @@ async function installPendingUpdate(update: Update, onProgress: (progress: AppUp
       totalBytes,
       percent: totalBytes && totalBytes > 0 ? Math.min(100, (downloadedBytes / totalBytes) * 100) : 0,
     });
-  });
+  }, { timeout: UPDATE_DOWNLOAD_TIMEOUT_MS });
 
-  pendingAppUpdate = null;
   const isWindows = navigator.userAgent.toLowerCase().includes("windows");
   if (!isWindows) await relaunch();
 }
@@ -144,7 +206,7 @@ export function loadHistory(id: number) {
 }
 
 export function deleteHistory(ids: number[]) {
-  return invoke("delete_history", { ids });
+  return invoke<HistoryDeleteOutcome>("delete_history", { ids });
 }
 
 export function subscribeToProgress(onProgress: (payload: ProgressPayload) => void) {

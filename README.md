@@ -38,7 +38,16 @@ For predictable disk and memory use, transcription is limited to on-demand media
 - Model and source-video download progress show transferred bytes, with cancellable model downloads.
 - Transcription progress shows CPU/GPU utilization when the platform exposes those metrics, plus download network speed.
 - Clear the current URL, preview, and transcript from the workspace; permanently delete one, multiple, or all visible history items.
-- Temporary audio and WAV files are removed after processing unless `Keep audio for retry` is enabled. A failed transcription can reuse the saved WAV without downloading the source again.
+- Failed/cancelled jobs automatically retain temporary progress. Retry the same source and settings to resume unfinished sections.
+- After success, the WAV is removed unless `Keep audio after completion` is enabled.
+
+### Resuming transcription
+
+Partial downloads are retained for yt-dlp continuation when supported by the platform/protocol. Interrupted FFmpeg conversion restarts from the downloaded source; completed WAV conversion is reused. Inference processes sections of approximately five minutes (at most 301 seconds), preferring a nearby quiet boundary. Each section is saved atomically only after the child succeeds and its JSON validates. After memory pressure, cancellation, or app shutdown, retrying reuses valid checkpoints and repeats the interrupted section.
+
+Checkpoints match the audio SHA-256, model, language, backend/device, application version, and algorithm version. Changing inference settings starts a new transcript while retaining compatible source audio. Timestamps are shifted back to their original positions for TXT/SRT/VTT and history. This does not restore decoder state from RAM: the model reloads per section, boundary recognition may differ from whole-file inference, and sufficient model memory is still required.
+
+Caches reside in local jobs storage, count toward the 20 GiB quota, and are removed after history commits. Startup retries interrupted cleanup of committed jobs, preserving WAV files only when the saved result retains audio. Unreferenced jobs at least 24 hours old are cleaned on startup. A deferred history-deletion warning does not stop cleanup of other jobs. Cookies are excluded from checkpoints. Once memory is available, select **Transcribe** again; retries do not run automatically.
 
 ## Windows development setup
 
@@ -71,6 +80,20 @@ Install Rust from <https://rustup.rs/>. Open a new PowerShell window afterward:
 rustc --version
 cargo --version
 ```
+
+#### PowerShell 7 for regression tests
+
+Windows regression tests require PowerShell 7 or newer (`pwsh`) on `PATH`.
+Windows PowerShell 5.1 (`powershell.exe`) does not satisfy this requirement;
+the maintenance scripts tested here use PowerShell 7 encoding options.
+
+```powershell
+winget install --id Microsoft.PowerShell --source winget
+```
+
+Open a new terminal, verify `pwsh --version`, then run `npm run test:frontend`.
+The test command checks this prerequisite before running Vitest and fails with
+installation instructions if the runner is unavailable; it does not skip the tests.
 
 #### Microsoft C++ Build Tools
 
@@ -200,9 +223,9 @@ JSON + TXT + SRT + VTT + SQLite history
 
 Log in to the relevant platform first. In WhisperTube, open **Settings → Source access** and import a fresh Netscape-format `cookies.txt` file. Then return to Transcribe and select **Check video**.
 
-WhisperTube does not request site credentials and does not copy cookies into its database. `yt-dlp` reads the imported local cookies file only while the process runs. Extractor, authentication, anti-bot, and platform changes can still affect protected downloads; keeping `yt-dlp` current is the first line of defense.
+WhisperTube does not request site credentials or copy cookies into its database. It gives `yt-dlp` a temporary copy in application storage, which yt-dlp may update. The copy is removed when the process finishes; copies left by a crash are cleaned at the next startup. The original export is never rewritten. Extractor, authentication, anti-bot, and platform changes can still affect protected downloads; keeping `yt-dlp` current is the first line of defense.
 
-WhisperTube uses the imported cookies file only for the local yt-dlp process. Browser encryption can prevent exporting usable cookies, so keep the file fresh and private.
+WhisperTube uses the cookies copy only for the local yt-dlp process. Browser encryption can prevent exporting usable cookies, so keep the file fresh and private.
 
 ## Build a Windows installer
 
@@ -294,6 +317,8 @@ After the accelerator release is public, maintainers must copy its verified hash
 
 Review the source diff, run the release checks, and rebuild the application. The first command is read-only; `-Apply` enables downloads for the four matching platform packs. Do not replace release assets after the application has been built.
 
+The default repository and tag come from `src-tauri/src/accelerators.rs`. `-Apply` rejects a repository/tag different from the catalog; update the catalog identity first when moving to another release.
+
 ## Project structure
 
 ```text
@@ -320,7 +345,7 @@ WhisperTube/
 
 ## Local data
 
-Tauri selects the platform-specific app-local-data directory. WhisperTube stores model files, job data, exports, and `whispertube.db` there. Temporary source audio and WAV files are deleted when `Keep audio for retry` is off. Saved failed-job audio is automatically eligible for orphan cleanup after the 24-hour grace period. Job storage has a 20 GiB safety quota and its current usage is shown in Settings.
+Tauri selects the platform-specific app-local-data directory. WhisperTube stores model files, job data, exports, and `whispertube.db` there. Failed jobs retain source/audio and completed transcription checkpoints for retry, regardless of the final audio preference. After success, checkpoints are removed and WAV is retained only when `Keep audio after completion` is enabled. Unreferenced jobs are eligible for startup cleanup after the 24-hour grace period. Job storage has a 20 GiB safety quota and its current usage is shown in Settings.
 
 ## Security decisions
 
@@ -331,7 +356,7 @@ Tauri selects the platform-specific app-local-data directory. WhisperTube stores
 - Imported cookies are read by yt-dlp only for the selected local job.
 - Only one transcription job and one runtime installer can run at a time; job reservation is independent of child-process PID state.
 - Cancellation terminates the active process tree on Windows with `taskkill /T /F`.
-- Failed jobs clean up their temporary job folders unless Keep audio for retry preserved a valid WAV; runtime bootstrap downloads are pinned and checksum-verified before activation.
+- Failed/cancelled jobs preserve temporary progress for retry within the storage quota and orphan retention period; runtime bootstrap downloads are pinned and checksum-verified before activation.
 
 ## Known limitations
 

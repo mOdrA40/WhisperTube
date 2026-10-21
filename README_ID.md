@@ -28,11 +28,32 @@ Untuk menjaga pemakaian disk dan memori tetap terprediksi, transkripsi dibatasi 
 - Progress model dan download video menampilkan byte yang sudah dipindahkan; download model dapat dibatalkan.
 - Saat transkripsi, penggunaan CPU/GPU ditampilkan jika tersedia di platform, dan speed jaringan tampil saat download.
 - Workspace dapat dibersihkan dari URL, preview, dan transkrip; history bisa dihapus permanen satuan, beberapa, atau semua item yang tampil.
-- Audio sementara dihapus setelah proses kecuali opsi `Simpan audio untuk retry` dinyalakan. Jika transkripsi gagal, WAV yang tersimpan dapat dipakai ulang tanpa mengunduh sumber lagi.
+- Job gagal/dibatalkan menyimpan progres sementara secara otomatis. Coba transkripsi lagi dengan sumber dan pengaturan yang sama untuk melanjutkan bagian yang belum selesai.
+- Setelah berhasil, WAV dihapus kecuali opsi `Simpan audio setelah selesai` dinyalakan.
+
+### Melanjutkan transkripsi
+
+Unduhan parsial dipertahankan untuk mekanisme resume yt-dlp jika platform/protokol mendukungnya. Konversi FFmpeg yang terputus diulang dari sumber unduhan; WAV yang sudah selesai dilewati. Inferensi memakai potongan sekitar 5 menit (maksimal 301 detik), dengan batas dekat jeda suara bila tersedia. Hasil setiap potongan disimpan atomik setelah proses berhasil dan JSON tervalidasi. Jika RAM kurang, proses dibatalkan, atau aplikasi ditutup, percobaan berikutnya menggunakan checkpoint yang valid dan mengulang hanya potongan yang terputus.
+
+Checkpoint dicocokkan dengan SHA-256 audio, model, bahasa, backend/device, versi aplikasi, dan versi algoritma. Mengubah pengaturan inferensi memulai transkripsi baru, tetapi audio yang sesuai tetap dapat dipakai ulang. Timestamp digeser ke posisi asli untuk TXT/SRT/VTT dan history. Resume tidak memulihkan state decoder di RAM; model dimuat ulang per potongan, dan hasil di batas potongan dapat berbeda dari transkripsi satu file utuh. Kebutuhan RAM model tetap harus terpenuhi.
+
+Cache berada di storage lokal jobs, masuk kuota 20 GiB, dan dihapus setelah hasil berhasil disimpan. Saat startup, pembersihan job yang sudah committed tetapi terputus dicoba kembali; WAV dipertahankan hanya jika hasil tersimpan menyatakan audio disimpan. Sisa job tanpa history yang berumur minimal 24 jam dibersihkan saat startup. Peringatan penghapusan history tertunda tidak menghentikan pembersihan job lain. File cookies tidak masuk checkpoint. Setelah RAM kembali cukup, klik **Transkripsi** lagi; tidak ada retry otomatis berulang.
 
 ## Setup Windows
 
 Pasang Node.js 22+, Rust, serta Visual Studio Build Tools 2022 dengan workload **Desktop development with C++**, MSVC, dan Windows SDK.
+
+Tes regresi Windows juga memerlukan **PowerShell 7+** (`pwsh`) pada `PATH`.
+Windows PowerShell 5.1 (`powershell.exe`) tidak memenuhi prasyarat ini karena
+skrip maintenance yang diuji memakai opsi encoding PowerShell 7. Pasang dengan:
+
+```powershell
+winget install --id Microsoft.PowerShell --source winget
+```
+
+Buka terminal baru, periksa `pwsh --version`, lalu jalankan `npm run test:frontend`.
+Perintah tes memeriksa prasyarat sebelum Vitest berjalan dan menampilkan petunjuk
+instalasi jika runner tidak tersedia; tes tidak dilewati diam-diam.
 
 ```powershell
 cd D:\Projects\WhisperTube
@@ -111,9 +132,9 @@ Video source → yt-dlp → FFmpeg WAV 16 kHz mono → whisper.cpp
 
 Login ke platform terkait terlebih dahulu. Di WhisperTube buka **Pengaturan → Akses sumber**, lalu import file `cookies.txt` format Netscape yang masih baru. Kembali ke halaman Transkripsi dan klik **Periksa video**.
 
-`yt-dlp` hanya membaca file cookies yang dipilih saat job berjalan. Dukungan video yang memerlukan login dapat berubah ketika platform mengubah extractor, login flow, atau sistem anti-bot.
+WhisperTube membaca file cookies asli lalu membuat salinan sementara di storage aplikasi untuk `yt-dlp`, yang dapat memperbarui salinannya. Salinan dihapus setelah proses selesai; sisa akibat crash dibersihkan saat startup berikutnya. File asli tidak ditulis ulang. Dukungan video yang memerlukan login dapat berubah ketika platform mengubah extractor, login flow, atau sistem anti-bot.
 
-WhisperTube hanya meneruskan file cookies ke proses yt-dlp lokal untuk job yang dipilih. Enkripsi browser dapat membuat ekspor cookies tidak dapat digunakan, jadi jaga file tetap baru dan rahasia.
+WhisperTube hanya meneruskan salinan cookies ke proses yt-dlp lokal untuk job yang dipilih. Enkripsi browser dapat membuat ekspor cookies tidak dapat digunakan, jadi jaga file tetap baru dan rahasia.
 
 ## Build installer
 
@@ -196,6 +217,8 @@ Setelah release public selesai, sinkronkan checksum ke source lalu build ulang a
 ```
 
 Perintah pertama hanya membaca dan menampilkan hash. Opsi `-Apply` menulis hash ke katalog aplikasi agar tombol download Metal/Vulkan aktif. Review diff dan jangan mengganti asset release setelah EXE dibangun.
+
+Repository dan tag default dibaca dari `src-tauri/src/accelerators.rs`. `-Apply` menolak repository/tag yang berbeda dari katalog; ubah identitas katalog terlebih dahulu saat berpindah release.
 
 ## Struktur dan data lokal
 

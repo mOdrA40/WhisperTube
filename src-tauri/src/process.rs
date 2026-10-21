@@ -72,6 +72,71 @@ pub fn terminate_child(child: &mut Child) {
     let _ = child.kill();
 }
 
+// Small optional executable probe, without pipes that descendants could keep
+// open. Register its PID so shutdown/cancellation owns it just like media work.
+pub fn probe_optional_runtime(
+    command: &mut Command,
+    timeout: Duration,
+    active_pid: &std::sync::Mutex<Option<u32>>,
+    cancelled: &AtomicBool,
+) -> Result<bool, String> {
+    if cancelled.load(Ordering::SeqCst) {
+        return Err("Proses dibatalkan.".into());
+    }
+    hide_console(command);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("Runtime JavaScript tidak bisa diperiksa: {error}")),
+    };
+    let pid = child.id();
+    match active_pid.lock() {
+        Ok(mut guard) => *guard = Some(pid),
+        Err(_) => {
+            terminate_child(&mut child);
+            let _ = child.wait();
+            return Err("Tracker proses runtime tidak tersedia.".into());
+        }
+    }
+    let started = Instant::now();
+    let outcome = loop {
+        if cancelled.load(Ordering::SeqCst) {
+            terminate_child(&mut child);
+            let _ = child.wait();
+            break Err("Proses dibatalkan.".into());
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status.success()),
+            Ok(None) => {}
+            Err(error) => {
+                terminate_child(&mut child);
+                let _ = child.wait();
+                break Err(format!(
+                    "Status runtime JavaScript tidak bisa dibaca: {error}"
+                ));
+            }
+        }
+        if started.elapsed() >= timeout {
+            terminate_child(&mut child);
+            let _ = child.wait();
+            eprintln!("WhisperTube: probe runtime JavaScript melewati batas waktu; runtime dinonaktifkan.");
+            break Ok(false);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let mut guard = active_pid
+        .lock()
+        .map_err(|_| "Tracker proses runtime tidak tersedia.".to_string())?;
+    if *guard == Some(pid) {
+        *guard = None;
+    }
+    outcome
+}
+
 pub fn run_with_timeout_captured(
     command: &mut Command,
     timeout: Duration,
@@ -181,4 +246,70 @@ fn capture_bounded(mut reader: impl Read, limit: usize) -> Result<String, String
         output.push_str("\n[stderr dipotong karena terlalu panjang]");
     }
     Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn runtime_probe_child() {
+        if std::env::var_os("WHISPERTUBE_RUNTIME_PROBE_CHILD").is_some() {
+            std::thread::sleep(Duration::from_secs(30));
+        }
+    }
+
+    fn sleeping_child() -> Command {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "process::tests::runtime_probe_child",
+                "--nocapture",
+            ])
+            .env("WHISPERTUBE_RUNTIME_PROBE_CHILD", "1");
+        command
+    }
+
+    #[test]
+    fn runtime_timeout_reaps_child_and_clears_tracker() {
+        let tracker = Mutex::new(None);
+        let cancelled = AtomicBool::new(false);
+        let started = Instant::now();
+        assert!(!probe_optional_runtime(
+            &mut sleeping_child(),
+            Duration::from_millis(100),
+            &tracker,
+            &cancelled
+        )
+        .unwrap());
+        assert_eq!(*tracker.lock().unwrap(), None);
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn runtime_cancel_is_propagated_and_reaps_tracked_child() {
+        let tracker = Arc::new(Mutex::new(None));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while tracker.lock().unwrap().is_none() && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                assert!(tracker.lock().unwrap().is_some());
+                cancelled.store(true, Ordering::SeqCst);
+            });
+            let error = probe_optional_runtime(
+                &mut sleeping_child(),
+                Duration::from_secs(10),
+                &tracker,
+                &cancelled,
+            )
+            .unwrap_err();
+            assert!(error.contains("dibatalkan"));
+        });
+        assert_eq!(*tracker.lock().unwrap(), None);
+    }
 }

@@ -12,7 +12,7 @@ use tauri::AppHandle;
 use url::Url;
 
 use crate::{
-    cookies::args as cookie_args,
+    cookies::CookieJar,
     paths::{is_regular_file, tool_path},
     transcription::MAX_MEDIA_DURATION_SECONDS,
     types::VideoMetadata,
@@ -238,6 +238,20 @@ fn required_metadata_text(
     Ok(text.to_string())
 }
 
+fn metadata_channel(value: &Value) -> Result<&str, String> {
+    let channel = ["channel", "uploader"]
+        .into_iter()
+        .filter_map(|key| value.get(key).and_then(Value::as_str))
+        .find(|text| !text.trim().is_empty())
+        .unwrap_or("Unknown channel");
+    if channel.len() > MAX_METADATA_CHANNEL_BYTES {
+        return Err(format!(
+            "{SOURCE_METADATA_ERROR_PREFIX}Field metadata channel terlalu panjang."
+        ));
+    }
+    Ok(channel)
+}
+
 fn optional_metadata_text(value: &Value, key: &str, maximum: usize) -> Option<String> {
     value
         .get(key)
@@ -402,20 +416,23 @@ fn run_output(
     })
 }
 
-pub fn js_runtime_args() -> Vec<String> {
+pub fn js_runtime_args(
+    active_pid: &Mutex<Option<u32>>,
+    cancelled: &AtomicBool,
+) -> Result<Vec<String>, String> {
     let mut command = Command::new("node");
-    crate::process::hide_console(&mut command);
-    let node_available = command
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success());
-    if node_available {
+    command.arg("--version");
+    let node_available = crate::process::probe_optional_runtime(
+        &mut command,
+        Duration::from_secs(3),
+        active_pid,
+        cancelled,
+    )?;
+    Ok(if node_available {
         vec!["--js-runtimes".into(), "node".into()]
     } else {
         Vec::new()
-    }
+    })
 }
 
 fn contains_any(value: &str, needles: &[&str]) -> bool {
@@ -569,8 +586,9 @@ pub async fn inspect_media(
         if cancelled.load(Ordering::SeqCst) {
             return Err("Pemeriksaan metadata dibatalkan.".into());
         }
-        let cookie_args = cookie_args(cookies_path.as_deref())
+        let cookie_jar = CookieJar::prepare(&app, cookies_path.as_deref())
             .map_err(|error| format!("{SOURCE_COOKIE_FILE_ERROR_PREFIX}{error}"))?;
+        let runtime_args = js_runtime_args(&active_pid, &cancelled)?;
         let output = {
             let mut attempt = 0;
             loop {
@@ -584,8 +602,8 @@ pub async fn inspect_media(
                     "--no-playlist",
                     "--no-warnings",
                 ]);
-                command.args(js_runtime_args());
-                command.args(&cookie_args);
+                command.args(&runtime_args);
+                command.args(cookie_jar.args());
                 command.arg(&safe_url);
                 let output = run_output(command, &active_pid, &cancelled)?;
 
@@ -629,16 +647,7 @@ pub async fn inspect_media(
             "Untitled video",
             MAX_METADATA_TITLE_BYTES,
         )?;
-        let channel = value
-            .get("channel")
-            .or_else(|| value.get("uploader"))
-            .and_then(Value::as_str)
-            .unwrap_or("Unknown channel");
-        if channel.len() > MAX_METADATA_CHANNEL_BYTES {
-            return Err(format!(
-                "{SOURCE_METADATA_ERROR_PREFIX}Field metadata channel terlalu panjang."
-            ));
-        }
+        let channel = metadata_channel(&value)?;
         Ok(VideoMetadata {
             id: required_metadata_text(&value, "id", "unknown", MAX_METADATA_ID_BYTES)?,
             title,
@@ -667,6 +676,47 @@ mod tests {
     };
     use serde_json::{json, Value};
     use std::io::Cursor;
+
+    #[test]
+    fn metadata_channel_preserves_precedence_and_skips_empty_or_invalid_values() {
+        for channel in [
+            json!(null),
+            json!(""),
+            json!(" \t\n"),
+            json!(42),
+            json!({}),
+            json!([]),
+        ] {
+            assert_eq!(
+                super::metadata_channel(&json!({"channel": channel, "uploader": "Uploader"}))
+                    .unwrap(),
+                "Uploader"
+            );
+        }
+        assert_eq!(
+            super::metadata_channel(&json!({"uploader": "Uploader"})).unwrap(),
+            "Uploader"
+        );
+        assert_eq!(
+            super::metadata_channel(&json!({"channel": " Channel ", "uploader": "Uploader"}))
+                .unwrap(),
+            " Channel "
+        );
+        for value in [
+            json!({}),
+            json!(null),
+            json!([]),
+            json!({"channel": null, "uploader": "  "}),
+        ] {
+            assert_eq!(super::metadata_channel(&value).unwrap(), "Unknown channel");
+        }
+        let oversized = "x".repeat(super::MAX_METADATA_CHANNEL_BYTES + 1);
+        assert!(
+            super::metadata_channel(&json!({"channel": oversized, "uploader": "Fallback"}))
+                .is_err()
+        );
+        assert!(super::metadata_channel(&json!({"uploader": oversized})).is_err());
+    }
 
     #[test]
     fn accepts_supported_social_video_hosts() {

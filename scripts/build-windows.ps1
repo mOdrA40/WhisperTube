@@ -41,4 +41,5 @@ if ($env:TAURI_CREATE_UPDATER_ARTIFACTS -eq 'true') {
 }
 
 npm run tauri:build -- @buildArgs
+if ($LASTEXITCODE -ne 0) { throw "Build aplikasi gagal (npm exit code $LASTEXITCODE)." }
 Write-Host "`nBuild selesai. Cek src-tauri\target\release\bundle\" -ForegroundColor Green

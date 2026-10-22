@@ -44,6 +44,7 @@ require_command make "Install Xcode Command Line Tools."
 require_command tar "Install Xcode Command Line Tools."
 require_command getconf "Install Xcode Command Line Tools."
 require_command otool "Install Xcode Command Line Tools."
+node "$ROOT/scripts/test-distribution-config.mjs"
 
 mkdir -p "$CPU" "$METAL" "$RUNTIME"
 
@@ -112,6 +113,7 @@ build_engine() {
   local cli
 
   cmake -S "$WORK/whisper.cpp" -B "$build_dir" \
+    -C "$ROOT/scripts/whisper-distribution.cmake" \
     -DGGML_METAL="$metal" \
     -DWHISPER_BUILD_TESTS=OFF \
     -DCMAKE_BUILD_TYPE=Release
@@ -140,6 +142,12 @@ build_engine() {
 
 build_engine "$WORK/build-cpu" "$CPU" OFF
 build_engine "$WORK/build-metal" "$METAL" ON
+
+# A build-tree self-check can accidentally resolve absolute dylib paths. Remove
+# both trees before exercising only the staged runtime that will be bundled.
+rm -rf "$WORK/build-cpu" "$WORK/build-metal" "$WORK/whisper.cpp"
+"$CPU/whisper-cli" --version >/dev/null
+"$METAL/whisper-cli" --version >/dev/null
 
 cd "$ROOT"
 npm ci

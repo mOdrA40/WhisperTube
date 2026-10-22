@@ -36,7 +36,7 @@ pub fn database_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(app_data_dir(app)?.join("whispertube.db"))
 }
 
-fn storage_tree_bytes(path: &Path) -> Result<u64, String> {
+pub(crate) fn storage_tree_bytes(path: &Path) -> Result<u64, String> {
     let mut total = 0u64;
     for entry in fs::read_dir(path).map_err(|e| format!("Gagal membaca job storage: {e}"))? {
         let entry = entry.map_err(|e| format!("Gagal membaca entry job storage: {e}"))?;
@@ -346,24 +346,8 @@ pub(crate) fn cleanup_source_audio(job_dir: &Path) -> Result<(), String> {
 }
 
 fn cleanup_committed_job(job_dir: &Path) -> Result<(), String> {
-    // A committed row authorizes source cleanup independently of WAV retention,
-    // including jobs whose marker and other temporary artifacts are already gone.
-    cleanup_source_audio(job_dir)?;
     let marker = job_dir.join(".in-progress");
     let wav = job_dir.join("audio.wav");
-    if !marker
-        .try_exists()
-        .map_err(|e| format!("Gagal membaca marker history: {e}"))?
-        && !job_dir
-            .join(".checkpoints")
-            .try_exists()
-            .map_err(|e| format!("Gagal membaca checkpoint history: {e}"))?
-        && !wav
-            .try_exists()
-            .map_err(|e| format!("Gagal membaca audio history: {e}"))?
-    {
-        return Ok(());
-    }
     // Only a committed history row authorizes this cleanup. A result file on
     // its own may belong to a rolled-back transaction and must remain resumable.
     let result_path = fs::canonicalize(job_dir.join("result.json"))
@@ -378,6 +362,9 @@ fn cleanup_committed_job(job_dir: &Path) -> Result<(), String> {
         .read_to_end(&mut bytes)
         .map_err(|e| format!("Gagal membaca hasil untuk cleanup history: {e}"))?;
     let result = decode_history_result(&bytes)?;
+    // A missing/unreadable result must not authorize deleting recoverable data,
+    // including the original download. Validate retention metadata first.
+    cleanup_source_audio(job_dir)?;
     crate::checkpoint::cleanup(job_dir)?;
     if result.audio_path.is_none() {
         match fs::remove_file(&wav) {
@@ -406,13 +393,16 @@ fn cleanup_job_storage_in(conn: &Connection, root: &Path) -> Result<(), String> 
         .query_map([], |row| row.get::<_, String>(0))
         .map_err(|e| format!("Gagal membaca referensi file history: {e}"))?;
     let history_paths = rows
-        .map(|row| row.map(PathBuf::from))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("Gagal membaca path history: {e}"))?;
-    let valid_results = history_paths
-        .into_iter()
-        .filter_map(|path| fs::canonicalize(path).ok())
-        .collect::<HashSet<_>>();
+    // The committed row owns its directory even when result.json is missing,
+    // corrupt or unreadable. Resolve the parent independently of that file.
+    let mut committed_jobs = HashSet::new();
+    for path in history_paths {
+        if let Some(directory) = job_dir_for_result_in(&canonical_root, &path)? {
+            committed_jobs.insert(directory);
+        }
+    }
     let entries = fs::read_dir(root).map_err(|e| format!("Gagal membaca job storage: {e}"))?;
     for entry in entries {
         let entry = entry.map_err(|e| format!("Gagal membaca entry job storage: {e}"))?;
@@ -428,11 +418,7 @@ fn cleanup_job_storage_in(conn: &Connection, root: &Path) -> Result<(), String> 
         if canonical_job_dir.parent() != Some(canonical_root.as_path()) {
             continue;
         }
-        let result_path = path.join("result.json");
-        let has_valid_history = fs::canonicalize(&result_path)
-            .map(|result| valid_results.contains(&result))
-            .unwrap_or(false);
-        if has_valid_history {
+        if committed_jobs.contains(&canonical_job_dir) {
             if let Err(error) = cleanup_committed_job(&canonical_job_dir) {
                 warnings.push(format!(
                     "Pembersihan history {} tertunda: {error}",
@@ -644,8 +630,194 @@ pub fn copy_export(app: &AppHandle, source: &str, target: &str) -> Result<(), St
     {
         return Err("Ekstensi target export harus sama dengan source.".into());
     }
-    fs::copy(canonical_source, target_path).map_err(|e| format!("Gagal menyimpan export: {e}"))?;
+    let mut input = fs::File::open(canonical_source)
+        .map_err(|e| format!("Gagal membuka source export: {e}"))?;
+    write_export_atomically(&mut input, &target_path)
+}
+
+fn write_export_atomically(input: &mut impl Read, target: &Path) -> Result<(), String> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| "Folder target export tidak valid.".to_string())?;
+    let permissions = match fs::symlink_metadata(target) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+            if metadata.permissions().readonly() {
+                return Err("Target export bersifat read-only.".into());
+            }
+            Some(metadata.permissions())
+        }
+        Ok(_) => return Err("Target export harus berupa file biasa.".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(format!("Gagal memeriksa target export: {error}")),
+    };
+    // A sibling is on the same filesystem, so rename publishes a complete file
+    // without truncating the existing destination during a failed copy.
+    let temporary = parent.join(format!(".whispertube-export-{}.tmp", uuid::Uuid::new_v4()));
+    let output = create_export_staging(&temporary, permissions.as_ref().map(|_| target))
+        .map_err(|e| format!("Gagal membuat staging export: {e}"))?;
+    let result = (|| -> std::io::Result<()> {
+        let mut output = output;
+        #[cfg(unix)]
+        if permissions.is_some() {
+            crate::export_permissions::preserve(target, &output).map_err(|error| {
+                std::io::Error::new(
+                    error.kind(),
+                    format!("Gagal mempertahankan izin target export: {error}"),
+                )
+            })?;
+        }
+        std::io::copy(input, &mut output)?;
+        #[cfg(windows)]
+        if let Some(permissions) = permissions {
+            output.set_permissions(permissions)?;
+        }
+        output.sync_all()?;
+        drop(output);
+        fs::rename(&temporary, target)
+    })();
+    if let Err(error) = result {
+        let cleanup = match fs::remove_file(&temporary) {
+            Ok(()) => String::new(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => format!(
+                " Staging {} belum dibersihkan: {error}",
+                temporary.display()
+            ),
+        };
+        return Err(format!("Gagal menyimpan export: {error}.{cleanup}"));
+    }
     Ok(())
+}
+
+#[cfg(not(windows))]
+fn create_export_staging(
+    path: &Path,
+    _existing_target: Option<&Path>,
+) -> std::io::Result<fs::File> {
+    crate::export_permissions::create_private(path)
+}
+
+#[cfg(windows)]
+fn create_export_staging(path: &Path, existing_target: Option<&Path>) -> std::io::Result<fs::File> {
+    use std::{
+        ffi::c_void,
+        io,
+        os::windows::{
+            ffi::OsStrExt,
+            fs::MetadataExt,
+            io::{FromRawHandle, OwnedHandle},
+        },
+    };
+    let Some(target) = existing_target else {
+        return fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path);
+    };
+    #[repr(C)]
+    struct SecurityAttributes {
+        length: u32,
+        descriptor: *mut c_void,
+        inherit: i32,
+    }
+    #[link(name = "advapi32")]
+    unsafe extern "system" {
+        fn GetFileSecurityW(
+            path: *const u16,
+            information: u32,
+            descriptor: *mut c_void,
+            size: u32,
+            needed: *mut u32,
+        ) -> i32;
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn CreateFileW(
+            path: *const u16,
+            access: u32,
+            share: u32,
+            security: *const SecurityAttributes,
+            disposition: u32,
+            attributes: u32,
+            template: *mut c_void,
+        ) -> *mut c_void;
+    }
+    fn wide(path: &Path) -> io::Result<Vec<u16>> {
+        let mut units = path.as_os_str().encode_wide().collect::<Vec<_>>();
+        if units.contains(&0) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Path export mengandung NUL.",
+            ));
+        }
+        units.push(0);
+        Ok(units)
+    }
+    // Canonical paths also supply the verbatim prefix for long Windows paths.
+    let target = fs::canonicalize(target)?;
+    let attributes = fs::metadata(&target)?.file_attributes();
+    let target = wide(&target)?;
+    let parent = fs::canonicalize(path.parent().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "Folder staging tidak valid.")
+    })?)?;
+    let temporary = wide(&parent.join(path.file_name().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "Nama staging tidak valid.")
+    })?))?;
+    let mut needed = 0;
+    // SAFETY: the first call requests only a buffer size; target is NUL-terminated.
+    let success =
+        unsafe { GetFileSecurityW(target.as_ptr(), 4, std::ptr::null_mut(), 0, &mut needed) };
+    if success == 0 && io::Error::last_os_error().raw_os_error() != Some(122) {
+        return Err(io::Error::last_os_error());
+    }
+    if needed == 0 || needed > 1024 * 1024 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Ukuran ACL export tidak valid.",
+        ));
+    }
+    // DWORD alignment is required for the self-relative security descriptor.
+    let mut descriptor = vec![0u32; (needed as usize).div_ceil(4)];
+    // SAFETY: descriptor is aligned and has at least needed writable bytes.
+    if unsafe {
+        GetFileSecurityW(
+            target.as_ptr(),
+            4,
+            descriptor.as_mut_ptr().cast(),
+            needed,
+            &mut needed,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let security = SecurityAttributes {
+        length: std::mem::size_of::<SecurityAttributes>() as u32,
+        descriptor: descriptor.as_mut_ptr().cast(),
+        inherit: 0,
+    };
+    // Apply the target's DACL at creation, before any transcript bytes exist.
+    // Preserve EFS encryption when the destination file was individually encrypted.
+    // SAFETY: all pointers are live for the call; CREATE_NEW cannot clobber a
+    // pre-existing staging file, and the returned handle is uniquely owned.
+    let handle = unsafe {
+        CreateFileW(
+            temporary.as_ptr(),
+            0x40000000,
+            1,
+            &security,
+            1,
+            0x80 | (attributes & 0x4000),
+            std::ptr::null_mut(),
+        )
+    };
+    if handle as isize == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: CreateFileW succeeded and transfers an owned, non-inherited handle.
+    Ok(fs::File::from(unsafe {
+        OwnedHandle::from_raw_handle(handle)
+    }))
 }
 
 pub fn reveal_audio(app: &AppHandle, audio_path: &str) -> Result<(), String> {
@@ -944,6 +1116,146 @@ mod tests {
         assert!(broken.join(".in-progress").exists());
         assert!(!healthy.join("audio.wav").exists());
         assert!(!healthy.join(".checkpoints").exists());
+    }
+
+    #[test]
+    fn expired_committed_jobs_with_missing_or_invalid_results_keep_recoverable_files() {
+        let fixture = Fixture::new();
+        let conn = fixture.open();
+        for name in ["missing", "corrupt", "directory"] {
+            let job = fixture.completed_job(&conn, name, true);
+            fs::write(job.join("source.webm"), b"recoverable source").unwrap();
+            fs::remove_file(job.join("result.json")).unwrap();
+            match name {
+                "corrupt" => fs::write(job.join("result.json"), b"{broken").unwrap(),
+                "directory" => fs::create_dir(job.join("result.json")).unwrap(),
+                _ => {}
+            }
+            expire_job(&job);
+        }
+        let orphan = fixture.root.join("orphan");
+        fs::create_dir(&orphan).unwrap();
+        expire_job(&orphan);
+        let error = cleanup_job_storage_in(&conn, &fixture.root).unwrap_err();
+        for name in ["missing", "corrupt", "directory"] {
+            assert!(error.contains(name));
+            let job = fixture.root.join(name);
+            assert_eq!(fs::read(job.join("audio.wav")).unwrap(), b"saved audio");
+            assert_eq!(
+                fs::read(job.join("source.webm")).unwrap(),
+                b"recoverable source"
+            );
+            assert!(job.join(".in-progress").exists());
+            assert!(job.join(".checkpoints/0000.json").exists());
+            for extension in ["txt", "srt", "vtt"] {
+                assert_eq!(
+                    fs::read(job.join(format!("transcript.{extension}"))).unwrap(),
+                    b"saved export"
+                );
+            }
+        }
+        assert!(!orphan.exists());
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM history", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
+    }
+
+    #[test]
+    fn failed_export_keeps_the_old_destination_and_removes_partial_staging() {
+        use std::io::{self, Read};
+        struct BrokenReader(bool);
+        impl Read for BrokenReader {
+            fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+                if self.0 {
+                    return Err(io::Error::other("simulated disk/source failure"));
+                }
+                self.0 = true;
+                bytes[0] = b'x';
+                Ok(1)
+            }
+        }
+        let fixture = Fixture::new();
+        let target = fixture.root.join("saved.txt");
+        fs::write(&target, b"old complete export").unwrap();
+        assert!(super::write_export_atomically(&mut BrokenReader(false), &target).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"old complete export");
+        assert_eq!(fs::read_dir(&fixture.root).unwrap().count(), 1);
+        super::write_export_atomically(&mut &b"new complete export"[..], &target).unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"new complete export");
+        assert_eq!(fs::read_dir(&fixture.root).unwrap().count(), 1);
+        let fresh = fixture.root.join("new.txt");
+        super::write_export_atomically(&mut &b"fresh"[..], &fresh).unwrap();
+        assert_eq!(fs::read(fresh).unwrap(), b"fresh");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn export_staging_and_replacement_preserve_a_private_windows_dacl() {
+        fn acl(path: &std::path::Path, make_private: bool) -> String {
+            let script = if make_private {
+                "$p=$env:WHISPERTUBE_EXPORT_ACL_PATH; $a=Get-Acl -LiteralPath $p; $a.SetAccessRuleProtection($true,$false); $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User; $rule=[Security.AccessControl.FileSystemAccessRule]::new($sid,'FullControl','Allow'); $a.SetAccessRule($rule); Set-Acl -LiteralPath $p -AclObject $a; (Get-Acl -LiteralPath $p).GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::Access)"
+            } else {
+                "(Get-Acl -LiteralPath $env:WHISPERTUBE_EXPORT_ACL_PATH).GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::Access)"
+            };
+            let mut command = std::process::Command::new("pwsh");
+            crate::process::hide_console(&mut command);
+            let output = command
+                .args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    &format!("$ErrorActionPreference='Stop'; {script}"),
+                ])
+                .env_remove("PSModulePath")
+                .env("WHISPERTUBE_EXPORT_ACL_PATH", path)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let sddl = String::from_utf8(output.stdout).unwrap();
+            let (control, entries) = sddl.trim().split_once('(').unwrap();
+            // Windows recomputes the historical AUTO_INHERITED marker when a
+            // file is created. Compare every ACE and protection/inheritance
+            // policy; that historical marker does not change access rights.
+            format!("{}({entries}", control.replace("AI", ""))
+        }
+        let fixture = Fixture::new();
+        let target = fixture.root.join("private.txt");
+        fs::write(&target, b"private old export").unwrap();
+        let expected = acl(&target, true);
+        let staging = fixture.root.join("private-stage.tmp");
+        let file = super::create_export_staging(&staging, Some(&target)).unwrap();
+        // The empty staging file must already have the private ACL; applying
+        // permissions only after copying would expose bytes through the parent ACL.
+        assert_eq!(acl(&staging, false), expected);
+        drop(file);
+        fs::remove_file(staging).unwrap();
+        super::write_export_atomically(&mut &b"private new export"[..], &target).unwrap();
+        assert_eq!(acl(&target, false), expected);
+        assert_eq!(fs::read(target).unwrap(), b"private new export");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn locked_export_destination_is_preserved_on_publish_failure() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let fixture = Fixture::new();
+        let target = fixture.root.join("locked.txt");
+        fs::write(&target, b"old export").unwrap();
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&target)
+            .unwrap();
+        assert!(super::write_export_atomically(&mut &b"replacement"[..], &target).is_err());
+        drop(lock);
+        assert_eq!(fs::read(target).unwrap(), b"old export");
+        assert_eq!(fs::read_dir(&fixture.root).unwrap().count(), 1);
     }
 
     #[test]

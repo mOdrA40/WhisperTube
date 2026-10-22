@@ -7,7 +7,7 @@ Var WhisperTubeRemoveUserData
 !macro NSIS_HOOK_PREUNINSTALL
   StrCpy $WhisperTubeRemoveUserData "0"
   MessageBox MB_YESNO|MB_ICONQUESTION \
-    "Remove WhisperTube user data too?$\r$\n$\r$\nThis deletes downloaded Whisper models, CUDA/Vulkan runtimes, history, saved audio, and transcription jobs. External files such as cookies.txt are not touched.$\r$\n$\r$\nChoose No to uninstall the application but keep the data for a future reinstall." \
+    "Remove WhisperTube user data too?$\r$\n$\r$\nThis deletes downloaded Whisper models, CUDA/Vulkan runtimes, history, saved audio, transcription jobs, and internal cookie copies. External files such as cookies.txt are not touched.$\r$\n$\r$\nChoose No to uninstall the application but keep the data for a future reinstall." \
     IDYES whispertube_remove_data IDNO whispertube_keep_data
 
   Goto whispertube_keep_data
@@ -26,12 +26,22 @@ Var WhisperTubeRemoveUserData
   RMDir /r "$LOCALAPPDATA\app.whispertube.local\models"
   RMDir /r "$LOCALAPPDATA\app.whispertube.local\jobs"
   RMDir /r "$LOCALAPPDATA\app.whispertube.local\runtime"
+  RMDir /r "$LOCALAPPDATA\app.whispertube.local\cookie-jars"
   Delete "$LOCALAPPDATA\app.whispertube.local\whispertube.db"
+  ; Never discard recovery files when the main database is still in use.
+  IfFileExists "$LOCALAPPDATA\app.whispertube.local\whispertube.db" whispertube_cleanup_failed 0
+  Delete "$LOCALAPPDATA\app.whispertube.local\whispertube.db-journal"
+  Delete "$LOCALAPPDATA\app.whispertube.local\whispertube.db-wal"
+  Delete "$LOCALAPPDATA\app.whispertube.local\whispertube.db-shm"
 
   IfFileExists "$LOCALAPPDATA\app.whispertube.local\models\*.*" whispertube_cleanup_failed 0
   IfFileExists "$LOCALAPPDATA\app.whispertube.local\jobs\*.*" whispertube_cleanup_failed 0
   IfFileExists "$LOCALAPPDATA\app.whispertube.local\runtime\*.*" whispertube_cleanup_failed 0
+  IfFileExists "$LOCALAPPDATA\app.whispertube.local\cookie-jars\*.*" whispertube_cleanup_failed 0
   IfFileExists "$LOCALAPPDATA\app.whispertube.local\whispertube.db" whispertube_cleanup_failed 0
+  IfFileExists "$LOCALAPPDATA\app.whispertube.local\whispertube.db-journal" whispertube_cleanup_failed 0
+  IfFileExists "$LOCALAPPDATA\app.whispertube.local\whispertube.db-wal" whispertube_cleanup_failed 0
+  IfFileExists "$LOCALAPPDATA\app.whispertube.local\whispertube.db-shm" whispertube_cleanup_failed 0
   Goto whispertube_uninstall_done
 
   whispertube_cleanup_failed:

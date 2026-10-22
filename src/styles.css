@@ -2688,3 +2688,6 @@ input:focus-visible,
     width: 100%;
   }
 }
+.job-cache-list { display: grid; gap: 12px; margin-top: 16px; }
+.job-cache-item { display: grid; gap: 8px; padding: 12px; border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 12px; overflow-wrap: anywhere; }
+.job-cache-item small { opacity: 0.7; }

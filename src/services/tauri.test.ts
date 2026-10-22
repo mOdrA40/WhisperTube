@@ -2,13 +2,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
-import { checkForAppUpdate, disposeAppUpdate, deleteModel, downloadModel, inspectMedia, installAppUpdate, listHistory, startTranscription } from "./tauri";
+import { save } from "@tauri-apps/plugin-dialog";
+import type { TranscriptResult } from "../types";
+import { checkForAppUpdate, disposeAppUpdate, deleteModel, discardJobCache, downloadModel, exportTranscriptFile, inspectMedia, installAppUpdate, listHistory, listJobCache, startTranscription } from "./tauri";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock("@tauri-apps/plugin-process", () => ({ relaunch: vi.fn().mockResolvedValue(undefined) }));
 vi.mock("@tauri-apps/plugin-updater", () => ({ check: vi.fn() }));
+vi.mock("@tauri-apps/plugin-dialog", () => ({ save: vi.fn(), open: vi.fn() }));
 
 describe("Tauri IPC contracts", () => {
   beforeEach(() => {
@@ -16,6 +19,27 @@ describe("Tauri IPC contracts", () => {
     vi.mocked(invoke).mockResolvedValue(undefined);
   });
   afterEach(() => disposeAppUpdate());
+
+  it("uses explicit cache IDs for selective cleanup IPC", async () => {
+    await listJobCache();
+    await discardJobCache("cache-id");
+    expect(invoke).toHaveBeenNthCalledWith(1, "list_job_cache");
+    expect(invoke).toHaveBeenNthCalledWith(2, "discard_job_cache", { id: "cache-id" });
+  });
+
+  it.each([["a".repeat(79) + "😀suffix", "a".repeat(79)], ["😀".repeat(90), "😀".repeat(40)], ["日".repeat(90), "日".repeat(80)], ["judul 日本語 e\u0301", "judul 日本語 e\u0301"]]) (
+    "keeps export filenames valid Unicode across the length boundary: %s", async (title, expected) => {
+      vi.mocked(save).mockResolvedValue("C:/exports/transcript.txt");
+      const result = { title, txtPath: "C:/jobs/job/transcript.txt" } as TranscriptResult;
+      await exportTranscriptFile(result, "txt");
+      const options = vi.mocked(save).mock.calls.at(-1)![0]!;
+      const filename = options.defaultPath!;
+      expect(filename).not.toMatch(/[\uD800-\uDFFF]/u);
+      expect(filename).toBe(expected + ".txt");
+      expect(new TextEncoder().encode(filename).length).toBeLessThanOrEqual(255);
+      expect(invoke).toHaveBeenCalledWith("copy_export", { source: result.txtPath, target: "C:/exports/transcript.txt" });
+    },
+  );
 
   it("uses the backend's camelCase argument names", async () => {
     await downloadModel("base", null);

@@ -1,7 +1,7 @@
 use tauri::{AppHandle, State};
 
 use crate::{
-    accelerators, history, models, sources,
+    accelerators, history, job_cache, models, sources,
     state::{AppState, JobGuard, OperationGuard},
     system, transcription,
     types::{
@@ -12,6 +12,35 @@ use crate::{
 };
 
 type CommandResult<T> = Result<T, ErrorPayload>;
+
+#[tauri::command]
+pub async fn list_job_cache(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> CommandResult<Vec<crate::types::JobCacheEntry>> {
+    let operation = OperationGuard::reserve_history_read(&state)?;
+    Ok(tokio::task::spawn_blocking(move || {
+        let _operation = operation;
+        job_cache::list(&app)
+    })
+    .await
+    .map_err(|e| format!("Pembacaan cache job gagal: {e}"))??)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn discard_job_cache(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> CommandResult<()> {
+    let operation = OperationGuard::reserve_history_delete(&state)?;
+    Ok(tokio::task::spawn_blocking(move || {
+        let _operation = operation;
+        job_cache::discard(&app, &id)
+    })
+    .await
+    .map_err(|e| format!("Pembersihan cache job gagal: {e}"))??)
+}
 
 #[tauri::command]
 pub async fn system_status(app: AppHandle) -> CommandResult<SystemStatus> {

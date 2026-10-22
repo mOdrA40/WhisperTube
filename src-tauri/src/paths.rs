@@ -1,10 +1,10 @@
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{
     fs,
     fs::File,
     io::{Read, Write},
     path::{Component, Path, PathBuf},
+    sync::atomic::AtomicBool,
     time::{Duration, SystemTime},
 };
 use tauri::{AppHandle, Manager};
@@ -15,7 +15,7 @@ const RUNTIME_MANIFEST_NAME: &str = "runtime-manifest.json";
 const CORE_RUNTIME_MANIFEST_VERSION: &str = "whisper.cpp-v1.9.2";
 const ACCELERATOR_RUNTIME_MANIFEST_VERSION: &str = "whisper.cpp-v1.9.2";
 const MAX_RUNTIME_MANIFEST_BYTES: u64 = 64 * 1024;
-const MAX_RUNTIME_FILES: usize = 256;
+pub(crate) const MAX_RUNTIME_FILES: usize = 256;
 const TRANSIENT_STORAGE_GRACE: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Deserialize, Serialize)]
@@ -86,7 +86,7 @@ pub fn user_runtime_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-fn exe_name(base: &str) -> String {
+pub(crate) fn exe_name(base: &str) -> String {
     if cfg!(target_os = "windows") {
         format!("{base}.exe")
     } else {
@@ -102,22 +102,6 @@ pub fn is_regular_file(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
 }
 
-fn file_sha256(path: &Path) -> Result<String, String> {
-    let mut file = File::open(path).map_err(|e| format!("Gagal membuka runtime: {e}"))?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; 1024 * 1024];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .map_err(|e| format!("Gagal membaca runtime: {e}"))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(format!("{:x}", hasher.finalize()))
-}
-
 pub fn core_runtime_manifest_version() -> &'static str {
     CORE_RUNTIME_MANIFEST_VERSION
 }
@@ -130,12 +114,14 @@ pub fn write_runtime_manifest(
     staging: &Path,
     executable: &str,
     version: &str,
+    cancelled: &AtomicBool,
 ) -> Result<(), String> {
+    crate::io_cancel::check(cancelled)?;
     if !is_regular_file(&staging.join(executable)) {
         return Err("Executable runtime tidak ditemukan.".into());
     }
     let mut files = Vec::new();
-    collect_runtime_files(staging, staging, &mut files)?;
+    collect_runtime_files(staging, staging, &mut files, cancelled)?;
     if files.len() > MAX_RUNTIME_FILES {
         return Err("Runtime memiliki terlalu banyak file.".into());
     }
@@ -149,6 +135,7 @@ pub fn write_runtime_manifest(
         .map_err(|e| format!("Gagal membuat manifest runtime: {e}"))?;
     let manifest_path = staging.join(RUNTIME_MANIFEST_NAME);
     let temporary = staging.join(format!("{RUNTIME_MANIFEST_NAME}.tmp"));
+    crate::io_cancel::check(cancelled)?;
     let mut file = File::create(&temporary)
         .map_err(|e| format!("Gagal membuat manifest runtime sementara: {e}"))?;
     file.write_all(&bytes)
@@ -156,6 +143,7 @@ pub fn write_runtime_manifest(
     file.sync_all()
         .map_err(|e| format!("Gagal flush manifest runtime: {e}"))?;
     drop(file);
+    crate::io_cancel::check(cancelled)?;
     fs::rename(&temporary, &manifest_path)
         .map_err(|e| format!("Gagal mengaktifkan manifest runtime: {e}"))?;
     Ok(())
@@ -165,8 +153,11 @@ fn collect_runtime_files(
     root: &Path,
     directory: &Path,
     files: &mut Vec<RuntimeFile>,
+    cancelled: &AtomicBool,
 ) -> Result<(), String> {
+    crate::io_cancel::check(cancelled)?;
     for entry in fs::read_dir(directory).map_err(|e| format!("Gagal membaca runtime: {e}"))? {
+        crate::io_cancel::check(cancelled)?;
         let entry = entry.map_err(|e| format!("Gagal membaca entry runtime: {e}"))?;
         let path = entry.path();
         let file_type = entry
@@ -176,7 +167,7 @@ fn collect_runtime_files(
             return Err("Runtime berisi symbolic link yang tidak diizinkan.".into());
         }
         if file_type.is_dir() {
-            collect_runtime_files(root, &path, files)?;
+            collect_runtime_files(root, &path, files, cancelled)?;
             continue;
         }
         if !file_type.is_file()
@@ -192,7 +183,7 @@ fn collect_runtime_files(
             .into_owned();
         files.push(RuntimeFile {
             path: relative,
-            sha256: file_sha256(&path)?,
+            sha256: crate::io_cancel::file_sha256(&path, cancelled)?,
         });
         if files.len() > MAX_RUNTIME_FILES {
             return Err("Runtime memiliki terlalu banyak file.".into());
@@ -256,20 +247,36 @@ fn runtime_manifest_header(
     Some(manifest)
 }
 
+#[cfg(test)]
 fn runtime_manifest_matches(runtime_dir: &Path, executable: &Path, expected_version: &str) -> bool {
+    runtime_manifest_matches_cancelable(
+        runtime_dir,
+        executable,
+        expected_version,
+        &AtomicBool::new(false),
+    )
+    .unwrap_or(false)
+}
+
+pub(crate) fn runtime_manifest_matches_cancelable(
+    runtime_dir: &Path,
+    executable: &Path,
+    expected_version: &str,
+    cancelled: &AtomicBool,
+) -> Result<bool, String> {
+    crate::io_cancel::check(cancelled)?;
     let Some(manifest) = runtime_manifest_header(runtime_dir, executable, expected_version) else {
-        return false;
+        return Ok(false);
     };
     let mut expected = manifest.files;
     expected.sort_unstable_by(|left, right| left.path.cmp(&right.path));
     let mut actual = Vec::new();
-    if collect_runtime_files(runtime_dir, runtime_dir, &mut actual).is_err() {
-        return false;
-    }
+    collect_runtime_files(runtime_dir, runtime_dir, &mut actual, cancelled)?;
     actual.sort_unstable_by(|left, right| left.path.cmp(&right.path));
-    expected == actual
+    Ok(expected == actual)
 }
 
+#[cfg(test)]
 fn validated_user_runtime(runtime_dir: &Path, executable: &Path, expected_version: &str) -> bool {
     is_regular_file(executable)
         && runtime_manifest_matches(runtime_dir, executable, expected_version)
@@ -361,12 +368,19 @@ pub fn clear_invalid_runtime_destination(
     destination: &Path,
     executable: &str,
     expected_version: &str,
+    cancelled: &AtomicBool,
 ) -> Result<(), String> {
+    crate::io_cancel::check(cancelled)?;
     if !destination.exists() {
         return Ok(());
     }
     if is_regular_file(&destination.join(executable))
-        && runtime_manifest_matches(destination, &destination.join(executable), expected_version)
+        && runtime_manifest_matches_cancelable(
+            destination,
+            &destination.join(executable),
+            expected_version,
+            cancelled,
+        )?
     {
         return Err(
             "Runtime baru saja dipasang oleh proses lain. Klik Re-check components.".into(),
@@ -382,6 +396,7 @@ pub fn clear_invalid_runtime_destination(
         );
     }
     if metadata.is_dir() {
+        crate::io_cancel::check(cancelled)?;
         fs::remove_dir_all(destination).map_err(|error| {
             format!("Gagal membersihkan runtime lama yang tidak valid: {error}")
         })?;
@@ -393,7 +408,27 @@ pub fn clear_invalid_runtime_destination(
     Ok(())
 }
 
+pub fn activate_runtime(
+    staging: &Path,
+    destination: &Path,
+    cancelled: &AtomicBool,
+) -> Result<(), String> {
+    // Commit boundary: once rename starts, the installed runtime wins over a
+    // concurrent late cancellation. Before this point cancellation must abort.
+    crate::io_cancel::check(cancelled)?;
+    fs::rename(staging, destination).map_err(|e| format!("Gagal mengaktifkan runtime: {e}"))
+}
+
 pub fn engine_path(app: &AppHandle, backend: &str) -> Result<PathBuf, String> {
+    engine_path_cancelable(app, backend, &AtomicBool::new(false))
+}
+
+pub fn engine_path_cancelable(
+    app: &AppHandle,
+    backend: &str,
+    cancelled: &AtomicBool,
+) -> Result<PathBuf, String> {
+    crate::io_cancel::check(cancelled)?;
     let user_backend_dir = user_runtime_dir(app)?.join(backend);
     let user_path = user_backend_dir.join(exe_name("whisper-cli"));
     let expected_version = if matches!(backend, "metal" | "vulkan") {
@@ -401,7 +436,24 @@ pub fn engine_path(app: &AppHandle, backend: &str) -> Result<PathBuf, String> {
     } else {
         CORE_RUNTIME_MANIFEST_VERSION
     };
-    if validated_user_runtime(&user_backend_dir, &user_path, expected_version) {
+    let valid = if is_regular_file(&user_path) {
+        match runtime_manifest_matches_cancelable(
+            &user_backend_dir,
+            &user_path,
+            expected_version,
+            cancelled,
+        ) {
+            Ok(valid) => valid,
+            Err(error) => {
+                crate::io_cancel::check(cancelled)?;
+                eprintln!("WhisperTube user runtime validation warning: {error}");
+                false
+            }
+        }
+    } else {
+        false
+    };
+    if valid {
         return Ok(user_path);
     }
     #[cfg(debug_assertions)]
@@ -418,6 +470,23 @@ pub fn engine_path(app: &AppHandle, backend: &str) -> Result<PathBuf, String> {
     Ok(runtime_dir(app)?
         .join(backend)
         .join(exe_name("whisper-cli")))
+}
+
+pub fn snapshot_runtime(
+    app: &AppHandle,
+    backend: &str,
+    engine: &Path,
+    cancelled: &AtomicBool,
+) -> Result<crate::runtime_snapshot::RuntimeSnapshot, String> {
+    let user_engine = user_runtime_dir(app)?
+        .join(backend)
+        .join(exe_name("whisper-cli"));
+    let version = (engine == user_engine).then_some(if matches!(backend, "metal" | "vulkan") {
+        ACCELERATOR_RUNTIME_MANIFEST_VERSION
+    } else {
+        CORE_RUNTIME_MANIFEST_VERSION
+    });
+    crate::runtime_snapshot::RuntimeSnapshot::capture(engine, version, cancelled)
 }
 
 /// Reports whether the same validated engine selected for inference is
@@ -465,6 +534,7 @@ mod tests {
             &destination,
             "whisper-cli.exe",
             super::core_runtime_manifest_version(),
+            &std::sync::atomic::AtomicBool::new(false),
         )
         .expect("invalid runtime directory should be removable");
         assert!(!destination.exists());
@@ -477,6 +547,7 @@ mod tests {
             &destination,
             "whisper-cli.exe",
             super::core_runtime_manifest_version(),
+            &std::sync::atomic::AtomicBool::new(false),
         )
         .expect("empty runtime should be removable");
         assert!(!destination.exists());
@@ -494,6 +565,7 @@ mod tests {
             &root,
             "whisper-cli.exe",
             super::core_runtime_manifest_version(),
+            &std::sync::atomic::AtomicBool::new(false),
         )
         .expect("manifest should be written");
         assert!(runtime_manifest_matches(
@@ -522,6 +594,7 @@ mod tests {
             &root,
             "whisper-cli.exe",
             super::core_runtime_manifest_version(),
+            &std::sync::atomic::AtomicBool::new(false),
         )
         .expect("modified runtime should be replaceable");
         assert!(!root.exists());
@@ -539,6 +612,7 @@ mod tests {
             &root,
             "whisper-cli.exe",
             super::core_runtime_manifest_version(),
+            &std::sync::atomic::AtomicBool::new(false),
         )
         .expect("manifest should be written");
         assert!(validated_user_runtime(
@@ -566,6 +640,7 @@ mod tests {
             &root,
             "whisper-cli.exe",
             super::core_runtime_manifest_version(),
+            &std::sync::atomic::AtomicBool::new(false),
         )
         .expect("manifest should be written");
         fs::write(root.join("unexpected.dll"), b"unlisted file")
@@ -576,5 +651,47 @@ mod tests {
             super::core_runtime_manifest_version()
         ));
         fs::remove_dir_all(root).expect("runtime directory should be removed");
+    }
+
+    #[test]
+    fn cancelled_runtime_is_not_activated_even_after_manifest_was_written() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let root = temporary_path("runtime-activation-cancel");
+        let staging = root.join("staging");
+        let destination = root.join("installed");
+        fs::create_dir_all(&staging).unwrap();
+        fs::write(staging.join("whisper-cli.exe"), b"runtime").unwrap();
+        let cancelled = AtomicBool::new(true);
+        assert!(write_runtime_manifest(
+            &staging,
+            "whisper-cli.exe",
+            super::core_runtime_manifest_version(),
+            &cancelled
+        )
+        .unwrap_err()
+        .contains("dibatalkan"));
+        assert!(!staging.join(super::RUNTIME_MANIFEST_NAME).exists());
+        cancelled.store(false, Ordering::SeqCst);
+        write_runtime_manifest(
+            &staging,
+            "whisper-cli.exe",
+            super::core_runtime_manifest_version(),
+            &cancelled,
+        )
+        .unwrap();
+        cancelled.store(true, Ordering::SeqCst);
+        assert!(super::activate_runtime(&staging, &destination, &cancelled)
+            .unwrap_err()
+            .contains("dibatalkan"));
+        assert!(!destination.exists());
+        assert!(staging.join(super::RUNTIME_MANIFEST_NAME).is_file());
+        cancelled.store(false, Ordering::SeqCst);
+        super::activate_runtime(&staging, &destination, &cancelled).unwrap();
+        assert!(!staging.exists());
+        assert_eq!(
+            fs::read(destination.join("whisper-cli.exe")).unwrap(),
+            b"runtime"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 }

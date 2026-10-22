@@ -39,6 +39,7 @@ require_command file "Install file dari package manager distro kamu."
 require_command patchelf "Install patchelf dari package manager distro kamu."
 require_command pkg-config "Install pkg-config dari package manager distro kamu."
 require_command sha256sum "Install coreutils dari package manager distro kamu."
+node "$ROOT/scripts/test-distribution-config.mjs"
 
 if ! pkg-config --exists webkit2gtk-4.1; then
   cat >&2 <<'EOF'
@@ -117,6 +118,7 @@ if [[ "$actual_whisper_commit" != "$WHISPER_COMMIT" ]]; then
   exit 1
 fi
 cmake -S "$WORK/whisper.cpp" -B "$WORK/build" \
+  -C "$ROOT/scripts/whisper-distribution.cmake" \
   -DGGML_METAL=OFF \
   -DWHISPER_BUILD_TESTS=OFF \
   -DCMAKE_BUILD_TYPE=Release
@@ -156,6 +158,7 @@ if ldd "$CPU/whisper-cli" | grep -q 'not found'; then
   exit 1
 fi
 
+rm -rf "$WORK/build" "$WORK/whisper.cpp"
 "$CPU/whisper-cli" --version >/dev/null
 
 cd "$ROOT"

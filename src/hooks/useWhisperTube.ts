@@ -4,6 +4,7 @@ import {
   checkForAppUpdate,
   deleteHistory as deleteHistoryRequest,
   deleteModel,
+  discardJobCache as discardJobCacheRequest,
   disposeAppUpdate,
   downloadModel,
   exportTranscriptFile,
@@ -13,6 +14,7 @@ import {
   inspectMedia,
   installAppUpdate,
   listHistory,
+  listJobCache as listJobCacheRequest,
   listModels,
   loadHistory,
   pickCookiesFile,
@@ -33,6 +35,7 @@ import type {
   AppTab,
   BackendChoice,
   HistoryItem,
+  JobCacheEntry,
   ModelInfo,
   ModelDownloadPayload,
   ProgressPayload,
@@ -124,6 +127,7 @@ export function useWhisperTube() {
   const [cancellingInspection, setCancellingInspection] = useState(false);
   const [resettingData, setResettingData] = useState(false);
   const [historyOperation, setHistoryOperation] = useState<"reading" | "deleting" | "exporting" | "revealing" | null>(null);
+  const [jobCache, setJobCache] = useState<JobCacheEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [downloadingModel, setDownloadingModel] = useState<Record<string, ModelDownloadPayload>>({});
   const [copied, setCopied] = useState(false);
@@ -404,7 +408,7 @@ export function useWhisperTube() {
       ? system.computeDevices.find((device) => device.id === computeTargetId)
       : null;
     const available = selectedCudaDevice?.freeMemoryMb ?? system.gpuFreeMemoryMb;
-    if (!available) {
+    if (available === null || available === undefined) {
       return t("error.vramUnreadable");
     }
     if (available !== null && available !== undefined && available < selectedModel.vramRequiredMb) {
@@ -552,6 +556,7 @@ export function useWhisperTube() {
         // Backend data reset remains successful when WebView storage is unavailable.
       }
       setCookiesPath("");
+      setJobCache(null);
       setMetadata(null);
       setResult(null);
       setSearchQuery("");
@@ -740,6 +745,36 @@ export function useWhisperTube() {
     }
   }
 
+  async function handleLoadJobCache() {
+    if (operationActive) return;
+    setHistoryOperation("reading");
+    setError(null);
+    try {
+      setJobCache(await listJobCacheRequest());
+    } catch (cause) {
+      setError(friendlyError(cause));
+    } finally {
+      setHistoryOperation(null);
+    }
+  }
+
+  async function handleDiscardJobCache(id: string) {
+    if (operationActive) return;
+    setHistoryOperation("deleting");
+    setError(null);
+    try {
+      await discardJobCacheRequest(id);
+      setJobCache((previous) => previous?.filter((item) => item.id !== id) ?? null);
+    } catch (cause) {
+      setError(friendlyError(cause));
+      await refreshAfterMutationFailure();
+      throw cause;
+    } finally {
+      setHistoryOperation(null);
+    }
+    await refreshAfterSuccessfulOperation();
+  }
+
   async function handleDeleteHistory(ids: number[]) {
     if (operationActive || ids.length === 0) return;
     setHistoryOperation("deleting");
@@ -822,6 +857,9 @@ export function useWhisperTube() {
   }
 
   return {
+    jobCache,
+    loadJobCache: handleLoadJobCache,
+    discardJobCache: handleDiscardJobCache,
     tab,
     setTab,
     url,

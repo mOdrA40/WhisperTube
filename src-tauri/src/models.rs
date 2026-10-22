@@ -1,10 +1,7 @@
 use reqwest::Client as AsyncClient;
-use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     fs,
-    fs::File,
-    io::Read,
     path::{Path, PathBuf},
     process::Command,
     sync::{
@@ -258,21 +255,8 @@ pub fn ensure_download_supported(
     Ok(())
 }
 
-fn verify_sha256_file(path: &Path, expected: &str) -> Result<(), String> {
-    let mut file =
-        File::open(path).map_err(|e| format!("Gagal membuka file untuk verifikasi: {e}"))?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; 1024 * 1024];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .map_err(|e| format!("Gagal membaca file: {e}"))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    let actual = format!("{:x}", hasher.finalize());
+fn verify_sha256_file(path: &Path, expected: &str, cancelled: &AtomicBool) -> Result<(), String> {
+    let actual = crate::io_cancel::file_sha256(path, cancelled)?;
     if actual != expected {
         return Err(format!(
             "SHA-256 model tidak cocok. Expected {expected}, actual {actual}. File tidak dapat digunakan."
@@ -281,7 +265,12 @@ fn verify_sha256_file(path: &Path, expected: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub fn verify_model_file(path: &Path, model_id: &str) -> Result<(), String> {
+pub fn verify_model_file(
+    path: &Path,
+    model_id: &str,
+    cancelled: &AtomicBool,
+) -> Result<(), String> {
+    crate::io_cancel::check(cancelled)?;
     let spec = model_spec(model_id)?;
     let fingerprint = model_fingerprint(path)
         .map_err(|error| format!("Gagal membaca metadata model {}: {error}", spec.label))?;
@@ -299,7 +288,7 @@ pub fn verify_model_file(path: &Path, model_id: &str) -> Result<(), String> {
     if already_verified {
         return Ok(());
     }
-    verify_sha256_file(path, spec.sha256)?;
+    verify_sha256_file(path, spec.sha256, cancelled)?;
     let verified_fingerprint = model_fingerprint(path)
         .map_err(|error| format!("Gagal memeriksa ulang model {}: {error}", spec.label))?;
     if verified_fingerprint != fingerprint {
@@ -355,9 +344,12 @@ pub async fn download_model(
     }
     if dest.exists() && crate::paths::is_regular_file(&dest) {
         let dest_for_verify = dest.clone();
-        tokio::task::spawn_blocking(move || verify_model_file(&dest_for_verify, &model_id))
-            .await
-            .map_err(|e| format!("Verifikasi model gagal: {e}"))??;
+        let cancel_for_verify = cancelled.clone();
+        tokio::task::spawn_blocking(move || {
+            verify_model_file(&dest_for_verify, &model_id, &cancel_for_verify)
+        })
+        .await
+        .map_err(|e| format!("Verifikasi model gagal: {e}"))??;
         return Ok(());
     }
     if dest.exists() {
@@ -440,9 +432,12 @@ pub async fn download_model(
     drop(file);
     let temp_for_verify = temp.clone();
     let expected_sha256 = spec.sha256;
-    tokio::task::spawn_blocking(move || verify_sha256_file(&temp_for_verify, expected_sha256))
-        .await
-        .map_err(|e| format!("Verifikasi model gagal: {e}"))??;
+    let cancel_for_verify = cancelled.clone();
+    tokio::task::spawn_blocking(move || {
+        verify_sha256_file(&temp_for_verify, expected_sha256, &cancel_for_verify)
+    })
+    .await
+    .map_err(|e| format!("Verifikasi model gagal: {e}"))??;
     if cancelled.load(Ordering::SeqCst) {
         return Err("Download model dibatalkan.".into());
     }
@@ -487,20 +482,8 @@ fn emit_cuda_progress(
     );
 }
 
-fn verify_sha256(path: &Path, expected: &str) -> Result<(), String> {
-    let mut file = File::open(path).map_err(|e| format!("Gagal membuka CUDA package: {e}"))?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; 1024 * 1024];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .map_err(|e| format!("Gagal membaca CUDA package: {e}"))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    let actual = format!("{:x}", hasher.finalize());
+fn verify_sha256(path: &Path, expected: &str, cancelled: &AtomicBool) -> Result<(), String> {
+    let actual = crate::io_cancel::file_sha256(path, cancelled)?;
     if actual != expected {
         return Err(format!(
             "Checksum CUDA package tidak cocok. Expected {expected}, actual {actual}. File tidak dipasang."
@@ -717,18 +700,18 @@ fn finalize_cuda_engine_blocking(
     staging_path: &Path,
     destination: &Path,
 ) -> Result<(), String> {
-    verify_sha256(zip_path, CUDA_ENGINE_SHA256)?;
+    verify_sha256(zip_path, CUDA_ENGINE_SHA256, cancelled)?;
     if cancelled.load(Ordering::SeqCst) {
         return Err("Download CUDA dibatalkan.".into());
     }
     emit_cuda_progress(app, 88.0, 0, 0, None);
-    crate::archive::extract_zip_safely(zip_path, extract_path, "CUDA")?;
-    let cli = crate::archive::find_file(extract_path, "whisper-cli.exe", "CUDA")?
+    crate::archive::extract_zip_safely(zip_path, extract_path, "CUDA", cancelled)?;
+    let cli = crate::archive::find_file(extract_path, "whisper-cli.exe", "CUDA", cancelled)?
         .ok_or_else(|| "whisper-cli.exe tidak ditemukan dalam CUDA package.".to_string())?;
     let release_dir = cli
         .parent()
         .ok_or_else(|| "Folder CUDA tidak valid.".to_string())?;
-    crate::archive::copy_tree(release_dir, staging_path, "CUDA")?;
+    crate::archive::copy_tree(release_dir, staging_path, "CUDA", cancelled)?;
     let staging_cli = staging_path.join("whisper-cli.exe");
     if !crate::paths::is_regular_file(&staging_cli) {
         return Err("CUDA engine gagal dipasang ke staging.".into());
@@ -737,9 +720,13 @@ fn finalize_cuda_engine_blocking(
     let mut command = Command::new(&staging_cli);
     crate::process::hide_console(&mut command);
     command.arg("--version");
-    let (status, stderr) =
-        crate::process::run_with_timeout_captured(&mut command, Duration::from_secs(10), 64 * 1024)
-            .map_err(|e| format!("CUDA engine gagal melakukan self-check: {e}"))?;
+    let (status, stderr) = crate::process::run_with_timeout_captured_cancelable(
+        &mut command,
+        Duration::from_secs(10),
+        64 * 1024,
+        cancelled,
+    )
+    .map_err(|e| format!("CUDA engine gagal melakukan self-check: {e}"))?;
     if !status.success() {
         let detail = if stderr.trim().is_empty() {
             String::new()
@@ -755,14 +742,15 @@ fn finalize_cuda_engine_blocking(
         staging_path,
         "whisper-cli.exe",
         crate::paths::core_runtime_manifest_version(),
+        cancelled,
     )?;
     crate::paths::clear_invalid_runtime_destination(
         destination,
         "whisper-cli.exe",
         crate::paths::core_runtime_manifest_version(),
+        cancelled,
     )?;
-    fs::rename(staging_path, destination)
-        .map_err(|e| format!("Gagal mengaktifkan CUDA engine: {e}"))?;
+    crate::paths::activate_runtime(staging_path, destination, cancelled)?;
     emit_cuda_progress(app, 100.0, 0, 0, None);
     Ok(())
 }
@@ -886,7 +874,8 @@ mod tests {
         let path =
             std::env::temp_dir().join(format!("whispertube-empty-model-{}.bin", Uuid::new_v4()));
         fs::write(&path, []).unwrap();
-        let error = verify_model_file(&path, "base").unwrap_err();
+        let error = verify_model_file(&path, "base", &std::sync::atomic::AtomicBool::new(false))
+            .unwrap_err();
         assert!(error.contains("kosong"));
         fs::remove_file(path).unwrap();
     }

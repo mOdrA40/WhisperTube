@@ -8,6 +8,9 @@ type SettingsPageProps = Parameters<typeof SettingsPage>[0];
 
 function renderSettingsPage(overrides: Partial<SettingsPageProps> = {}) {
   const props: SettingsPageProps = {
+    jobCache: null,
+    onLoadJobCache: vi.fn().mockResolvedValue(undefined),
+    onDiscardJobCache: vi.fn().mockResolvedValue(undefined),
     cookiesPath: "",
     system: null,
     models: [{

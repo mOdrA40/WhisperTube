@@ -3,12 +3,17 @@ mod archive;
 mod checkpoint;
 mod commands;
 mod cookies;
+#[cfg(unix)]
+mod export_permissions;
 mod history;
+mod io_cancel;
+mod job_cache;
 mod models;
 mod network;
 mod paths;
 mod process;
 mod resources;
+mod runtime_snapshot;
 mod sources;
 mod state;
 mod system;
@@ -83,6 +88,8 @@ pub fn run() {
             commands::list_history,
             commands::load_history,
             commands::delete_history,
+            commands::list_job_cache,
+            commands::discard_job_cache,
             commands::copy_export,
             commands::reveal_audio
         ])

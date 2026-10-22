@@ -27,10 +27,37 @@ fn cleanup_targets(root: &Path) -> Vec<String> {
             errors.push(error);
         }
     }
+    // Do not remove recovery files when the database itself could not be
+    // removed (for example another handle still owns it).
     if let Err(error) = remove_file_if_present(&root.join("whispertube.db")) {
         errors.push(error);
+    } else {
+        for name in [
+            "whispertube.db-journal",
+            "whispertube.db-wal",
+            "whispertube.db-shm",
+        ] {
+            if let Err(error) = remove_file_if_present(&root.join(name)) {
+                errors.push(error);
+            }
+        }
     }
     errors
+}
+
+fn ensure_recovery_files_removed(root: &Path) -> Result<(), String> {
+    for name in [
+        "whispertube.db-journal",
+        "whispertube.db-wal",
+        "whispertube.db-shm",
+    ] {
+        match fs::symlink_metadata(root.join(name)) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("Gagal memeriksa file recovery {name}: {error}")),
+            Ok(_) => return Err(format!("Database belum dibuat ulang karena {name} belum terhapus. Tutup aplikasi lain lalu ulangi reset.")),
+        }
+    }
+    Ok(())
 }
 
 pub fn reset(app: &AppHandle) -> Result<(), String> {
@@ -39,7 +66,11 @@ pub fn reset(app: &AppHandle) -> Result<(), String> {
 
     // Rebuild the baseline even when cleanup was only partially successful. This
     // keeps history queries and future downloads usable after a locked/denied path.
-    if let Err(error) = history::init_db(app) {
+    // Reopening a new database with an undeleted old journal could recover
+    // records the user just asked us to remove. Leave it closed until retry.
+    if let Err(error) =
+        ensure_recovery_files_removed(&root).and_then(|()| history::init_db(app).map(|_| ()))
+    {
         errors.push(error);
     }
     if let Err(error) = paths::models_dir(app) {
@@ -80,6 +111,54 @@ mod tests {
         assert!(root.join("models").exists());
         assert!(!root.join("jobs").exists());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cleanup_removes_owned_database_sidecars_and_preserves_external_files() {
+        let root = std::env::temp_dir().join(format!("whispertube-reset-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(root.join("cookie-jars/jar")).unwrap();
+        fs::write(root.join("cookie-jars/jar/cookies.txt"), b"internal copy").unwrap();
+        for name in [
+            "whispertube.db",
+            "whispertube.db-journal",
+            "whispertube.db-wal",
+            "whispertube.db-shm",
+        ] {
+            fs::write(root.join(name), b"database fixture").unwrap();
+        }
+        fs::write(root.join("cookies.txt"), b"original export").unwrap();
+        fs::create_dir(root.join("WebView")).unwrap();
+        assert!(cleanup_targets(&root).is_empty());
+        assert!(cleanup_targets(&root).is_empty());
+        for name in [
+            "cookie-jars",
+            "whispertube.db",
+            "whispertube.db-journal",
+            "whispertube.db-wal",
+            "whispertube.db-shm",
+        ] {
+            assert!(!root.join(name).exists(), "{name}");
+        }
+        assert_eq!(
+            fs::read(root.join("cookies.txt")).unwrap(),
+            b"original export"
+        );
+        assert!(root.join("WebView").is_dir());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_database_removal_preserves_recovery_files() {
+        let root = std::env::temp_dir().join(format!("whispertube-reset-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(root.join("whispertube.db")).unwrap();
+        fs::write(root.join("whispertube.db-journal"), b"recovery").unwrap();
+        assert!(!cleanup_targets(&root).is_empty());
+        assert_eq!(
+            fs::read(root.join("whispertube.db-journal")).unwrap(),
+            b"recovery"
+        );
+        assert!(super::ensure_recovery_files_removed(&root).is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]

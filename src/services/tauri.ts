@@ -12,6 +12,7 @@ import type {
   CudaDownloadPayload,
   HistoryDeleteOutcome,
   HistoryPageResult,
+  JobCacheEntry,
   ModelDownloadPayload,
   ModelInfo,
   ProgressPayload,
@@ -209,6 +210,14 @@ export function deleteHistory(ids: number[]) {
   return invoke<HistoryDeleteOutcome>("delete_history", { ids });
 }
 
+export function listJobCache() {
+  return invoke<JobCacheEntry[]>("list_job_cache");
+}
+
+export function discardJobCache(id: string) {
+  return invoke<void>("discard_job_cache", { id });
+}
+
 export function subscribeToProgress(onProgress: (payload: ProgressPayload) => void) {
   return listen<ProgressPayload>("job-progress", (event) => onProgress(event.payload));
 }
@@ -227,7 +236,9 @@ export function subscribeToAcceleratorDownload(onDownload: (payload: Accelerator
 
 export async function exportTranscriptFile(result: TranscriptResult, kind: "txt" | "srt" | "vtt") {
   const source = kind === "txt" ? result.txtPath : kind === "srt" ? result.srtPath : result.vttPath;
-  const safeTitle = result.title.replace(/[<>:"/\\|?*]+/g, "_").slice(0, 80);
+  // Keep the existing UTF-16 budget (also <=240 UTF-8 bytes), but never leave
+  // an unmatched high surrogate at the truncation boundary.
+  const safeTitle = result.title.replace(/[<>:"/\\|?*]+/g, "_").slice(0, 80).replace(/[\uD800-\uDBFF]$/u, "");
   const target = await save({
     defaultPath: `${safeTitle}.${kind}`,
     filters: [{ name: kind.toUpperCase(), extensions: [kind] }],

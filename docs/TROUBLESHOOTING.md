@@ -98,9 +98,12 @@ an imported cookies file.
 ## Job storage quota or low disk space
 
 Settings shows the current job storage usage and the 20 GiB safety quota.
-Delete old history items or turn off Keep audio for retry before starting a
-new large job. WhisperTube also reserves space for the maximum media and WAV
-sizes before downloading.
+Review unfinished jobs in Settings and discard only the temporary jobs you no
+longer need, or delete old history items. Discarding an unfinished job removes
+its retry progress; it does not delete installed models or committed history.
+Turning off Keep audio affects successful jobs and does not clear existing retry
+caches. WhisperTube also reserves space for the maximum media and WAV sizes
+before downloading.
 
 ## CUDA is selected but NVIDIA is not detected
 

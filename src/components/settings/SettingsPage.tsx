@@ -4,11 +4,16 @@ import { formatBytes, formatMemory, friendlyError } from "../../lib/format";
 import { getAcceleratorCopy, getModelCopy, uiLanguageOptions, useI18n } from "../../i18n";
 import type { AcceleratorInfo, AppUpdateInfo, AppUpdateProgress, AppUpdateStatus, BackendChoice, ModelDownloadPayload, ModelInfo, SystemStatus } from "../../types";
 import { CustomSelect, type SelectOption } from "../common/CustomSelect";
+import { JobCachePanel } from "./JobCachePanel";
+import type { JobCacheEntry } from "../../types";
 
 const COOKIES_EXTENSION_URL = "https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc";
 const FIREFOX_COOKIES_EXTENSION_URL = "https://addons.mozilla.org/en-US/firefox/addon/get-cookies-txt-locally/";
 
 type SettingsPageProps = {
+  jobCache: JobCacheEntry[] | null;
+  onLoadJobCache: () => Promise<void>;
+  onDiscardJobCache: (id: string) => Promise<void>;
   cookiesPath: string;
   system: SystemStatus | null;
   models: ModelInfo[];
@@ -45,6 +50,9 @@ type SettingsPageProps = {
 };
 
 export function SettingsPage({
+  jobCache,
+  onLoadJobCache,
+  onDiscardJobCache,
   cookiesPath,
   system,
   models,
@@ -585,6 +593,8 @@ export function SettingsPage({
           </div>
         </div>
       )}
+
+      <JobCachePanel items={jobCache} busy={busy} onLoad={onLoadJobCache} onDiscard={onDiscardJobCache} />
 
       <section className="card settings-card hardware-settings-card">
         <div className="card-title-row">

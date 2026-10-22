@@ -147,8 +147,23 @@ export function ControlsCard({
               type="button"
               role="radio"
               aria-checked={isSelected}
+              tabIndex={isSelected || (!models.some((item) => item.id === modelId) && model === models[0]) ? 0 : -1}
               className={isSelected ? "model-option selected" : "model-option"}
               onClick={() => onModelChange(model.id)}
+              onKeyDown={(event) => {
+                if (controlsDisabled || modelDownloadActive) return;
+                const forward = event.key === "ArrowRight" || event.key === "ArrowDown";
+                const backward = event.key === "ArrowLeft" || event.key === "ArrowUp";
+                if (!forward && !backward && event.key !== "Home" && event.key !== "End") return;
+                event.preventDefault();
+                const options = Array.from(event.currentTarget.parentElement!.querySelectorAll<HTMLButtonElement>('[role="radio"]:not(:disabled)'));
+                const index = options.indexOf(event.currentTarget);
+                const next = event.key === "Home" ? 0 : event.key === "End" ? options.length - 1
+                  : (index + (forward ? 1 : -1) + options.length) % options.length;
+                const target = options[next];
+                target?.focus();
+                target?.click();
+              }}
               disabled={controlsDisabled || modelDownloadActive}
             >
               <div className="radio-dot">

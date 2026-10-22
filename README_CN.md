@@ -14,7 +14,7 @@ WhisperTube 是一款 local-first 桌面应用，使用 `yt-dlp`、FFmpeg 和 wh
 
 支持的来源包括 YouTube、TikTok、X/Twitter、Facebook、Instagram、Reddit、Twitch、Vimeo、Dailymotion、Pinterest、LinkedIn、Tumblr、Bilibili 和 VK。支持范围取决于当前 yt-dlp extractor，并可能随着平台变化而改变。
 
-为确保磁盘和内存使用可控，转录仅支持时长明确且不超过 8 小时的点播媒体和已结束的直播回放。当前 whisper.cpp 路径会处理完整 PCM 缓冲区，尚未实现分块转录。正在进行的直播和即将开始的直播会在下载前被拒绝。
+为确保磁盘和内存使用可控，转录仅支持时长明确且不超过 8 小时的点播媒体和已结束的直播回放。推理按约五分钟一段运行，并使用经过验证的检查点恢复中断的任务。正在进行的直播和即将开始的直播会在下载前被拒绝。质量和内存限制详见下方的恢复转录说明。
 
 ## 功能
 
@@ -189,6 +189,8 @@ third-party notices。
 - `src-tauri/src/`：Rust command 和领域模块。
 
 模型、任务、导出文件和 `whispertube.db` 存储在操作系统对应的 app-local-data 目录中。任务存储有 20 GiB 安全上限，当前使用量会显示在设置中。
+
+在设置中可检查未完成的任务，并单独删除重试缓存以释放空间。删除缓存会丢失该任务的重试进度，但会保留已安装的模型和已保存的历史记录。
 
 ## v0.1 限制
 

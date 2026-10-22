@@ -14,7 +14,7 @@ Other languages: [Bahasa Indonesia](README_ID.md) · [中文（普通话）](REA
 
 Supported source families include YouTube, TikTok, X/Twitter, Facebook, Instagram, Reddit, Twitch, Vimeo, Dailymotion, Pinterest, LinkedIn, Tumblr, Bilibili, and VK. Support is based on the current yt-dlp extractor and can change as each platform changes.
 
-For predictable disk and memory use, transcription is limited to on-demand media and completed live replays with a known duration of at most 8 hours. The current whisper.cpp path processes one full PCM buffer; chunked transcription is not implemented yet. Active live streams and upcoming streams are rejected before download.
+For predictable disk and memory use, transcription is limited to on-demand media and completed live replays with a known duration of at most 8 hours. Inference runs in sections of approximately five minutes, with validated checkpoints for retry. Active live streams and upcoming streams are rejected before download. See [Resuming transcription](#resuming-transcription) for the quality and memory limits.
 
 ## Features
 
@@ -30,7 +30,7 @@ For predictable disk and memory use, transcription is limited to on-demand media
   - Fast: `base` (~142 MB)
   - Balanced: `large-v3-turbo-q5_0` (~547 MB)
   - Accurate: `large-v3-q5_0` (~1.1 GB)
-- SHA-1 verification for models against the known upstream manifest.
+- SHA-256 verification for models against pinned checksums.
 - CPU fallback.
 - Windows x64 NVIDIA CUDA acceleration, installed on demand from the pinned official whisper.cpp release.
 - Metal and Vulkan accelerator packs only appear when the platform, architecture, and compatible GPU detection match.
@@ -48,6 +48,8 @@ Partial downloads are retained for yt-dlp continuation when supported by the pla
 Checkpoints match the audio SHA-256, model, language, backend/device, application version, and algorithm version. Changing inference settings starts a new transcript while retaining compatible source audio. Timestamps are shifted back to their original positions for TXT/SRT/VTT and history. This does not restore decoder state from RAM: the model reloads per section, boundary recognition may differ from whole-file inference, and sufficient model memory is still required.
 
 Caches reside in local jobs storage, count toward the 20 GiB quota, and are removed after history commits. Startup retries interrupted cleanup of committed jobs, preserving WAV files only when the saved result retains audio. Unreferenced jobs at least 24 hours old are cleaned on startup. A deferred history-deletion warning does not stop cleanup of other jobs. Cookies are excluded from checkpoints. Once memory is available, select **Transcribe** again; retries do not run automatically.
+
+Settings lets you review unfinished jobs and discard individual retry caches to free space. Discarding a cache loses that job's retry progress while preserving installed models and committed history.
 
 ## Windows development setup
 

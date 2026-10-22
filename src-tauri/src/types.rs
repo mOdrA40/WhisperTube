@@ -239,6 +239,16 @@ pub struct HistoryDeleteOutcome {
     pub cleanup_warnings: Vec<String>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobCacheEntry {
+    pub id: String,
+    pub title: String,
+    pub source_url: String,
+    pub bytes: Option<u64>,
+    pub modified_at: String,
+}
+
 #[derive(Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct TranscriptRequest {

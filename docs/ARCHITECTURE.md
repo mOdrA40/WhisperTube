@@ -43,10 +43,14 @@ The Rust backend uses similar boundaries:
 - types.rs contains IPC DTOs and transcript limits;
 - state.rs contains runtime operation state, cancellation flags, and guards;
 - paths.rs resolves application-data, resource, model, job, and runtime paths;
-- cookies.rs validates the user-selected cookies.txt path without reading or
-  storing cookie contents;
+- cookies.rs validates and copies a user-selected cookies.txt into temporary
+  application-owned storage for yt-dlp, then removes the internal copy;
 - archive.rs centralizes bounded ZIP extraction and staged runtime copying;
 - network.rs provides cancellable, timeout-bounded HTTP operations;
+- io_cancel.rs provides bounded, cancellable copying and hashing;
+- runtime_snapshot.rs validates runtime integrity once and checks file identity
+  before subsequent transcription sections;
+- job_cache.rs lists and selectively discards unfinished jobs;
 - models.rs manages model and optional CUDA downloads;
 - sources.rs validates source URLs and performs metadata inspection;
 - process.rs provides platform-specific child-process setup and termination;
@@ -82,10 +86,14 @@ to signed 16-bit PCM WAV, mono, 16 kHz, and passes the WAV to the selected
 whisper.cpp engine. Results contain timestamped segments and are written as
 JSON, TXT, SRT, VTT, and a SQLite history row.
 
-The current full-buffer path accepts on-demand media and completed live replays
+The pipeline accepts on-demand media and completed live replays
 with a known duration of at most eight hours and a source download limit of
-4 GiB. Active and upcoming live streams remain unsupported. Chunked
-transcription is not implemented. The converted WAV size is checked again
+4 GiB. Active and upcoming live streams remain unsupported. checkpoint.rs
+divides normalized audio into approximately 300-second sections (maximum
+301 seconds), preferring quiet boundaries. A successful section is validated
+and checkpointed atomically; matching completed sections are reused on retry.
+The model reloads per section, and boundary recognition can differ from
+whole-file inference. The converted WAV size is checked again
 before inference, and transcript text, segment count, serialized result size,
 and output files have hard limits.
 
@@ -140,29 +148,45 @@ Tauri application-local-data directory:
     runtime/
     whispertube.db
 
-audio.wav is retained when Keep audio for retry is enabled. Source audio and
-converted WAV files are removed after processing by default. If a job reaches
-the audio-ready stage and transcription fails, the saved WAV can be reused for
-a retry; orphaned failed jobs remain eligible for the existing 24-hour cleanup.
+Failed/cancelled jobs retain downloads, completed WAV conversion, and validated
+inference checkpoints for retry, independently of the final audio preference.
+On success, source downloads and checkpoints are removed; audio.wav remains
+only when Keep audio after completion is enabled.
 
 Each job receives an .in-progress marker. A failed or cancelled pipeline
-cleans up its job directory unless Keep audio for retry was enabled after a
-valid WAV was created. At startup, orphaned or staging directories older than
-the 24-hour grace period are removed unless a valid result file still belongs
-to a history row.
+preserves its job directory for retry. At startup, unreferenced jobs older than
+the 24-hour grace period are removed. A committed history row protects its job
+directory even if result.json is missing or corrupt; cleanup reports that
+problem and preserves recoverable artifacts.
 
 History creation writes result.json atomically and commits the SQLite row only
-after the result file is ready. History deletion first renames job directories
-to same-filesystem staging names, commits the database deletion, and then
-removes the staged directories. If the database operation fails, the code
-attempts to restore the original directories.
+after the result file is ready. History deletion commits pending_job_deletions
+intent and row deletion in one SQLite transaction, then removes owned job
+directories. Startup replays committed deletion intent after interruption.
+Rollback preserves both rows and files. Export copies to a temporary sibling,
+flushes the new file, and publishes it with rename; a failed copy preserves
+the old destination. Unix replacement exports preserve the target's owner,
+group, mode and access ACL before writing transcript bytes; an inability to
+preserve those permissions aborts the export and removes staging. This is not
+a power-loss durability guarantee. Linux NFSv4 ACL destinations are rejected
+until their access policy can be preserved. macOS staging uses an explicit
+non-inheriting ACL at creation to prevent inherited grants during preparation.
 
 The Settings reset operation is intentionally limited to WhisperTube-owned
-application data: models, jobs, runtime, and whispertube.db. The frontend also
+application data: models, jobs, runtime, internal cookie-jars, whispertube.db
+and its recovery sidecars. Recovery files remain when the main database cannot
+be removed; reset reports failure instead of reopening a new database with
+old recovery files. The frontend also
 clears its saved cookie-path preference from local storage.
 It does not delete the WebView profile/cache, interface-language preference,
 external cookies.txt files, or exports saved outside WhisperTube storage.
 Job storage is capped at 20 GiB and the current usage is exposed in Settings.
+Settings also lists unfinished job caches, including their size and source
+when metadata is available. Discarding one requires explicit confirmation and
+an exclusive storage reservation; the backend rechecks committed history
+references before removing the selected UUID directory. This recovers quota
+without resetting models or unrelated history. Deleting progress requires a
+fresh download/conversion/inference for that job on the next retry.
 
 ## Runtime layout and verification
 
@@ -171,8 +195,14 @@ can bundle them as resources. In packaged builds, the bundled runtime is
 resolved from the application resource directory. An installed user runtime
 under application-local-data takes precedence over the bundled engine only
 when its runtime manifest matches the expected whisper.cpp version and
-executable SHA-256. Modified or legacy user runtimes are ignored until
-reinstalled.
+the SHA-256 of every runtime file. Modified or legacy user runtimes are ignored until
+reinstalled. A transcription owns a verified runtime snapshot across chunks:
+each spawn checks the full file inventory, identity and change metadata,
+without rehashing unchanged dependencies. Windows read-sharing handles deny
+runtime writes/deletion during the job; Unix checks include inode and ctime.
+Filesystems lacking stable identities retain full hash checks. This does not
+make a user-writable manifest an authenticated signature or eliminate every
+filesystem race against a malicious local actor.
 
 The Windows developer-only CUDA helper stores its optional engine under
 runtime-dev/windows/cuda. This directory is intentionally outside the bundled
@@ -201,7 +231,10 @@ cleared by a data reset.
 
 Archives are downloaded to unique temporary staging paths, checked for size
 and checksum limits, extracted with path-traversal protection, self-tested,
-and activated only after validation succeeds. Stale installer staging and
+and activated only after validation succeeds. Hashing, extraction, traversal,
+copying, and manifest generation check cancellation between bounded I/O blocks.
+The final check before rename is the activation commit boundary: cancellation
+after commit does not undo an installed runtime. Stale installer staging and
 temporary download directories older than 24 hours are cleaned at startup.
 
 ## Hardware and backend selection
@@ -214,8 +247,11 @@ The application distinguishes execution backends from models:
 - Metal is supported on macOS with the matching Metal runtime;
 - Vulkan is supported on Windows/Linux x64 with a matching Vulkan runtime.
 
-NVIDIA device discovery uses nvidia-smi and preserves the selected device
-index. Vulkan devices are enumerated by the selected whisper.cpp engine, with
+NVIDIA device discovery uses one nvidia-smi query for device data and driver
+version and preserves the selected device index. Executable discovery is
+cached until a query fails; hardware values are queried afresh. Generic Windows
+adapter discovery uses EnumDisplayDevicesW without a PowerShell subprocess.
+Vulkan devices are enumerated by the selected whisper.cpp engine, with
 known software adapters such as llvmpipe, lavapipe, SwiftShader, and WARP
 filtered out. The compute selector exposes explicit targets such as
 cuda:<index> and vulkan:<index> when available.
@@ -227,6 +263,11 @@ can consume memory.
 CUDA installation additionally requires a detected Windows x64 NVIDIA GPU and
 an NVIDIA driver compatible with the packaged CUDA 12.x runtime; the current
 minimum driver gate is 528.33.
+
+Node availability probes cache successful results for the resolved executable,
+size, timestamp and permissions. Failed probes remain retryable. yt-dlp receives
+the probed absolute executable path when representable; non-Unicode paths or
+platform executable lookup outside PATH retain uncached legacy lookup.
 
 GPU telemetry follows the resolved target where the platform exposes a reliable
 mapping. CUDA uses the selected NVIDIA device index. Linux reports Vulkan GPU
@@ -260,11 +301,28 @@ paths that can be exposed by some AMD devices but fail during inference.
 ## Browser and cookie handling
 
 The user can provide a Netscape-format cookies.txt file. WhisperTube validates
-the path and size, then passes it only to the local yt-dlp process. Browser
+the path and size and copies the file into cookie-jars/<uuid>/cookies.txt.
+Only the internal copy is passed to local yt-dlp, which may update it.
+Normal completion removes the copy; startup removes stale copies left by a
+crash. Reset and Windows uninstall with data removal also remove internal jars
+without touching the original export or the WebView profile. Browser
 encryption, OS permissions, extractor changes, and platform anti-bot behavior
 can still prevent protected downloads.
 
 ## Release workflows
+
+Native source builds share scripts/whisper-distribution.cmake. It disables
+runner-native ISA selection and optional x86 features beyond the x86-64 SSE2
+baseline, and sets an ARMv8-A baseline for AArch64. This favors compatibility
+over peak CPU throughput; GPU backends remain enabled by their build recipe.
+OpenMP, external BLAS and optional llamafile CPU kernels are disabled to avoid
+incidental host-specific dependencies. Metal shaders are embedded.
+Sibling libraries use @loader_path/@rpath on macOS and $ORIGIN on Linux.
+Setup/pack recipes remove build trees before staged executable self-checks.
+Configuration-policy tests do not replace native artifact/inference QA.
+
+See [Dependency maintenance](DEPENDENCY-MAINTENANCE.md) for open inherited
+Rust advisories and the evidence required to close them.
 
 The repository has two separate release paths:
 

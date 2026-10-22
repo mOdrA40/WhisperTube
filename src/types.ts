@@ -173,6 +173,14 @@ export type HistoryDeleteOutcome = {
   cleanupWarnings: string[];
 };
 
+export type JobCacheEntry = {
+  id: string;
+  title: string;
+  sourceUrl: string;
+  bytes: number | null;
+  modifiedAt: string;
+};
+
 export type HistoryPageResult = {
   items: HistoryItem[];
   hasMore: boolean;

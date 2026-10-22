@@ -9,6 +9,8 @@ const services = vi.hoisted(() => ({
   getSystemStatus: vi.fn(),
   listModels: vi.fn(),
   listHistory: vi.fn(),
+  listJobCache: vi.fn(),
+  discardJobCache: vi.fn(),
   inspectMedia: vi.fn(),
   startTranscription: vi.fn(),
   deleteHistory: vi.fn(),
@@ -105,6 +107,8 @@ describe("useWhisperTube", () => {
     services.getSystemStatus.mockResolvedValue(system);
     services.listModels.mockResolvedValue(models);
     services.listHistory.mockResolvedValue({ items: [], hasMore: false, totalCount: 0 });
+    services.listJobCache.mockResolvedValue([]);
+    services.discardJobCache.mockResolvedValue(undefined);
     services.inspectMedia.mockResolvedValue(metadata);
     services.startTranscription.mockResolvedValue(transcript);
     services.loadHistory.mockResolvedValue(transcript);
@@ -123,6 +127,22 @@ describe("useWhisperTube", () => {
     expect(services.disposeAppUpdate).not.toHaveBeenCalled();
     unmount();
     expect(services.disposeAppUpdate).toHaveBeenCalledOnce();
+  });
+
+  it("discards only the selected unfinished job and refreshes storage without resetting models/history", async () => {
+    const entry = { id: "unfinished", title: "Video", sourceUrl: "https://www.youtube.com/watch?v=test", bytes: 1024, modifiedAt: "2026-10-22T00:00:00Z" };
+    services.listJobCache.mockResolvedValue([entry]);
+    const { result } = renderHook(() => useWhisperTube(), { wrapper });
+    await waitFor(() => expect(result.current.system).toEqual(system));
+    await act(async () => result.current.loadJobCache());
+    expect(result.current.jobCache).toEqual([entry]);
+    await act(async () => result.current.discardJobCache(entry.id));
+    expect(services.discardJobCache).toHaveBeenCalledWith(entry.id);
+    expect(result.current.jobCache).toEqual([]);
+    expect(services.resetUserData).not.toHaveBeenCalled();
+    expect(services.deleteHistory).not.toHaveBeenCalled();
+    expect(services.deleteModel).not.toHaveBeenCalled();
+    expect(services.getSystemStatus).toHaveBeenCalledTimes(2);
   });
 
   it("does not let a late update check overwrite the installing status", async () => {
@@ -217,7 +237,7 @@ describe("useWhisperTube", () => {
     expect(result.current.error).toBeNull();
   });
 
-  it.each([1024, null])("lets Auto fall back when installable CUDA has insufficient or unknown VRAM (%s)", async (free) => {
+  it.each([0, 1024, null])("lets Auto fall back when installable CUDA has insufficient or unknown VRAM (%s)", async (free) => {
     services.getSystemStatus.mockResolvedValue({ ...system, cudaEngine: true, cudaSupported: true,
       cudaInstallable: true, nvidia: true, gpuFreeMemoryMb: free, gpuMemoryMb: free });
     services.listModels.mockResolvedValue([{ ...models[0], vramRequiredMb: 4096 }]);
@@ -228,6 +248,16 @@ describe("useWhisperTube", () => {
     expect(result.current.canStart).toBe(true);
     await act(async () => result.current.startTranscription());
     expect(services.startTranscription).toHaveBeenCalledOnce();
+  });
+
+  it.each([0, null])("distinguishes exhausted CUDA VRAM from unreadable memory (%s)", async (free) => {
+    services.getSystemStatus.mockResolvedValue({ ...system, recommendedBackend: "cuda", cudaEngine: true,
+      cudaSupported: true, cudaInstallable: true, nvidia: true, gpuFreeMemoryMb: free });
+    services.listModels.mockResolvedValue([{ ...models[0], vramRequiredMb: 4096 }]);
+    const { result } = renderHook(() => useWhisperTube(), { wrapper });
+    await waitFor(() => expect(result.current.system?.cudaInstallable).toBe(true));
+    expect(result.current.vramWarning).toContain(free === 0 ? "but only 0.0 GB is available" : "VRAM could not be read");
+    expect(result.current.canStart).toBe(false);
   });
 
   it("keeps model deletion busy until it settles and releases busy on failure", async () => {

@@ -1,10 +1,7 @@
 use reqwest::Client;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::{
     fs,
-    fs::File,
-    io::Read,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -412,20 +409,8 @@ async fn download_archive(
     Ok(())
 }
 
-fn verify_sha256(path: &Path, expected: &str) -> Result<String, String> {
-    let mut file = File::open(path).map_err(|e| format!("Gagal membuka accelerator: {e}"))?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; 1024 * 1024];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .map_err(|e| format!("Gagal membaca accelerator: {e}"))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    let actual = format!("{:x}", hasher.finalize());
+fn verify_sha256(path: &Path, expected: &str, cancelled: &AtomicBool) -> Result<String, String> {
+    let actual = crate::io_cancel::file_sha256(path, cancelled)?;
     if actual != expected {
         return Err(format!(
             "Checksum accelerator tidak cocok. Expected {expected}, actual {actual}."
@@ -573,7 +558,7 @@ fn finalize_blocking(
     cancelled: &AtomicBool,
     paths: FinalizePaths<'_>,
 ) -> Result<(), String> {
-    let actual_sha256 = verify_sha256(paths.archive, paths.trusted_sha256)?;
+    let actual_sha256 = verify_sha256(paths.archive, paths.trusted_sha256, cancelled)?;
     if actual_sha256 != paths.sidecar_sha256 {
         return Err(format!(
             "Checksum sidecar accelerator tidak cocok dengan hash tepercaya. Expected {}, actual {}.",
@@ -591,18 +576,19 @@ fn finalize_blocking(
         return Err("Download accelerator dibatalkan.".into());
     }
     emit_progress(app, spec.backend, 88.0, 0, 0, None);
-    crate::archive::extract_zip_safely(paths.archive, paths.extract, "accelerator")?;
-    let cli = crate::archive::find_file(paths.extract, executable_name(), "accelerator")?
-        .ok_or_else(|| {
-            format!(
-                "{} tidak ditemukan dalam accelerator package.",
-                executable_name()
-            )
-        })?;
+    crate::archive::extract_zip_safely(paths.archive, paths.extract, "accelerator", cancelled)?;
+    let cli =
+        crate::archive::find_file(paths.extract, executable_name(), "accelerator", cancelled)?
+            .ok_or_else(|| {
+                format!(
+                    "{} tidak ditemukan dalam accelerator package.",
+                    executable_name()
+                )
+            })?;
     let release_dir = cli
         .parent()
         .ok_or_else(|| "Folder accelerator tidak valid.".to_string())?;
-    crate::archive::copy_tree(release_dir, paths.staging, "accelerator")?;
+    crate::archive::copy_tree(release_dir, paths.staging, "accelerator", cancelled)?;
     let staging_cli = paths.staging.join(executable_name());
     #[cfg(unix)]
     mark_executable(&staging_cli)?;
@@ -613,9 +599,13 @@ fn finalize_blocking(
     let mut command = std::process::Command::new(&staging_cli);
     crate::process::hide_console(&mut command);
     command.arg("--version");
-    let (status, stderr) =
-        crate::process::run_with_timeout_captured(&mut command, Duration::from_secs(10), 64 * 1024)
-            .map_err(|e| format!("Accelerator gagal melakukan self-check: {e}"))?;
+    let (status, stderr) = crate::process::run_with_timeout_captured_cancelable(
+        &mut command,
+        Duration::from_secs(10),
+        64 * 1024,
+        cancelled,
+    )
+    .map_err(|e| format!("Accelerator gagal melakukan self-check: {e}"))?;
     if !status.success() {
         let detail = if stderr.trim().is_empty() {
             String::new()
@@ -632,14 +622,15 @@ fn finalize_blocking(
         paths.staging,
         executable_name(),
         crate::paths::accelerator_runtime_manifest_version(),
+        cancelled,
     )?;
     crate::paths::clear_invalid_runtime_destination(
         paths.destination,
         executable_name(),
         crate::paths::accelerator_runtime_manifest_version(),
+        cancelled,
     )?;
-    fs::rename(paths.staging, paths.destination)
-        .map_err(|e| format!("Gagal mengaktifkan accelerator: {e}"))?;
+    crate::paths::activate_runtime(paths.staging, paths.destination, cancelled)?;
     emit_progress(app, spec.backend, 100.0, 0, 0, None);
     Ok(())
 }

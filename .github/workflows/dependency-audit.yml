@@ -1,0 +1,38 @@
+name: Audit locked dependencies
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - package.json
+      - package-lock.json
+      - src-tauri/Cargo.toml
+      - src-tauri/Cargo.lock
+      - .github/workflows/dependency-audit.yml
+  push:
+    paths:
+      - package.json
+      - package-lock.json
+      - src-tauri/Cargo.toml
+      - src-tauri/Cargo.lock
+      - .github/workflows/dependency-audit.yml
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install locked npm dependencies for audit
+        run: npm ci --ignore-scripts
+      - name: Audit npm including development tooling
+        run: npm audit --audit-level=moderate
+      - name: Install Cargo Audit
+        run: cargo install cargo-audit --locked --version 0.22.2
+      - name: Audit Cargo (informational warnings remain open)
+        run: cargo audit --file src-tauri/Cargo.lock

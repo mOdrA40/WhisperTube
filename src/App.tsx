@@ -149,6 +149,9 @@ export default function App() {
           onCancelModel={app.cancelJob}
           onRemoveModel={app.removeModel}
           onResetUserData={app.resetUserData}
+          jobCache={app.jobCache}
+          onLoadJobCache={app.loadJobCache}
+          onDiscardJobCache={app.discardJobCache}
           onRefresh={app.refreshSystem}
           onInstallCuda={app.installCuda}
           onCancelCuda={app.cancelJob}

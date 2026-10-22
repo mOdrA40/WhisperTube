@@ -21,7 +21,7 @@ use crate::{
     checkpoint,
     cookies::CookieJar,
     history, models,
-    paths::{engine_path, is_regular_file, jobs_dir, model_path, tool_path},
+    paths::{engine_path_cancelable, is_regular_file, jobs_dir, model_path, tool_path},
     process, resources,
     sources::{js_runtime_args, validate_media_duration, validate_media_url},
     system::{
@@ -237,6 +237,8 @@ fn remove_file_if_present(path: &Path, label: &str) -> Result<(), String> {
 struct AudioCacheMetadata {
     version: u8,
     url: String,
+    #[serde(default)]
+    title: String,
     duration: f64,
     #[serde(default = "audio_ready_default")]
     audio_ready: bool,
@@ -254,6 +256,7 @@ fn write_audio_cache_metadata(
     let metadata = AudioCacheMetadata {
         version: AUDIO_CACHE_METADATA_VERSION,
         url: request.url.clone(),
+        title: request.title.clone(),
         duration: request.duration,
         audio_ready,
     };
@@ -269,6 +272,11 @@ fn read_audio_cache_metadata(path: &Path) -> Option<AudioCacheMetadata> {
     let bytes =
         read_bounded_file(path, MAX_AUDIO_CACHE_METADATA_BYTES, "metadata cache audio").ok()?;
     serde_json::from_slice(&bytes).ok()
+}
+
+pub(crate) fn cached_job_source(job_dir: &Path) -> Option<(String, String)> {
+    let metadata = read_audio_cache_metadata(&job_dir.join(AUDIO_CACHE_METADATA_FILE))?;
+    Some((metadata.title.chars().take(256).collect(), metadata.url))
 }
 
 fn find_reusable_audio_job(
@@ -482,10 +490,14 @@ fn directory_file_bytes(path: &Path) -> Result<u64, String> {
 
 fn ensure_job_storage_quota(app: &AppHandle) -> Result<(), String> {
     let used = history::job_storage_bytes(app)?;
-    if used >= history::MAX_JOB_STORAGE_BYTES {
+    ensure_job_storage_budget(used, history::MAX_JOB_STORAGE_BYTES)
+}
+
+pub(crate) fn ensure_job_storage_budget(used: u64, limit: u64) -> Result<(), String> {
+    if used >= limit {
         return Err(format!(
             "storage_quota_exceeded:Penyimpanan job WhisperTube sudah melewati batas {:.1} GB.",
-            history::MAX_JOB_STORAGE_BYTES as f64 / 1024_f64.powi(3),
+            limit as f64 / 1024_f64.powi(3),
         ));
     }
     Ok(())
@@ -1322,6 +1334,11 @@ where
 
 type BackendSelection = (String, PathBuf, Option<String>, Option<usize>);
 
+struct ResolvedEngine {
+    selection: BackendSelection,
+    runtime: crate::runtime_snapshot::RuntimeSnapshot,
+}
+
 fn choose_backend(
     context: &JobContext,
     requested: &str,
@@ -1333,7 +1350,7 @@ fn choose_backend(
     let app = context.app;
     match requested {
         "cpu" => {
-            let cpu = engine_path(app, "cpu")?;
+            let cpu = engine_path_cancelable(app, "cpu", context.cancelled)?;
             if !is_regular_file(&cpu) {
                 Err("CPU whisper engine belum terpasang.".into())
             } else {
@@ -1342,7 +1359,7 @@ fn choose_backend(
         }
         "cuda" => {
             let nvidia = detect_nvidia().is_some();
-            let cuda = engine_path(app, "cuda")?;
+            let cuda = engine_path_cancelable(app, "cuda", context.cancelled)?;
             if !cfg!(all(target_os = "windows", target_arch = "x86_64")) {
                 Err("CUDA hanya tersedia pada build Windows yang didukung.".into())
             } else if !nvidia {
@@ -1366,7 +1383,7 @@ fn choose_backend(
             }
         }
         "metal" => {
-            let metal = engine_path(app, "metal")?;
+            let metal = engine_path_cancelable(app, "metal", context.cancelled)?;
             if !cfg!(target_os = "macos") {
                 Err("Apple Metal hanya tersedia di macOS.".into())
             } else if !is_regular_file(&metal) {
@@ -1378,7 +1395,7 @@ fn choose_backend(
         }
         "vulkan" => {
             let gpu_detected = detect_nvidia().is_some() || detect_gpu().is_some();
-            let vulkan = engine_path(app, "vulkan")?;
+            let vulkan = engine_path_cancelable(app, "vulkan", context.cancelled)?;
             if !cfg!(any(target_os = "windows", target_os = "linux")) {
                 Err("Vulkan accelerator saat ini tersedia di Windows/Linux.".into())
             } else if !gpu_detected {
@@ -1457,16 +1474,12 @@ fn run_whisper(
     output_prefix: &Path,
     model: &Path,
     config: WhisperConfig<'_>,
-    resolved: &mut Option<BackendSelection>,
+    resolved: &mut Option<ResolvedEngine>,
 ) -> Result<String, String> {
     let (resolved_backend, engine, fallback_message, device_index) = match resolved {
         Some(selection) => {
-            // Every chunk starts a new native process. Revalidate the selected
-            // runtime at that execution boundary, without resolving other GPUs.
-            if engine_path(context.app, &selection.0)? != selection.1 {
-                return Err("Runtime berubah atau gagal verifikasi selama transkripsi. Coba lagi untuk memilih backend ulang.".into());
-            }
-            selection.clone()
+            selection.runtime.validate(context.cancelled)?;
+            selection.selection.clone()
         }
         None => {
             let selection = choose_backend(
@@ -1477,7 +1490,16 @@ fn run_whisper(
                 wav,
                 config.model_id,
             )?;
-            *resolved = Some(selection.clone());
+            let runtime = crate::paths::snapshot_runtime(
+                context.app,
+                &selection.0,
+                &selection.1,
+                context.cancelled,
+            )?;
+            *resolved = Some(ResolvedEngine {
+                selection: selection.clone(),
+                runtime,
+            });
             selection
         }
     };
@@ -1776,7 +1798,7 @@ pub fn pipeline(
     if !is_regular_file(&model) {
         return Err("Model belum diunduh. Unduh model dari UI terlebih dahulu.".into());
     }
-    models::verify_model_file(&model, &request.model_id)?;
+    models::verify_model_file(&model, &request.model_id, &cancelled)?;
     let jobs_dir = jobs_dir(&app)?;
     let duration_seconds = request.duration.max(0.0).ceil() as u64;
     let inference_bytes = duration_seconds

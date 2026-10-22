@@ -2,11 +2,12 @@ use serde_json::Value;
 use std::io::Read;
 use std::process::{Command, ExitStatus, Stdio};
 use std::{
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 use tauri::AppHandle;
 use url::Url;
@@ -416,20 +417,122 @@ fn run_output(
     })
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct NodeIdentity {
+    path: PathBuf,
+    size: u64,
+    modified: Option<SystemTime>,
+    permissions: std::fs::Permissions,
+}
+
+static NODE_PROBE: OnceLock<Mutex<Option<NodeIdentity>>> = OnceLock::new();
+
+fn probe_node_cached(
+    cache: &Mutex<Option<NodeIdentity>>,
+    program: &Path,
+    cancelled: &AtomicBool,
+    probe: impl FnOnce() -> Result<bool, String>,
+) -> Result<bool, String> {
+    crate::io_cancel::check(cancelled)?;
+    let metadata = std::fs::metadata(program)
+        .map_err(|e| format!("Runtime Node.js tidak dapat diperiksa: {e}"))?;
+    let identity = NodeIdentity {
+        path: program.into(),
+        size: metadata.len(),
+        modified: metadata.modified().ok(),
+        permissions: metadata.permissions(),
+    };
+    if identity.modified.is_some()
+        && cache
+            .lock()
+            .map_err(|_| "Cache runtime Node.js terkunci.")?
+            .as_ref()
+            == Some(&identity)
+    {
+        return Ok(true);
+    }
+    let available = probe()?;
+    crate::io_cancel::check(cancelled)?;
+    // Never cache failures: installing/fixing Node must work on the next try.
+    *cache
+        .lock()
+        .map_err(|_| "Cache runtime Node.js terkunci.")? = available.then_some(identity);
+    Ok(available)
+}
+
+fn node_program() -> Option<PathBuf> {
+    let mut directories = Vec::new();
+    #[cfg(windows)]
+    if let Some(parent) = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+    {
+        directories.push(parent);
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        directories.extend(std::env::split_paths(&path));
+    }
+    node_program_in(directories)
+}
+
+fn node_program_in(directories: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
+    let name = crate::paths::exe_name("node");
+    directories
+        .into_iter()
+        // PATH entries may be symlinks (Homebrew and version managers). Resolve
+        // each candidate before validating it, preserving executable precedence.
+        .filter_map(|directory| std::fs::canonicalize(directory.join(&name)).ok())
+        .find(|candidate| is_regular_file(candidate))
+}
+
 pub fn js_runtime_args(
     active_pid: &Mutex<Option<u32>>,
     cancelled: &AtomicBool,
 ) -> Result<Vec<String>, String> {
-    let mut command = Command::new("node");
-    command.arg("--version");
-    let node_available = crate::process::probe_optional_runtime(
-        &mut command,
-        Duration::from_secs(3),
-        active_pid,
+    crate::io_cancel::check(cancelled)?;
+    let Some(program) = node_program() else {
+        // Preserve the platform's existing executable lookup when it resolves
+        // a runtime outside PATH. Without an absolute identity, do not cache it.
+        let mut command = Command::new("node");
+        command.arg("--version");
+        return Ok(
+            if crate::process::probe_optional_runtime(
+                &mut command,
+                Duration::from_secs(3),
+                active_pid,
+                cancelled,
+            )? {
+                vec!["--js-runtimes".into(), "node".into()]
+            } else {
+                Vec::new()
+            },
+        );
+    };
+    let node_available = probe_node_cached(
+        NODE_PROBE.get_or_init(|| Mutex::new(None)),
+        &program,
         cancelled,
+        || {
+            let mut command = Command::new(&program);
+            command.arg("--version");
+            crate::process::probe_optional_runtime(
+                &mut command,
+                Duration::from_secs(3),
+                active_pid,
+                cancelled,
+            )
+        },
     )?;
     Ok(if node_available {
-        vec!["--js-runtimes".into(), "node".into()]
+        // Pin yt-dlp to the binary we probed. For a non-Unicode PATH entry,
+        // preserve its original own PATH lookup because the argument is UTF-8.
+        vec![
+            "--js-runtimes".into(),
+            program
+                .to_str()
+                .map(|path| format!("node:{path}"))
+                .unwrap_or_else(|| "node".into()),
+        ]
     } else {
         Vec::new()
     })
@@ -669,6 +772,69 @@ pub async fn inspect_media(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn node_lookup_preserves_path_precedence_for_symlinks_and_skips_broken_links() {
+        use std::{fs, os::unix::fs::symlink};
+        let root =
+            std::env::temp_dir().join(format!("whispertube-node-path-{}", uuid::Uuid::new_v4()));
+        let first = root.join("first");
+        let second = root.join("second");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        let managed = root.join("managed-node");
+        fs::write(&managed, b"managed runtime").unwrap();
+        fs::write(second.join("node"), b"system runtime").unwrap();
+        symlink(&managed, first.join("node")).unwrap();
+        assert_eq!(
+            super::node_program_in([first.clone(), second.clone()]),
+            Some(fs::canonicalize(&managed).unwrap())
+        );
+        fs::remove_file(&managed).unwrap();
+        assert_eq!(
+            super::node_program_in([first, second.clone()]),
+            Some(fs::canonicalize(second.join("node")).unwrap())
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn node_probe_reuses_success_but_retries_failures_and_changed_binaries() {
+        use std::{
+            cell::Cell,
+            fs,
+            sync::{atomic::AtomicBool, Mutex},
+        };
+        let program =
+            std::env::temp_dir().join(format!("whispertube-node-cache-{}", uuid::Uuid::new_v4()));
+        fs::write(&program, b"node fixture").unwrap();
+        let cache = Mutex::new(None);
+        let cancelled = AtomicBool::new(false);
+        let calls = Cell::new(0);
+        let probe = || {
+            calls.set(calls.get() + 1);
+            Ok(true)
+        };
+        assert!(super::probe_node_cached(&cache, &program, &cancelled, probe).unwrap());
+        assert!(super::probe_node_cached(&cache, &program, &cancelled, probe).unwrap());
+        assert_eq!(calls.get(), 1);
+        fs::write(&program, b"new node fixture version").unwrap();
+        assert!(super::probe_node_cached(&cache, &program, &cancelled, probe).unwrap());
+        assert_eq!(calls.get(), 2);
+        let empty = Mutex::new(None);
+        assert!(!super::probe_node_cached(&empty, &program, &cancelled, || Ok(false)).unwrap());
+        assert!(super::probe_node_cached(&empty, &program, &cancelled, probe).unwrap());
+        assert_eq!(calls.get(), 3);
+        let cancelled = AtomicBool::new(true);
+        assert!(
+            super::probe_node_cached(&cache, &program, &cancelled, || panic!(
+                "must not probe after cancellation"
+            ))
+            .unwrap_err()
+            .contains("dibatalkan")
+        );
+        fs::remove_file(program).unwrap();
+    }
     use super::{
         drain_bounded, metadata_error_prefix, metadata_retry_reason, safe_thumbnail,
         source_for_host, validate_media_duration, validate_media_url, MetadataRetryReason,

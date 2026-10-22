@@ -14,7 +14,7 @@ Dokumentasi utama: [README.md](README.md) (English). Dokumentasi Mandarin: [READ
 
 Platform yang dicakup antara lain YouTube, TikTok, X/Twitter, Facebook, Instagram, Reddit, Twitch, Vimeo, Dailymotion, Pinterest, LinkedIn, Tumblr, Bilibili, dan VK. Dukungan mengikuti extractor yt-dlp yang terpasang dan dapat berubah saat platform memperbarui sistemnya.
 
-Untuk menjaga pemakaian disk dan memori tetap terprediksi, transkripsi dibatasi pada media non-live dan replay live yang sudah selesai dengan durasi pasti maksimal 8 jam. Jalur whisper.cpp saat ini memproses satu buffer PCM penuh; transkripsi berbasis chunk belum diimplementasikan. Live stream aktif dan siaran mendatang ditolak sebelum download.
+Untuk menjaga pemakaian disk dan memori tetap terprediksi, transkripsi dibatasi pada media non-live dan replay live yang sudah selesai dengan durasi pasti maksimal 8 jam. Inferensi berjalan per bagian sekitar lima menit dengan checkpoint tervalidasi untuk melanjutkan pekerjaan yang terputus. Live stream aktif dan siaran mendatang ditolak sebelum download. Batas kualitas dan memori dijelaskan pada bagian melanjutkan transkripsi di bawah.
 
 ## Fitur
 
@@ -230,6 +230,8 @@ Repository dan tag default dibaca dari `src-tauri/src/accelerators.rs`. `-Apply`
 - `src-tauri/src/`: command dan modul domain Rust.
 
 Model, job, export, dan `whispertube.db` disimpan di app-local-data sesuai OS. Penyimpanan job memiliki batas keamanan 20 GiB dan pemakaiannya ditampilkan di Pengaturan.
+
+Di Pengaturan, tinjau job belum selesai dan hapus cache retry tertentu untuk mengosongkan ruang. Penghapusan cache menghilangkan progres retry job tersebut, tetapi mempertahankan model terpasang dan history yang sudah tersimpan.
 
 ## Batasan v0.1
 

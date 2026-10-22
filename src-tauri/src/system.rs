@@ -277,41 +277,42 @@ pub fn detect_nvidia_device(device_index: usize) -> Option<GpuInfo> {
 }
 
 pub fn detect_nvidia_devices() -> Vec<GpuInfo> {
+    detect_nvidia_snapshot().0
+}
+
+fn detect_nvidia_snapshot() -> (Vec<GpuInfo>, Option<String>) {
     let Some(program) = nvidia_smi_program() else {
-        return Vec::new();
+        return (Vec::new(), None);
     };
     let output = {
         let mut command = Command::new(&program);
         crate::process::hide_console(&mut command);
         command.args([
-            "--query-gpu=index,name,memory.total,memory.free",
+            "--query-gpu=index,name,memory.total,memory.free,driver_version",
             "--format=csv,noheader,nounits",
         ]);
         command_output_with_timeout(command, Duration::from_secs(2))
     };
     match output {
-        Some(out) => parse_nvidia_devices(&out.stdout),
+        Some(out) => parse_nvidia_snapshot(&out.stdout),
         None => {
             clear_nvidia_smi_program();
-            Vec::new()
+            (Vec::new(), None)
         }
     }
 }
 
 pub fn detect_nvidia_driver_version() -> Option<String> {
-    let program = nvidia_smi_program()?;
-    let mut command = Command::new(program);
-    crate::process::hide_console(&mut command);
-    command.args([
-        "--query-gpu=driver_version",
-        "--format=csv,noheader,nounits",
-    ]);
-    let output = command_output_with_timeout(command, Duration::from_secs(2))?;
-    String::from_utf8_lossy(&output.stdout)
+    detect_nvidia_snapshot().1
+}
+
+fn parse_nvidia_snapshot(output: &[u8]) -> (Vec<GpuInfo>, Option<String>) {
+    let driver = String::from_utf8_lossy(output)
         .lines()
-        .map(str::trim)
+        .filter_map(|line| line.split(',').nth(4).map(str::trim))
         .find(|value| parse_driver_version(value).is_some())
-        .map(str::to_string)
+        .map(str::to_string);
+    (parse_nvidia_devices(output), driver)
 }
 
 fn parse_driver_version(value: &str) -> Option<(u32, u32, u32)> {
@@ -435,10 +436,6 @@ fn clear_nvidia_smi_program() {
     }
 }
 
-pub fn refresh_hardware_detection() {
-    clear_nvidia_smi_program();
-}
-
 fn vulkan_vendor(name: &str) -> &'static str {
     let lower = name.to_ascii_lowercase();
     if lower.contains("nvidia") {
@@ -495,13 +492,8 @@ fn parse_vulkan_devices(stderr: &str) -> Vec<ComputeDeviceInfo> {
 }
 
 fn vulkan_probe_command(engine: &Path) -> Command {
-    let command = Command::new(engine);
-    #[cfg(target_os = "windows")]
-    let command = {
-        let mut command = command;
-        crate::process::hide_console(&mut command);
-        command
-    };
+    let mut command = Command::new(engine);
+    crate::process::hide_console(&mut command);
     command
 }
 
@@ -544,24 +536,57 @@ fn clean_gpu_name(value: &str) -> Option<String> {
 
 #[cfg(target_os = "windows")]
 fn detect_generic_gpu() -> Option<GpuInfo> {
-    let mut command = Command::new("powershell.exe");
-    crate::process::hide_console(&mut command);
-    command.args([
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        "Get-CimInstance -ClassName Win32_VideoController | Select-Object -ExpandProperty Name",
-    ]);
-    let output = command_output_with_timeout(command, Duration::from_secs(3))?;
-    let name = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .find_map(clean_gpu_name)?;
-    Some(GpuInfo {
-        name,
-        total_memory_mb: None,
-        free_memory_mb: None,
-        device_index: None,
-    })
+    #[repr(C)]
+    struct DisplayDevice {
+        size: u32,
+        name: [u16; 32],
+        description: [u16; 128],
+        flags: u32,
+        id: [u16; 128],
+        key: [u16; 128],
+    }
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn EnumDisplayDevicesW(
+            device: *const u16,
+            index: u32,
+            output: *mut DisplayDevice,
+            flags: u32,
+        ) -> i32;
+    }
+    for index in 0.. {
+        let mut device = DisplayDevice {
+            size: std::mem::size_of::<DisplayDevice>() as u32,
+            name: [0; 32],
+            description: [0; 128],
+            flags: 0,
+            id: [0; 128],
+            key: [0; 128],
+        };
+        // SAFETY: cb and the repr(C) layout match DISPLAY_DEVICEW. A null input
+        // enumerates adapters, and output points to a complete writable struct.
+        if unsafe { EnumDisplayDevicesW(std::ptr::null(), index, &mut device, 0) } == 0 {
+            return None;
+        }
+        if device.flags & 0x8 != 0 {
+            continue;
+        } // DISPLAY_DEVICE_MIRRORING_DRIVER
+        let length = device
+            .description
+            .iter()
+            .position(|unit| *unit == 0)
+            .unwrap_or(device.description.len());
+        if let Some(name) = clean_gpu_name(&String::from_utf16_lossy(&device.description[..length]))
+        {
+            return Some(GpuInfo {
+                name,
+                total_memory_mb: None,
+                free_memory_mb: None,
+                device_index: None,
+            });
+        }
+    }
+    None
 }
 
 #[cfg(target_os = "macos")]
@@ -870,20 +895,34 @@ fn sample_usage_uncached(
     }
 }
 
+fn non_nvidia_recommendation(
+    model_id: String,
+    cpu_threads: usize,
+    gpu_ready: bool,
+) -> (String, String, String) {
+    let message = if gpu_ready {
+        format!("Accelerator GPU siap. Auto akan mencoba GPU; {model_id} direkomendasikan.")
+    } else if cpu_threads >= 12 {
+        "CPU cukup kuat. Mulai dengan Balanced; gunakan Fast jika terlalu lambat.".into()
+    } else {
+        "Gunakan Fast untuk mesin ini agar responsif.".into()
+    };
+    (message, model_id, "auto".into())
+}
+
 pub fn system_status(app: &AppHandle) -> Result<SystemStatus, String> {
-    refresh_hardware_detection();
     let runtime = runtime_dir(app)?;
     let yt_dlp = crate::paths::is_regular_file(&tool_path(app, "yt-dlp")?);
     let ffmpeg = crate::paths::is_regular_file(&tool_path(app, "ffmpeg")?);
     let cpu_engine = engine_available(app, "cpu")?;
     let cuda_engine = engine_available(app, "cuda")?;
-    let nvidia_devices = detect_nvidia_devices();
+    let (nvidia_devices, nvidia_driver_version) = detect_nvidia_snapshot();
     let nvidia_gpu = select_nvidia_device(&nvidia_devices);
     set_selected_nvidia_device(nvidia_gpu.as_ref());
     let gpu = nvidia_gpu.clone().or_else(detect_generic_gpu);
     let nvidia = nvidia_gpu.is_some();
     let cuda_supported = cfg!(all(target_os = "windows", target_arch = "x86_64")) && nvidia;
-    let nvidia_driver_version = nvidia.then(detect_nvidia_driver_version).flatten();
+    let nvidia_driver_version = nvidia.then_some(nvidia_driver_version).flatten();
     let cuda_installable = cuda_supported
         && nvidia_driver_version
             .as_deref()
@@ -930,13 +969,14 @@ pub fn system_status(app: &AppHandle) -> Result<SystemStatus, String> {
     let has_discrete_vulkan = compute_devices
         .iter()
         .any(|device| device.backend == "vulkan" && !device.integrated);
+    let metal_installed = accelerators
+        .iter()
+        .any(|accelerator| accelerator.backend == "metal" && accelerator.installed);
     let recommended_id = models::recommended_model_id_for_system(
         available_vram_mb,
         nvidia && cuda_installable && cuda_engine,
         has_discrete_vulkan,
-        accelerators
-            .iter()
-            .any(|accelerator| accelerator.backend == "metal" && accelerator.installed),
+        metal_installed,
         cpu_threads,
     );
 
@@ -988,17 +1028,11 @@ pub fn system_status(app: &AppHandle) -> Result<SystemStatus, String> {
             recommended_id,
             "auto".to_string(),
         )
-    } else if cpu_threads >= 12 {
-        (
-            "CPU cukup kuat. Mulai dengan Balanced; gunakan Fast jika terlalu lambat.".into(),
-            "large-v3-turbo-q5_0".to_string(),
-            "auto".to_string(),
-        )
     } else {
-        (
-            "Gunakan Fast untuk mesin ini agar responsif.".into(),
-            "base".to_string(),
-            "auto".to_string(),
+        non_nvidia_recommendation(
+            recommended_id,
+            cpu_threads,
+            has_discrete_vulkan || metal_installed,
         )
     };
 
@@ -1029,6 +1063,50 @@ pub fn system_status(app: &AppHandle) -> Result<SystemStatus, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn combined_nvidia_query_preserves_devices_and_driver_validation() {
+        let (devices, driver) = super::parse_nvidia_snapshot(
+            b"0, GPU A, 8192, 0, 528.33\n1, GPU B, 16384, 8192, 528.33\n",
+        );
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0].free_memory_mb, Some(0));
+        assert_eq!(
+            super::select_nvidia_device(&devices).unwrap().device_index,
+            Some(1)
+        );
+        assert_eq!(driver.as_deref(), Some("528.33"));
+        assert!(super::cuda_driver_is_compatible(driver.as_deref().unwrap()));
+        let (_, driver) = super::parse_nvidia_snapshot(b"0, GPU, 8192, 4096, N/A\n");
+        assert!(driver.is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_display_adapter_probe_handles_present_or_headless_sessions() {
+        if let Some(gpu) = super::detect_generic_gpu() {
+            assert!(!gpu.name.is_empty());
+            assert_eq!(super::clean_gpu_name(&gpu.name), Some(gpu.name.clone()));
+        }
+    }
+    #[test]
+    fn non_nvidia_status_preserves_gpu_model_policy_with_fewer_cpu_threads() {
+        for (vulkan, metal, threads, expected) in [
+            (true, false, 8, "large-v3-turbo-q5_0"),
+            (false, true, 8, "large-v3-turbo-q5_0"),
+            (false, false, 8, "base"),
+            (false, false, 12, "large-v3-turbo-q5_0"),
+        ] {
+            let model =
+                crate::models::recommended_model_id_for_system(None, false, vulkan, metal, threads);
+            let (message, actual, backend) =
+                super::non_nvidia_recommendation(model, threads, vulkan || metal);
+            assert_eq!(actual, expected);
+            assert_eq!(backend, "auto");
+            if vulkan || metal {
+                assert!(message.contains("GPU siap"));
+            }
+        }
+    }
     use super::{
         capture_system_probe_stdout, cuda_driver_is_compatible, memory_pressure_message,
         parse_nvidia_gpus, parse_vulkan_devices, UsageMonitor, UsageSnapshot,

@@ -316,9 +316,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          prerelease_args=()
+          prerelease_args=(--latest=true)
           if [[ "$GITHUB_REF_NAME" == *-* ]]; then
-            prerelease_args+=(--prerelease)
+            prerelease_args=(--prerelease --latest=false)
           fi
 
           notes=$(cat <<'EOF'

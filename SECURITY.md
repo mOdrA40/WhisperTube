@@ -62,8 +62,9 @@ TAURI_SIGNING_PRIVATE_KEY.
 Dependency status is a dated observation, not a permanent assurance. Run
 `npm audit --audit-level=high` and `cargo audit --file src-tauri/Cargo.lock`
 against the checked-in lockfiles and a current advisory database. Run both
-locally before pushing release changes; GitHub Actions does not run dependency
-audits or a separate quality gate. Do not suppress audit failures to publish a release.
+locally before pushing release changes. The dependency-audit.yml workflow also
+runs npm and Cargo audits for dependency-file changes. Release workflows do not
+wait for a separate test/lint quality gate. Do not suppress audit failures to publish a release.
 Check the resolved versions and enabled features as well as the advisory count.
 
 The remediation baseline checked on 2026-10-21 reports zero npm vulnerabilities

@@ -1,7 +1,6 @@
 use std::{
-    io::Read,
     path::Path,
-    process::{Command, Output, Stdio},
+    process::{Command, Output},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, OnceLock,
@@ -664,64 +663,31 @@ pub fn detect_gpu() -> Option<GpuInfo> {
     detect_nvidia().or_else(detect_generic_gpu)
 }
 
-fn capture_system_probe_stdout(mut reader: impl Read) -> Result<Vec<u8>, String> {
-    let mut captured = Vec::with_capacity(MAX_SYSTEM_PROBE_STDOUT_BYTES.min(64 * 1024));
-    let mut buffer = [0u8; 16 * 1024];
-    let mut truncated = false;
-    loop {
-        let read = reader
-            .read(&mut buffer)
-            .map_err(|error| format!("Gagal membaca output system probe: {error}"))?;
-        if read == 0 {
-            break;
-        }
-        let remaining = MAX_SYSTEM_PROBE_STDOUT_BYTES.saturating_sub(captured.len());
-        let retained = remaining.min(read);
-        captured.extend_from_slice(&buffer[..retained]);
-        truncated |= retained < read;
-    }
-    if truncated {
-        Err("Output system probe terlalu besar.".into())
-    } else {
-        Ok(captured)
-    }
-}
-
 fn command_output_with_timeout(mut command: Command, timeout: Duration) -> Option<Output> {
-    crate::process::hide_console(&mut command);
-    let mut child = command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let stdout = child.stdout.take()?;
-    let stdout_reader = std::thread::spawn(move || capture_system_probe_stdout(stdout));
-    let started = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let stdout = stdout_reader.join().ok()?.ok()?;
-                return status.success().then_some(Output {
-                    status,
-                    stdout,
-                    stderr: Vec::new(),
-                });
+    let mut stdout = Vec::with_capacity(64 * 1024);
+    let status = crate::process::run_piped(
+        &mut command,
+        Some(timeout),
+        None,
+        |_| Ok(()),
+        |event| {
+            if let crate::process::OutputEvent::Data(crate::process::OutputStream::Stdout, bytes) =
+                event
+            {
+                if stdout.len().saturating_add(bytes.len()) > MAX_SYSTEM_PROBE_STDOUT_BYTES {
+                    return Err("Output system probe terlalu besar.".into());
+                }
+                stdout.extend_from_slice(bytes);
             }
-            Ok(None) if started.elapsed() >= timeout => {
-                crate::process::terminate_process_tree(child.id());
-                let _ = child.wait();
-                let _ = stdout_reader.join();
-                return None;
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
-            Err(_) => {
-                crate::process::terminate_process_tree(child.id());
-                let _ = child.wait();
-                let _ = stdout_reader.join();
-                return None;
-            }
-        }
-    }
+            Ok(())
+        },
+    )
+    .ok()?;
+    status.success().then_some(Output {
+        status,
+        stdout,
+        stderr: Vec::new(),
+    })
 }
 
 fn parse_percent(output: &[u8]) -> Option<f64> {
@@ -1108,11 +1074,9 @@ mod tests {
         }
     }
     use super::{
-        capture_system_probe_stdout, cuda_driver_is_compatible, memory_pressure_message,
-        parse_nvidia_gpus, parse_vulkan_devices, UsageMonitor, UsageSnapshot,
-        MAX_SYSTEM_PROBE_STDOUT_BYTES,
+        cuda_driver_is_compatible, memory_pressure_message, parse_nvidia_gpus,
+        parse_vulkan_devices, UsageMonitor, UsageSnapshot,
     };
-    use std::io::Cursor;
 
     #[test]
     fn linux_cpu_usage_uses_interval_aggregate_and_excludes_guest_time() {
@@ -1259,8 +1223,18 @@ mod tests {
 
     #[test]
     fn system_probe_output_is_bounded() {
-        let output = vec![b'x'; MAX_SYSTEM_PROBE_STDOUT_BYTES + 1];
-        assert!(capture_system_probe_stdout(Cursor::new(output)).is_err());
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "process::tests::captured_probe_child",
+                "--nocapture",
+            ])
+            .env("WHISPERTUBE_CAPTURE_CHILD", "large-stdout");
+        assert!(
+            super::command_output_with_timeout(command, std::time::Duration::from_secs(8))
+                .is_none()
+        );
     }
 
     #[test]

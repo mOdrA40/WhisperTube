@@ -347,11 +347,20 @@ baseline, and sets an ARMv8-A baseline for AArch64. This favors compatibility
 over peak CPU throughput; GPU backends remain enabled by their build recipe.
 OpenMP, external BLAS and optional llamafile CPU kernels are disabled to avoid
 incidental host-specific dependencies. Metal shaders are embedded.
-Sibling libraries use @loader_path/@rpath on macOS and $ORIGIN on Linux.
-Setup/pack recipes remove build trees before staged executable self-checks.
-Configuration-policy tests do not replace native artifact/inference QA.
+New builds use @loader_path/@rpath on macOS and $ORIGIN on Linux. Setup/pack
+recipes remove build trees before staged executable self-checks. The accelerator
+workflow also checks the staged binary load paths and rejects external OpenMP
+runtime dependencies. Configuration-policy tests do not replace native
+artifact/inference QA.
 
-See [Dependency maintenance](DEPENDENCY-MAINTENANCE.md) for open inherited
+The application catalog still pins accelerators-v0.1.2. Its published Unix packs
+predate this recipe and contain build-host load paths; changing the workflow
+cannot repair those existing assets. Publish a new accelerator tag, inspect all
+four native packs, then update RELEASE_TAG and their verified SHA-256 pins via
+scripts/sync-accelerator-hashes.ps1 before the next application release. Never
+replace the old assets or use an application v* tag for this step.
+
+See [Dependency audit status](../SECURITY.md#dependency-audit-status) for open inherited
 Rust advisories and the evidence required to close them.
 
 The repository has two separate release paths:
@@ -363,10 +372,11 @@ The repository has two separate release paths:
    packs from pinned whisper.cpp source and publishes ZIP files with SHA-256
    sidecars for accelerators-v* tags.
 
-Both release workflows start their native build jobs directly. Tests, lint,
-secret scans, and dependency audits are run locally before pushing; there is
-no separate CI quality gate. Application packaging still builds its frontend
-assets. Accelerator assets must be public before a shipped application can
+Both release workflows start their native build jobs directly. Tests, lint
+and secret scans are run locally before pushing; there is no separate CI
+test/lint quality gate. dependency-audit.yml runs npm/Cargo audits when dependency
+files change; release jobs do not depend on that workflow. Application packaging
+still builds its frontend assets. Accelerator assets must be public before a shipped application can
 download them without a GitHub credential.
 
 The accelerator hash helper reads the four public release assets without

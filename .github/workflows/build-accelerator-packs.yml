@@ -93,6 +93,7 @@ jobs:
           else
             "$stage/whisper-cli.exe" --version
           fi
+          node "$GITHUB_WORKSPACE/scripts/verify-runtime-loadpaths.mjs" "$stage"
           echo "$stage" > "$RUNNER_TEMP/stage-path"
 
       - name: Package and checksum (Unix)
@@ -150,5 +151,6 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" packages/* \
             --repo "$GITHUB_REPOSITORY" \
+            --latest=false \
             --title "WhisperTube accelerator packs $GITHUB_REF_NAME" \
             --notes "Built from the pinned whisper.cpp source tag. Each pack includes a SHA-256 sidecar file."

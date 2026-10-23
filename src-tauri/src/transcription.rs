@@ -3,15 +3,13 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
     fs::{self, File},
-    io::{self, BufRead, BufReader, Read, Write},
+    io::{Read, Write},
     path::{Path, PathBuf},
-    process::{Child, ChildStderr, Command, Stdio},
+    process::{Command, ExitStatus, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc::{self, Receiver, RecvTimeoutError},
         Arc, Mutex,
     },
-    thread::JoinHandle,
     time::Instant,
 };
 use tauri::{AppHandle, Emitter};
@@ -92,12 +90,6 @@ impl JobContext<'_> {
 
     fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::SeqCst)
-    }
-}
-
-fn set_active_pid(active_pid: &Arc<Mutex<Option<u32>>>, pid: Option<u32>) {
-    if let Ok(mut slot) = active_pid.lock() {
-        *slot = pid;
     }
 }
 
@@ -409,7 +401,6 @@ const DISK_SAFETY_BUFFER_BYTES: u64 = 512 * 1024 * 1024;
 const DISK_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 const PROCESS_INACTIVITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 const CPU_INACTIVITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
-const PROCESS_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 const MINIMUM_AUDIO_DURATION_SECONDS: f64 = 1.0;
 const MAX_REQUEST_TITLE_BYTES: usize = 4 * 1024;
 const MAX_REQUEST_CHANNEL_BYTES: usize = 2 * 1024;
@@ -453,41 +444,6 @@ fn validate_transcript_request(request: &TranscriptRequest) -> Result<(), String
         return Err("Path cookies.txt terlalu panjang.".into());
     }
     Ok(())
-}
-
-fn capture_stderr(mut reader: impl Read) -> Result<String, String> {
-    let mut captured = Vec::with_capacity(MAX_CAPTURED_STDERR_BYTES);
-    let mut buffer = [0u8; 8 * 1024];
-    let mut truncated = false;
-    loop {
-        let read = match reader.read(&mut buffer) {
-            Ok(read) => read,
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(format!("Gagal membaca stderr process: {error}")),
-        };
-        if read == 0 {
-            break;
-        }
-        let remaining = MAX_CAPTURED_STDERR_BYTES.saturating_sub(captured.len());
-        let retained = remaining.min(read);
-        captured.extend_from_slice(&buffer[..retained]);
-        truncated |= retained < read;
-    }
-    let mut output = String::from_utf8_lossy(&captured).into_owned();
-    if truncated {
-        output.push_str("\n[stderr dipotong karena terlalu panjang]");
-    }
-    Ok(output)
-}
-
-fn drain_stderr(stderr: ChildStderr) -> JoinHandle<Result<String, String>> {
-    std::thread::spawn(move || capture_stderr(stderr))
-}
-
-fn join_stderr(handle: JoinHandle<Result<String, String>>) -> Result<String, String> {
-    handle
-        .join()
-        .map_err(|_| "Reader stderr process gagal.".to_string())?
 }
 
 fn pcm_wav_bytes(duration: f64) -> u64 {
@@ -564,102 +520,6 @@ fn ffmpeg_target_duration(duration: f64) -> f64 {
     duration.max(MINIMUM_AUDIO_DURATION_SECONDS)
 }
 
-fn spawn_line_reader<R: Read + Send + 'static>(
-    reader: R,
-    label: &'static str,
-) -> (Receiver<Result<String, String>>, JoinHandle<()>) {
-    const MAX_LINE_BYTES: usize = 128 * 1024;
-    let (sender, receiver) = mpsc::sync_channel(128);
-    let reader = std::thread::spawn(move || {
-        let mut reader = BufReader::new(reader);
-        loop {
-            let line = match read_bounded_line(&mut reader, MAX_LINE_BYTES) {
-                Ok(Some(line)) => line,
-                Ok(None) => break,
-                Err(error) => {
-                    let _ = sender.send(Err(format!("Gagal membaca output {label}: {error}")));
-                    break;
-                }
-            };
-            if sender.send(Ok(line)).is_err() {
-                break;
-            }
-        }
-    });
-    (receiver, reader)
-}
-
-fn read_bounded_line(
-    reader: &mut BufReader<impl Read>,
-    limit: usize,
-) -> io::Result<Option<String>> {
-    let mut bytes = Vec::with_capacity(limit.min(8 * 1024));
-    let mut truncated = false;
-    loop {
-        let buffer = reader.fill_buf()?;
-        if buffer.is_empty() {
-            if bytes.is_empty() {
-                return Ok(None);
-            }
-            break;
-        }
-        let consumed = buffer
-            .iter()
-            .position(|byte| *byte == b'\n')
-            .map_or(buffer.len(), |position| position + 1);
-        if !truncated {
-            let content_length = consumed.min(buffer.len());
-            let content_length = content_length.min(limit.saturating_sub(bytes.len()));
-            bytes.extend_from_slice(&buffer[..content_length]);
-            if bytes.len() == limit && consumed > content_length {
-                truncated = true;
-            }
-        }
-        let has_newline = buffer[..consumed].contains(&b'\n');
-        reader.consume(consumed);
-        if has_newline {
-            break;
-        }
-    }
-    if bytes.last() == Some(&b'\n') {
-        bytes.pop();
-    }
-    if bytes.last() == Some(&b'\r') {
-        bytes.pop();
-    }
-    let mut line = String::from_utf8_lossy(&bytes).into_owned();
-    if truncated {
-        line.push_str("\n[output line dipotong karena terlalu panjang]");
-    }
-    Ok(Some(line))
-}
-
-fn wait_for_child_after_stream_closed(
-    child: &mut Child,
-    cancelled: &AtomicBool,
-    last_activity: Instant,
-    inactivity_timeout: std::time::Duration,
-    label: &str,
-) -> Result<(), String> {
-    loop {
-        if cancelled.load(Ordering::SeqCst) {
-            return Ok(());
-        }
-        match child.try_wait() {
-            Ok(Some(_)) => return Ok(()),
-            Ok(None) => {}
-            Err(error) => return Err(format!("Gagal memantau {label}: {error}")),
-        }
-        if last_activity.elapsed() >= inactivity_timeout {
-            return Err(format!(
-                "Process {label} tidak menghasilkan progress selama {} detik dan dihentikan.",
-                inactivity_timeout.as_secs()
-            ));
-        }
-        std::thread::sleep(PROCESS_POLL_INTERVAL);
-    }
-}
-
 fn whisper_inactivity_timeout(backend: &str) -> std::time::Duration {
     if backend == "cpu" {
         CPU_INACTIVITY_TIMEOUT
@@ -682,6 +542,82 @@ fn configure_vulkan_command(command: &mut Command) {
     // shader path. Keep Vulkan cross-vendor compatibility ahead of that
     // optional optimization; the engine still uses the selected GPU.
     command.env("GGML_VK_DISABLE_COOPMAT", "1");
+}
+
+fn run_media_command(
+    context: &JobContext,
+    command: &mut Command,
+    primary: process::OutputStream,
+    inactivity_timeout: std::time::Duration,
+    timeout: Option<std::time::Duration>,
+    mut on_line: impl FnMut(&str) -> Result<(), String>,
+) -> Result<(ExitStatus, String), String> {
+    let mut lines = process::OutputLines::default();
+    let mut stderr = Vec::with_capacity(MAX_CAPTURED_STDERR_BYTES);
+    let mut truncated = false;
+    let mut last_activity = Instant::now();
+    let mut monitor = None;
+    let mut active = None;
+    let outcome = process::run_piped(
+        command,
+        timeout,
+        Some(context.cancelled),
+        |pid| {
+            active = Some(process::ActiveProcessGuard::new(context.active_pid, pid)?);
+            monitor = Some(context.usage.track_process(pid));
+            Ok(())
+        },
+        |event| {
+            match event {
+                process::OutputEvent::Data(stream, bytes) => {
+                    if stream == process::OutputStream::Stderr {
+                        let retained = bytes
+                            .len()
+                            .min(MAX_CAPTURED_STDERR_BYTES.saturating_sub(stderr.len()));
+                        stderr.extend_from_slice(&bytes[..retained]);
+                        truncated |= retained < bytes.len();
+                    }
+                    if stream == primary {
+                        last_activity = Instant::now();
+                        lines.push(bytes, |line| on_line(&line))?;
+                    }
+                }
+                process::OutputEvent::Tick => {
+                    if let Some(error) = context.usage.memory_pressure() {
+                        return Err(error);
+                    }
+                    if last_activity.elapsed() >= inactivity_timeout {
+                        return Err(format!(
+                            "Process tidak menghasilkan progress selama {} detik dan dihentikan.",
+                            inactivity_timeout.as_secs()
+                        ));
+                    }
+                }
+            }
+            Ok(())
+        },
+    );
+    drop(active);
+    let status = outcome.map_err(|error| {
+        let detail = String::from_utf8_lossy(&stderr);
+        let label = Path::new(command.get_program())
+            .file_name()
+            .unwrap_or(command.get_program())
+            .to_string_lossy();
+        if context.is_cancelled() || detail.trim().is_empty() {
+            format!("{label}: {error}")
+        } else {
+            format!("{label}: {error} Detail: {}", detail.trim())
+        }
+    })?;
+    if let Some(line) = lines.finish() {
+        on_line(&line)?;
+    }
+    let mut stderr = String::from_utf8_lossy(&stderr).into_owned();
+    if truncated {
+        stderr.push_str("\n[stderr dipotong karena terlalu panjang]");
+    }
+    Ok((status, stderr))
 }
 
 fn run_download(
@@ -727,144 +663,60 @@ fn run_download(
         .stderr(Stdio::piped())
         .stdin(Stdio::null());
 
-    let mut child = command
-        .spawn()
-        .map_err(|e| format!("Gagal menjalankan yt-dlp: {e}"))?;
-    let child_pid = child.id();
-    set_active_pid(context.active_pid, Some(child_pid));
-    let _process_monitor = context.usage.track_process(child_pid);
-    if context.is_cancelled() {
-        process::terminate_child(&mut child);
-    }
-    let stderr = match child.stderr.take() {
-        Some(stderr) => stderr,
-        None => {
-            process::terminate_child(&mut child);
-            let _ = child.wait();
-            set_active_pid(context.active_pid, None);
-            return Err("Tidak bisa membaca error yt-dlp.".into());
-        }
-    };
-    let stderr_reader = drain_stderr(stderr);
-    let stdout = match child.stdout.take() {
-        Some(stdout) => stdout,
-        None => {
-            process::terminate_child(&mut child);
-            let _ = child.wait();
-            set_active_pid(context.active_pid, None);
-            let _ = join_stderr(stderr_reader);
-            return Err("Tidak bisa membaca progress yt-dlp".into());
-        }
-    };
     let progress_re =
         Regex::new(r"WT_PROGRESS=\s*([0-9.]+)%\|([0-9]+|NA)\|([0-9]+|NA)\|([0-9]+|NA)").unwrap();
     let download_started_at = Instant::now();
-    let (stdout_receiver, stdout_reader) = spawn_line_reader(stdout, "progress yt-dlp");
-    let mut last_activity = Instant::now();
     let mut last_disk_check = Instant::now() - DISK_CHECK_INTERVAL;
-    let stdout_result = (|| -> Result<(), String> {
-        loop {
-            match stdout_receiver.recv_timeout(PROCESS_POLL_INTERVAL) {
-                Ok(line) => {
-                    let line = line?;
-                    if let Some(error) = context.usage.memory_pressure() {
-                        return Err(error);
-                    }
-                    last_activity = Instant::now();
-                    if let Some(caps) = progress_re.captures(&line) {
-                        let downloaded_bytes =
-                            caps.get(2).and_then(|value| value.as_str().parse().ok());
-                        let total_bytes = caps
-                            .get(3)
-                            .and_then(|value| value.as_str().parse().ok())
-                            .or_else(|| caps.get(4).and_then(|value| value.as_str().parse().ok()));
-                        let network_bytes_per_second = downloaded_bytes.and_then(|downloaded| {
-                            let elapsed = download_started_at.elapsed().as_secs_f64();
-                            (elapsed > 0.0).then(|| (downloaded as f64 / elapsed) as u64)
-                        });
-                        if let Ok(percent) = caps[1].parse::<f64>() {
-                            context.emit(ProgressUpdate {
-                                stage: "downloading",
-                                message_code: "downloading_audio",
-                                percent,
-                                message: "Mengunduh best available audio dari YouTube…".into(),
-                                backend: None,
-                                downloaded_bytes,
-                                total_bytes,
-                                network_bytes_per_second,
-                            });
-                        }
-                    }
-                    if last_disk_check.elapsed() >= DISK_CHECK_INTERVAL {
-                        let written = directory_file_bytes(job_dir)?;
-                        if written > MAX_MEDIA_DOWNLOAD_BYTES_VALUE {
-                            return Err(
-                                "Download media melebihi batas ukuran yang diizinkan.".into()
-                            );
-                        }
-                        resources::require_disk(
-                            job_dir,
-                            remaining_disk_reservation(
-                                written,
-                                MAX_MEDIA_DOWNLOAD_BYTES_VALUE,
-                                pcm_wav_bytes(request.duration),
-                            ),
-                            "download dan konversi media",
-                        )?;
-                        ensure_job_storage_quota(context.app)?;
-                        last_disk_check = Instant::now();
-                    }
-                    if context.is_cancelled() {
-                        break;
-                    }
-                }
-                Err(RecvTimeoutError::Timeout) => {
-                    if let Some(error) = context.usage.memory_pressure() {
-                        return Err(error);
-                    }
-                    if context.is_cancelled() {
-                        break;
-                    }
-                    if child
-                        .try_wait()
-                        .map_err(|e| format!("Gagal memantau yt-dlp: {e}"))?
-                        .is_some()
-                    {
-                        break;
-                    }
-                    if last_activity.elapsed() >= PROCESS_INACTIVITY_TIMEOUT {
-                        return Err(format!(
-                            "Process Download tidak menghasilkan progress selama {} detik dan dihentikan.",
-                            PROCESS_INACTIVITY_TIMEOUT.as_secs()
-                        ));
-                    }
-                }
-                Err(RecvTimeoutError::Disconnected) => {
-                    wait_for_child_after_stream_closed(
-                        &mut child,
-                        context.cancelled,
-                        last_activity,
-                        PROCESS_INACTIVITY_TIMEOUT,
-                        "Download",
-                    )?;
-                    break;
+    let (status, stderr) = run_media_command(
+        context,
+        &mut command,
+        process::OutputStream::Stdout,
+        PROCESS_INACTIVITY_TIMEOUT,
+        None,
+        |line| {
+            if let Some(caps) = progress_re.captures(line) {
+                let downloaded_bytes = caps.get(2).and_then(|value| value.as_str().parse().ok());
+                let total_bytes = caps
+                    .get(3)
+                    .and_then(|value| value.as_str().parse().ok())
+                    .or_else(|| caps.get(4).and_then(|value| value.as_str().parse().ok()));
+                let network_bytes_per_second = downloaded_bytes.and_then(|downloaded| {
+                    let elapsed = download_started_at.elapsed().as_secs_f64();
+                    (elapsed > 0.0).then(|| (downloaded as f64 / elapsed) as u64)
+                });
+                if let Ok(percent) = caps[1].parse::<f64>() {
+                    context.emit(ProgressUpdate {
+                        stage: "downloading",
+                        message_code: "downloading_audio",
+                        percent,
+                        message: "Mengunduh best available audio dari YouTube…".into(),
+                        backend: None,
+                        downloaded_bytes,
+                        total_bytes,
+                        network_bytes_per_second,
+                    });
                 }
             }
-        }
-        Ok(())
-    })();
-    if stdout_result.is_err() || context.is_cancelled() {
-        process::terminate_child(&mut child);
-    }
-    drop(stdout_receiver);
-    let _ = stdout_reader.join();
-    let status = child
-        .wait()
-        .map_err(|e| format!("Gagal menunggu yt-dlp: {e}"));
-    set_active_pid(context.active_pid, None);
-    let stderr = join_stderr(stderr_reader)?;
-    stdout_result?;
-    let status = status?;
+            if last_disk_check.elapsed() >= DISK_CHECK_INTERVAL {
+                let written = directory_file_bytes(job_dir)?;
+                if written > MAX_MEDIA_DOWNLOAD_BYTES_VALUE {
+                    return Err("Download media melebihi batas ukuran yang diizinkan.".into());
+                }
+                resources::require_disk(
+                    job_dir,
+                    remaining_disk_reservation(
+                        written,
+                        MAX_MEDIA_DOWNLOAD_BYTES_VALUE,
+                        pcm_wav_bytes(request.duration),
+                    ),
+                    "download dan konversi media",
+                )?;
+                ensure_job_storage_quota(context.app)?;
+                last_disk_check = Instant::now();
+            }
+            Ok(())
+        },
+    )?;
     if !status.success() {
         return Err(process_failed(context.cancelled, stderr, "Download"));
     }
@@ -907,7 +759,7 @@ fn run_ffmpeg(
     let ffmpeg = tool_path(context.app, "ffmpeg")?;
     let mut command = Command::new(ffmpeg);
     process::hide_console(&mut command);
-    let mut child = command
+    command
         .args([
             "-y",
             "-nostats",
@@ -925,138 +777,57 @@ fn run_ffmpeg(
         .arg(output)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .stdin(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("Gagal menjalankan FFmpeg: {e}"))?;
-    let child_pid = child.id();
-    set_active_pid(context.active_pid, Some(child_pid));
-    let _process_monitor = context.usage.track_process(child_pid);
-    if context.is_cancelled() {
-        process::terminate_child(&mut child);
-    }
-    let stderr = match child.stderr.take() {
-        Some(stderr) => stderr,
-        None => {
-            process::terminate_child(&mut child);
-            let _ = child.wait();
-            set_active_pid(context.active_pid, None);
-            return Err("Tidak bisa membaca error FFmpeg.".into());
-        }
-    };
-    let stderr_reader = drain_stderr(stderr);
-    let stdout = match child.stdout.take() {
-        Some(stdout) => stdout,
-        None => {
-            process::terminate_child(&mut child);
-            let _ = child.wait();
-            set_active_pid(context.active_pid, None);
-            let _ = join_stderr(stderr_reader);
-            return Err("Tidak bisa membaca progress FFmpeg".into());
-        }
-    };
-    let (stdout_receiver, stdout_reader) = spawn_line_reader(stdout, "progress FFmpeg");
-    let mut last_activity = Instant::now();
+        .stdin(Stdio::null());
     let mut last_disk_check = Instant::now() - DISK_CHECK_INTERVAL;
-    let stdout_result = (|| -> Result<(), String> {
-        loop {
-            match stdout_receiver.recv_timeout(PROCESS_POLL_INTERVAL) {
-                Ok(line) => {
-                    let line = line?;
-                    if let Some(error) = context.usage.memory_pressure() {
-                        return Err(error);
-                    }
-                    last_activity = Instant::now();
-                    if let Some(raw) = line.strip_prefix("out_time_us=") {
-                        if let Ok(microseconds) = raw.parse::<f64>() {
-                            let seconds = microseconds / 1_000_000.0;
-                            let percent = if duration > 0.0 {
-                                seconds / duration * 100.0
-                            } else {
-                                0.0
-                            };
-                            context.emit(ProgressUpdate {
-                                stage: "converting",
-                                message_code: "converting_audio",
-                                percent,
-                                message: "Konversi ke PCM 16 kHz mono…".into(),
-                                backend: None,
-                                downloaded_bytes: None,
-                                total_bytes: None,
-                                network_bytes_per_second: None,
-                            });
-                        }
-                    }
-                    if last_disk_check.elapsed() >= DISK_CHECK_INTERVAL {
-                        let output_dir = output.parent().unwrap_or_else(|| Path::new("."));
-                        let written = fs::metadata(output)
-                            .map(|metadata| metadata.len())
-                            .unwrap_or(0);
-                        let maximum_wav = pcm_wav_bytes(duration);
-                        if written > maximum_wav.saturating_add(4096) {
-                            return Err(
-                                "WAV hasil konversi melebihi batas durasi media yang diizinkan."
-                                    .into(),
-                            );
-                        }
-                        resources::require_disk(
-                            output_dir,
-                            remaining_disk_reservation(written, maximum_wav, 0),
-                            "konversi media",
-                        )?;
-                        ensure_job_storage_quota(context.app)?;
-                        last_disk_check = Instant::now();
-                    }
-                    if context.is_cancelled() {
-                        break;
-                    }
-                }
-                Err(RecvTimeoutError::Timeout) => {
-                    if let Some(error) = context.usage.memory_pressure() {
-                        return Err(error);
-                    }
-                    if context.is_cancelled() {
-                        break;
-                    }
-                    if child
-                        .try_wait()
-                        .map_err(|e| format!("Gagal memantau FFmpeg: {e}"))?
-                        .is_some()
-                    {
-                        break;
-                    }
-                    if last_activity.elapsed() >= PROCESS_INACTIVITY_TIMEOUT {
-                        return Err(format!(
-                            "Process FFmpeg tidak menghasilkan progress selama {} detik dan dihentikan.",
-                            PROCESS_INACTIVITY_TIMEOUT.as_secs()
-                        ));
-                    }
-                }
-                Err(RecvTimeoutError::Disconnected) => {
-                    wait_for_child_after_stream_closed(
-                        &mut child,
-                        context.cancelled,
-                        last_activity,
-                        PROCESS_INACTIVITY_TIMEOUT,
-                        "FFmpeg",
-                    )?;
-                    break;
+    let (status, stderr) = run_media_command(
+        context,
+        &mut command,
+        process::OutputStream::Stdout,
+        PROCESS_INACTIVITY_TIMEOUT,
+        None,
+        |line| {
+            if let Some(raw) = line.strip_prefix("out_time_us=") {
+                if let Ok(microseconds) = raw.parse::<f64>() {
+                    let seconds = microseconds / 1_000_000.0;
+                    let percent = if duration > 0.0 {
+                        seconds / duration * 100.0
+                    } else {
+                        0.0
+                    };
+                    context.emit(ProgressUpdate {
+                        stage: "converting",
+                        message_code: "converting_audio",
+                        percent,
+                        message: "Konversi ke PCM 16 kHz mono…".into(),
+                        backend: None,
+                        downloaded_bytes: None,
+                        total_bytes: None,
+                        network_bytes_per_second: None,
+                    });
                 }
             }
-        }
-        Ok(())
-    })();
-    if stdout_result.is_err() || context.is_cancelled() {
-        process::terminate_child(&mut child);
-    }
-    drop(stdout_receiver);
-    let _ = stdout_reader.join();
-    let status = child
-        .wait()
-        .map_err(|e| format!("Gagal menunggu FFmpeg: {e}"));
-    set_active_pid(context.active_pid, None);
-    let stderr = join_stderr(stderr_reader)?;
-    stdout_result?;
-    let status = status?;
+            if last_disk_check.elapsed() >= DISK_CHECK_INTERVAL {
+                let output_dir = output.parent().unwrap_or_else(|| Path::new("."));
+                let written = fs::metadata(output)
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(0);
+                let maximum_wav = pcm_wav_bytes(duration);
+                if written > maximum_wav.saturating_add(4096) {
+                    return Err(
+                        "WAV hasil konversi melebihi batas durasi media yang diizinkan.".into(),
+                    );
+                }
+                resources::require_disk(
+                    output_dir,
+                    remaining_disk_reservation(written, maximum_wav, 0),
+                    "konversi media",
+                )?;
+                ensure_job_storage_quota(context.app)?;
+                last_disk_check = Instant::now();
+            }
+            Ok(())
+        },
+    )?;
     if !status.success() {
         return Err(process_failed(context.cancelled, stderr, "FFmpeg"));
     }
@@ -1151,69 +922,14 @@ fn run_engine_probe(
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .stdin(Stdio::null());
-        let mut child = command
-            .spawn()
-            .map_err(|e| format!("engine {backend} tidak bisa dijalankan: {e}"))?;
-        let child_pid = child.id();
-        set_active_pid(context.active_pid, Some(child_pid));
-        let _process_monitor = context.usage.track_process(child_pid);
-        let stderr = match child.stderr.take() {
-            Some(stderr) => drain_stderr(stderr),
-            None => {
-                process::terminate_child(&mut child);
-                let _ = child.wait();
-                set_active_pid(context.active_pid, None);
-                return Err(format!(
-                    "engine {backend} tidak menyediakan stderr untuk capability probe."
-                ));
-            }
-        };
-        let started = std::time::Instant::now();
-        let status = loop {
-            if let Some(error) = context.usage.memory_pressure() {
-                process::terminate_child(&mut child);
-                let _ = child.wait();
-                set_active_pid(context.active_pid, None);
-                let _ = join_stderr(stderr);
-                return Err(error);
-            }
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) if context.is_cancelled() => {
-                    process::terminate_child(&mut child);
-                    let _ = child.wait();
-                    set_active_pid(context.active_pid, None);
-                    let _ = join_stderr(stderr);
-                    return Err("Job dibatalkan.".into());
-                }
-                Ok(None) if started.elapsed() >= CAPABILITY_PROBE_TIMEOUT => {
-                    process::terminate_child(&mut child);
-                    let _ = child.wait();
-                    set_active_pid(context.active_pid, None);
-                    let stderr = join_stderr(stderr)?;
-                    let detail = if stderr.trim().is_empty() {
-                        String::new()
-                    } else {
-                        format!(" Detail: {}", stderr.trim())
-                    };
-                    return Err(format!(
-                        "capability probe {backend} melewati batas waktu.{detail}"
-                    ));
-                }
-                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
-                Err(error) => {
-                    process::terminate_child(&mut child);
-                    let _ = child.wait();
-                    set_active_pid(context.active_pid, None);
-                    let _ = join_stderr(stderr);
-                    return Err(format!(
-                        "Status capability probe {backend} tidak bisa dibaca: {error}"
-                    ));
-                }
-            }
-        };
-        set_active_pid(context.active_pid, None);
-        let stderr = join_stderr(stderr)?;
+        let (status, stderr) = run_media_command(
+            context,
+            &mut command,
+            process::OutputStream::Stderr,
+            CAPABILITY_PROBE_TIMEOUT,
+            Some(CAPABILITY_PROBE_TIMEOUT),
+            |_| Ok(()),
+        )?;
         if !status.success() {
             return Err(process_failed(
                 context.cancelled,
@@ -1619,118 +1335,35 @@ fn run_whisper(
             command.arg("-dev").arg(device_index.to_string());
         }
     }
-    let mut child = command
-        .spawn()
-        .map_err(|e| format!("Gagal menjalankan whisper.cpp: {e}"))?;
-    let child_pid = child.id();
-    set_active_pid(context.active_pid, Some(child_pid));
-    let _process_monitor = context.usage.track_process(child_pid);
-    if context.is_cancelled() {
-        process::terminate_child(&mut child);
-    }
-    let stderr_pipe = match child.stderr.take() {
-        Some(stderr) => stderr,
-        None => {
-            process::terminate_child(&mut child);
-            let _ = child.wait();
-            set_active_pid(context.active_pid, None);
-            return Err("Tidak bisa membaca progress whisper.cpp".into());
-        }
-    };
     let progress_re = Regex::new(r"progress\s*=\s*([0-9]+)%").unwrap();
-    let mut stderr_all = Vec::with_capacity(MAX_CAPTURED_STDERR_BYTES);
-    let mut stderr_truncated = false;
-    let (stderr_receiver, stderr_reader) = spawn_line_reader(stderr_pipe, "progress whisper.cpp");
-    let mut last_activity = Instant::now();
-    let inactivity_timeout = whisper_inactivity_timeout(&resolved_backend);
-    let stderr_result = (|| -> Result<(), String> {
-        loop {
-            if let Some(error) = context.usage.memory_pressure() {
-                return Err(error);
-            }
-            match stderr_receiver.recv_timeout(PROCESS_POLL_INTERVAL) {
-                Ok(line) => {
-                    let line = line?;
-                    last_activity = Instant::now();
-                    let line_bytes = line.as_bytes();
-                    let remaining = MAX_CAPTURED_STDERR_BYTES.saturating_sub(stderr_all.len());
-                    let retained = remaining.min(line_bytes.len());
-                    stderr_all.extend_from_slice(&line_bytes[..retained]);
-                    if retained < line_bytes.len() || stderr_all.len() == MAX_CAPTURED_STDERR_BYTES
-                    {
-                        stderr_truncated = true;
-                    } else {
-                        stderr_all.push(b'\n');
-                    }
-                    if let Some(caps) = progress_re.captures(&line) {
-                        if let Ok(percent) = caps[1].parse::<f64>() {
-                            context.emit(ProgressUpdate {
-                                stage: "transcribing",
-                                message_code: "whisper_via",
-                                percent,
-                                message: format!(
-                                    "Whisper sedang bekerja via {}…",
-                                    resolved_backend.to_uppercase()
-                                ),
-                                backend: Some(&resolved_backend),
-                                downloaded_bytes: None,
-                                total_bytes: None,
-                                network_bytes_per_second: None,
-                            });
-                        }
-                    }
-                    if context.is_cancelled() {
-                        break;
-                    }
-                }
-                Err(RecvTimeoutError::Timeout) => {
-                    if context.is_cancelled() {
-                        break;
-                    }
-                    if child
-                        .try_wait()
-                        .map_err(|e| format!("Gagal memantau whisper.cpp: {e}"))?
-                        .is_some()
-                    {
-                        break;
-                    }
-                    if last_activity.elapsed() >= inactivity_timeout {
-                        return Err(format!(
-                            "Process Whisper tidak menghasilkan progress selama {} detik dan dihentikan.",
-                            inactivity_timeout.as_secs()
-                        ));
-                    }
-                }
-                Err(RecvTimeoutError::Disconnected) => {
-                    wait_for_child_after_stream_closed(
-                        &mut child,
-                        context.cancelled,
-                        last_activity,
-                        inactivity_timeout,
-                        "Whisper",
-                    )?;
-                    break;
+    let (status, stderr) = run_media_command(
+        context,
+        &mut command,
+        process::OutputStream::Stderr,
+        whisper_inactivity_timeout(&resolved_backend),
+        None,
+        |line| {
+            if let Some(caps) = progress_re.captures(line) {
+                if let Ok(percent) = caps[1].parse::<f64>() {
+                    context.emit(ProgressUpdate {
+                        stage: "transcribing",
+                        message_code: "whisper_via",
+                        percent,
+                        message: format!(
+                            "Whisper sedang bekerja via {}…",
+                            resolved_backend.to_uppercase()
+                        ),
+                        backend: Some(&resolved_backend),
+                        downloaded_bytes: None,
+                        total_bytes: None,
+                        network_bytes_per_second: None,
+                    });
                 }
             }
-        }
-        Ok(())
-    })();
-    if stderr_result.is_err() || context.is_cancelled() {
-        process::terminate_child(&mut child);
-    }
-    drop(stderr_receiver);
-    let _ = stderr_reader.join();
-    let status = child
-        .wait()
-        .map_err(|e| format!("Gagal menunggu whisper.cpp: {e}"));
-    set_active_pid(context.active_pid, None);
-    stderr_result?;
-    let status = status?;
+            Ok(())
+        },
+    )?;
     if !status.success() {
-        let mut stderr = String::from_utf8_lossy(&stderr_all).into_owned();
-        if stderr_truncated {
-            stderr.push_str("\n[stderr dipotong karena terlalu panjang]");
-        }
         return Err(process_failed(context.cancelled, stderr, "Whisper"));
     }
     Ok(resolved_backend)
@@ -2074,7 +1707,11 @@ pub fn pipeline(
     if let Err(error) = checkpoint::cleanup(&job_dir) {
         eprintln!("WhisperTube checkpoint cleanup warning: {error}");
     }
-    if !request.keep_audio {
+    if request.keep_audio {
+        if let Err(error) = history::record_retained_audio_cleanup(&job_dir) {
+            eprintln!("WhisperTube retained audio cleanup receipt warning: {error}");
+        }
+    } else {
         if let Err(error) = remove_file_if_present(&wav, "WAV hasil konversi") {
             eprintln!("WhisperTube audio cleanup warning: {error}");
         }
@@ -2097,22 +1734,19 @@ pub fn pipeline(
 #[cfg(test)]
 mod tests {
     use super::{
-        capture_stderr, ffmpeg_target_duration, find_reusable_audio_job, normalize_utf8_bytes,
-        parse_whisper_result, read_bounded_line, remaining_disk_reservation, run_cached_probe,
+        ffmpeg_target_duration, find_reusable_audio_job, normalize_utf8_bytes,
+        parse_whisper_result, remaining_disk_reservation, run_cached_probe,
         run_cuda_probe_with_vram_guard, validate_transcript_request, vulkan_device_indices,
         whisper_inactivity_timeout, whisper_thread_count, write_audio_cache_metadata,
         ComputeDeviceInfo, JobDirectoryGuard, CPU_INACTIVITY_TIMEOUT, DISK_SAFETY_BUFFER_BYTES,
-        MAX_CAPTURED_STDERR_BYTES, PROCESS_INACTIVITY_TIMEOUT,
+        PROCESS_INACTIVITY_TIMEOUT,
     };
     use crate::types::TranscriptRequest;
     use std::{
         collections::HashSet,
         fs,
-        io::{BufReader, Cursor},
-        process::{Command, Stdio},
         sync::atomic::{AtomicBool, Ordering},
         sync::{Arc, Mutex},
-        time::{Duration, Instant},
     };
     use uuid::Uuid;
 
@@ -2310,24 +1944,6 @@ mod tests {
     }
 
     #[test]
-    fn stderr_is_fully_drained_while_capture_is_bounded() {
-        let bytes = vec![b'x'; MAX_CAPTURED_STDERR_BYTES + 4096];
-        let mut reader = Cursor::new(bytes.clone());
-        let output = capture_stderr(&mut reader).unwrap();
-        assert_eq!(reader.position(), bytes.len() as u64);
-        assert!(output.starts_with(&"x".repeat(MAX_CAPTURED_STDERR_BYTES)));
-        assert!(output.ends_with("[stderr dipotong karena terlalu panjang]"));
-    }
-
-    #[test]
-    fn progress_line_reader_caps_an_unterminated_line() {
-        let mut reader = BufReader::new(Cursor::new(vec![b'x'; 256 * 1024]));
-        let line = read_bounded_line(&mut reader, 128).unwrap().unwrap();
-        assert!(line.starts_with(&"x".repeat(128)));
-        assert!(line.ends_with("[output line dipotong karena terlalu panjang]"));
-    }
-
-    #[test]
     fn transcript_request_rejects_untrusted_enum_and_text_values() {
         let request = TranscriptRequest {
             url: "https://youtube.com/watch?v=test".into(),
@@ -2437,26 +2053,5 @@ mod tests {
         assert_eq!(whisper_thread_count(4, "cpu"), 4);
         assert_eq!(whisper_thread_count(32, "cpu"), 16);
         assert_eq!(whisper_thread_count(32, "cuda"), 12);
-    }
-
-    #[test]
-    fn closed_progress_stream_still_waits_for_normal_process_exit() {
-        let mut child = Command::new(std::env::current_exe().unwrap())
-            .arg("--list")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        let cancelled = AtomicBool::new(false);
-
-        super::wait_for_child_after_stream_closed(
-            &mut child,
-            &cancelled,
-            Instant::now(),
-            Duration::from_secs(5),
-            "test",
-        )
-        .unwrap();
-        assert!(child.wait().unwrap().success());
     }
 }

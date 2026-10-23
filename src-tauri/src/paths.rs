@@ -290,7 +290,11 @@ fn is_safe_manifest_path(value: &str) -> bool {
             .all(|component| matches!(component, Component::Normal(_)))
 }
 
-fn cleanup_stale_entries(directory: &Path, matches: impl Fn(&str) -> bool) -> Vec<String> {
+fn cleanup_stale_entries(
+    directory: &Path,
+    directories: bool,
+    matches: impl Fn(&str) -> bool,
+) -> Vec<String> {
     let mut errors = Vec::new();
     let entries = match fs::read_dir(directory) {
         Ok(entries) => entries,
@@ -316,16 +320,41 @@ fn cleanup_stale_entries(directory: &Path, matches: impl Fn(&str) -> bool) -> Ve
             continue;
         }
         let path = entry.path();
-        let stale = fs::symlink_metadata(&path)
-            .and_then(|metadata| metadata.modified())
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                errors.push(format!("Gagal memeriksa {}: {error}", path.display()));
+                continue;
+            }
+        };
+        if metadata.file_type().is_symlink()
+            || (directories && !metadata.is_dir())
+            || (!directories && !metadata.is_file())
+        {
+            continue;
+        }
+        let modified = match metadata.modified() {
+            Ok(modified) => modified,
+            Err(error) => {
+                errors.push(format!("Gagal membaca waktu {}: {error}", path.display()));
+                continue;
+            }
+        };
+        let stale = SystemTime::now()
+            .duration_since(modified)
             .ok()
-            .and_then(|modified| SystemTime::now().duration_since(modified).ok())
             .is_some_and(|age| age >= TRANSIENT_STORAGE_GRACE);
         if !stale {
             continue;
         }
         let result = fs::symlink_metadata(&path).and_then(|metadata| {
-            if metadata.file_type().is_dir() {
+            if metadata.file_type().is_symlink()
+                || (directories && !metadata.is_dir())
+                || (!directories && !metadata.is_file())
+            {
+                return Ok(());
+            }
+            if directories {
                 fs::remove_dir_all(&path)
             } else {
                 fs::remove_file(&path)
@@ -338,23 +367,43 @@ fn cleanup_stale_entries(directory: &Path, matches: impl Fn(&str) -> bool) -> Ve
     errors
 }
 
+fn owned_uuid_name(name: &str, prefixes: &[&str]) -> bool {
+    prefixes.iter().any(|prefix| {
+        name.strip_prefix(prefix).is_some_and(|suffix| {
+            uuid::Uuid::parse_str(suffix).is_ok() && (suffix.len() == 36 || suffix.len() == 32)
+        })
+    })
+}
+
+fn owned_temp_directory(name: &str) -> bool {
+    owned_uuid_name(
+        name,
+        &[
+            "whispertube-cuda-",
+            "whispertube-accelerator-",
+            "whispertube-cuda-probe-",
+            "whispertube-metal-probe-",
+            "whispertube-vulkan-probe-",
+        ],
+    )
+}
+
 pub fn cleanup_stale_transient_storage(app: &AppHandle) -> Result<(), String> {
     let runtime_root = user_runtime_dir(app)?;
-    let mut errors = cleanup_stale_entries(&runtime_root, |name| {
-        name.starts_with(".cuda-staging-")
-            || name.starts_with(".vulkan-staging-")
-            || name.starts_with(".metal-staging-")
+    let mut errors = cleanup_stale_entries(&runtime_root, true, |name| {
+        owned_uuid_name(
+            name,
+            &[".cuda-staging-", ".vulkan-staging-", ".metal-staging-"],
+        )
     });
     let temp_root = std::env::temp_dir();
-    errors.extend(cleanup_stale_entries(&temp_root, |name| {
-        name.starts_with("whispertube-cuda-")
-            || name.starts_with("whispertube-accelerator-")
-            || name.starts_with("whispertube-cuda-probe-")
-            || name.starts_with("whispertube-metal-probe-")
-            || name.starts_with("whispertube-vulkan-probe-")
-    }));
+    errors.extend(cleanup_stale_entries(
+        &temp_root,
+        true,
+        owned_temp_directory,
+    ));
     let models_root = models_dir(app)?;
-    errors.extend(cleanup_stale_entries(&models_root, |name| {
+    errors.extend(cleanup_stale_entries(&models_root, false, |name| {
         name.ends_with(".bin.download")
     }));
     if errors.is_empty() {
@@ -520,6 +569,56 @@ mod tests {
             "whispertube-paths-{name}-{}-{nonce}",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn transient_cleanup_only_removes_expired_owned_directories() {
+        let root = temporary_path("cleanup");
+        fs::create_dir_all(&root).unwrap();
+        let old = format!("whispertube-cuda-{}", uuid::Uuid::new_v4());
+        let new = format!("whispertube-metal-probe-{}", uuid::Uuid::new_v4());
+        let matching_file = format!("whispertube-accelerator-{}", uuid::Uuid::new_v4());
+        for name in [&old, &new, "whispertube-cuda-personal-backup"] {
+            fs::create_dir(root.join(name)).unwrap();
+        }
+        fs::write(root.join(&matching_file), b"preserve").unwrap();
+        fs::write(
+            root.join("whispertube-cuda-personal-backup.zip"),
+            b"preserve",
+        )
+        .unwrap();
+        for name in [
+            &old,
+            &matching_file,
+            "whispertube-cuda-personal-backup",
+            "whispertube-cuda-personal-backup.zip",
+        ] {
+            let mut options = fs::OpenOptions::new();
+            options.read(true);
+            #[cfg(windows)]
+            options.write(true);
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::OpenOptionsExt;
+                options.custom_flags(0x02000000);
+            }
+            options
+                .open(root.join(name))
+                .unwrap()
+                .set_times(
+                    fs::FileTimes::new().set_modified(
+                        SystemTime::now() - std::time::Duration::from_secs(48 * 3600),
+                    ),
+                )
+                .unwrap();
+        }
+        assert!(super::cleanup_stale_entries(&root, true, super::owned_temp_directory).is_empty());
+        assert!(!root.join(old).exists());
+        assert!(root.join(new).is_dir());
+        assert!(root.join(matching_file).is_file());
+        assert!(root.join("whispertube-cuda-personal-backup").is_dir());
+        assert!(root.join("whispertube-cuda-personal-backup.zip").is_file());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

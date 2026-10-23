@@ -33,10 +33,7 @@ fn stop_active_work(app: &tauri::AppHandle) {
     state.model_cancelled.store(true, Ordering::SeqCst);
     state.runtime_cancelled.store(true, Ordering::SeqCst);
     state.inspect_cancelled.store(true, Ordering::SeqCst);
-    let pid = state.active_pid.lock().ok().and_then(|guard| *guard);
-    if let Some(pid) = pid {
-        process::terminate_process_tree(pid);
-    }
+    process::shutdown();
 }
 
 pub fn run() {

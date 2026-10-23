@@ -364,7 +364,77 @@ pub(crate) fn cleanup_source_audio(job_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn cleanup_result_signature(path: &Path) -> Result<String, String> {
+    let metadata =
+        fs::symlink_metadata(path).map_err(|e| format!("Gagal memeriksa hasil history: {e}"))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err("File history bukan file biasa.".into());
+    }
+    let modified = metadata
+        .modified()
+        .and_then(|time| {
+            time.duration_since(SystemTime::UNIX_EPOCH)
+                .map_err(std::io::Error::other)
+        })
+        .map_err(|e| format!("Gagal membaca waktu hasil history: {e}"))?;
+    Ok(format!(
+        "{}:{}:{}",
+        metadata.len(),
+        modified.as_secs(),
+        modified.subsec_nanos()
+    ))
+}
+
+// Only the pipeline that has just committed a retained-audio result may call
+// this without decoding the result again. Any leftover marker/source/checkpoint
+// still forces full validation during startup, regardless of the receipt.
+pub(crate) fn record_retained_audio_cleanup(job_dir: &Path) -> Result<(), String> {
+    let signature = cleanup_result_signature(&job_dir.join("result.json"))?;
+    write_export_atomically(
+        &mut signature.as_bytes(),
+        &job_dir.join(".cleanup-complete"),
+    )
+}
+
 fn cleanup_committed_job(job_dir: &Path) -> Result<(), String> {
+    let mut has_temporary = false;
+    let mut has_wav = false;
+    for entry in
+        fs::read_dir(job_dir).map_err(|e| format!("Gagal memeriksa cleanup history: {e}"))?
+    {
+        let entry = entry.map_err(|e| format!("Gagal memeriksa artifact history: {e}"))?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        has_temporary |=
+            name == ".in-progress" || name == ".checkpoints" || name.starts_with("source.");
+        has_wav |= name == "audio.wav";
+    }
+    // No payload needs decoding when there is nothing to delete. A receipt
+    // also avoids decoding retained-audio histories on every launch, but never
+    // authorizes deletion: new temporary artifacts always require validation.
+    let signature = cleanup_result_signature(&job_dir.join("result.json"))?;
+    let receipt = job_dir.join(".cleanup-complete");
+    if !has_temporary {
+        if !has_wav {
+            return Ok(());
+        }
+        let mut bytes = Vec::new();
+        if crate::paths::is_regular_file(&receipt) {
+            fs::File::open(&receipt)
+                .and_then(|file| file.take(256).read_to_end(&mut bytes))
+                .map_err(|e| format!("Gagal membaca receipt cleanup: {e}"))?;
+            if bytes == signature.as_bytes() {
+                return Ok(());
+            }
+        }
+    }
+    cleanup_committed_job_artifacts(job_dir)?;
+    // An interrupted receipt write is harmless: the next launch validates the
+    // result again. Do not rewrite the receipt on the fast path.
+    write_export_atomically(&mut signature.as_bytes(), &receipt)
+}
+
+fn cleanup_committed_job_artifacts(job_dir: &Path) -> Result<(), String> {
     let marker = job_dir.join(".in-progress");
     let wav = job_dir.join("audio.wav");
     // Only a committed history row authorizes this cleanup. A result file on
@@ -1042,6 +1112,84 @@ mod tests {
                 .unwrap(),
             3
         );
+    }
+
+    #[test]
+    fn changed_retention_metadata_invalidates_cleanup_receipt() {
+        let fixture = Fixture::new();
+        let conn = fixture.open();
+        let job = fixture.completed_job(&conn, "retained", true);
+        cleanup_job_storage_in(&conn, &fixture.root).unwrap();
+        let original = fs::read(job.join("result.json")).unwrap();
+        fs::write(job.join("result.json"), b"{corrupt").unwrap();
+        assert!(cleanup_job_storage_in(&conn, &fixture.root).is_err());
+        assert!(job.join("audio.wav").exists());
+        let mut result: crate::types::TranscriptResult = serde_json::from_slice(&original).unwrap();
+        result.audio_path = None;
+        fs::write(
+            job.join("result.json"),
+            serde_json::to_vec(&result).unwrap(),
+        )
+        .unwrap();
+        cleanup_job_storage_in(&conn, &fixture.root).unwrap();
+        assert!(!job.join("audio.wav").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_receipt_cannot_overwrite_a_symlink_target() {
+        let fixture = Fixture::new();
+        let conn = fixture.open();
+        let job = fixture.completed_job(&conn, "retained", true);
+        let outside = fixture.root.join("unrelated.txt");
+        fs::write(&outside, b"preserve").unwrap();
+        std::os::unix::fs::symlink(&outside, job.join(".cleanup-complete")).unwrap();
+        assert!(cleanup_job_storage_in(&conn, &fixture.root).is_err());
+        assert_eq!(fs::read(outside).unwrap(), b"preserve");
+        assert!(job.join("audio.wav").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn freshly_committed_retained_job_needs_no_payload_read_on_first_startup() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let fixture = Fixture::new();
+        let conn = fixture.open();
+        let job = fixture.completed_job(&conn, "new-retained", true);
+        crate::checkpoint::cleanup(&job).unwrap();
+        super::record_retained_audio_cleanup(&job).unwrap();
+        fs::remove_file(job.join(".in-progress")).unwrap();
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(job.join("result.json"))
+            .unwrap();
+        cleanup_job_storage_in(&conn, &fixture.root).unwrap();
+        assert!(job.join("audio.wav").exists());
+        drop(lock);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn clean_history_skips_payload_reads_but_new_artifacts_force_validation() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let fixture = Fixture::new();
+        let conn = fixture.open();
+        let job = fixture.completed_job(&conn, "retained", true);
+        cleanup_job_storage_in(&conn, &fixture.root).unwrap();
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(job.join("result.json"))
+            .unwrap();
+        cleanup_job_storage_in(&conn, &fixture.root).unwrap();
+        fs::write(job.join("source.webm"), b"recoverable").unwrap();
+        assert!(cleanup_job_storage_in(&conn, &fixture.root).is_err());
+        assert!(job.join("source.webm").exists());
+        drop(lock);
+        cleanup_job_storage_in(&conn, &fixture.root).unwrap();
+        assert!(!job.join("source.webm").exists());
+        assert!(job.join("audio.wav").exists());
     }
 
     #[test]

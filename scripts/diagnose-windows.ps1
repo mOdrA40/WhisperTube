@@ -1,6 +1,7 @@
 $ErrorActionPreference = "Continue"
 $Root = Split-Path -Parent $PSScriptRoot
 $Runtime = Join-Path $Root "src-tauri\runtime\windows"
+$DevRuntime = Join-Path $Root "src-tauri\runtime-dev\windows"
 
 function Test-Cmd($Name) {
     $cmd = Get-Command $Name -ErrorAction SilentlyContinue
@@ -43,7 +44,7 @@ Write-Host "`nRuntime binaries:" -ForegroundColor Cyan
 Test-FileNice "yt-dlp" (Join-Path $Runtime "yt-dlp.exe") | Out-Null
 Test-FileNice "FFmpeg" (Join-Path $Runtime "ffmpeg.exe") | Out-Null
 Test-FileNice "whisper CPU" (Join-Path $Runtime "cpu\whisper-cli.exe") | Out-Null
-Test-FileNice "whisper CUDA" (Join-Path $Runtime "cuda\whisper-cli.exe") | Out-Null
+Test-FileNice "whisper CUDA (development; file presence only)" (Join-Path $DevRuntime "cuda\whisper-cli.exe") | Out-Null
 
 Write-Host "`nGPU:" -ForegroundColor Cyan
 if (Test-Cmd "nvidia-smi") {

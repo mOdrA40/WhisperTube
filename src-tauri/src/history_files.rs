@@ -127,8 +127,9 @@ fn queue_deletion(
     Ok(ids.into_iter().collect())
 }
 pub(crate) fn cleanup_pending(conn: &Connection, root: &Path) -> Result<Vec<String>, String> {
+    // Replay completed transcript intents too: older versions omitted transcript.json.
     let rows = conn
-        .prepare("SELECT history_id,kind FROM history_file_deletions WHERE pending=1")
+        .prepare("SELECT history_id,kind FROM history_file_deletions WHERE pending=1 OR kind='transcript'")
         .and_then(|mut q| {
             q.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
                 .collect::<Result<Vec<_>, _>>()
@@ -141,11 +142,13 @@ pub(crate) fn cleanup_pending(conn: &Connection, root: &Path) -> Result<Vec<Stri
                 let names: &[&str] = match kind.as_str() {
                     "audio" => &["audio.wav"],
                     "transcript" => &[
+                        "transcript.json",
                         "transcript.txt",
                         "transcript.srt",
                         "transcript.vtt",
                         "result.json",
                         "result.json.tmp",
+                        ".cleanup-complete",
                     ],
                     _ => return Err("Jenis penghapusan file tidak valid.".into()),
                 };
@@ -192,13 +195,18 @@ pub(crate) fn cleanup_pending(conn: &Connection, root: &Path) -> Result<Vec<Stri
                 }
             }
             conn.execute(
-                "UPDATE history_file_deletions SET pending=0 WHERE history_id=?1 AND kind=?2",
+                "UPDATE history_file_deletions SET pending=0 WHERE history_id=?1 AND kind=?2 AND pending<>0",
                 params![id, kind],
             )
             .map_err(|e| format!("Gagal menyelesaikan cleanup file: {e}"))?;
             Ok(())
         };
         if let Err(e) = cleanup() {
+            conn.execute(
+                "UPDATE history_file_deletions SET pending=1 WHERE history_id=?1 AND kind=?2 AND pending<>1",
+                params![id, kind],
+            )
+            .map_err(|error| format!("Gagal menyimpan status cleanup file: {error}"))?;
             warnings.push(format!("Penghapusan file {kind} history {id} tertunda; file mungkin masih ada di disk: {e}"));
         }
     }
@@ -279,6 +287,7 @@ mod tests {
             fs::create_dir_all(job.join(".checkpoints")).unwrap();
             for name in [
                 "audio.wav",
+                "transcript.json",
                 "transcript.txt",
                 "transcript.srt",
                 "transcript.vtt",
@@ -310,6 +319,51 @@ mod tests {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.root).unwrap();
         }
+    }
+
+    #[test]
+    fn completed_legacy_tombstone_is_reconciled_after_reopen() {
+        let fixture = Fixture::new();
+        let mut conn = fixture.open();
+        queue_deletion(&mut conn, &fixture.root, &[1], HistoryFileScope::Transcript).unwrap();
+        conn.execute("UPDATE history_file_deletions SET pending=0", [])
+            .unwrap();
+        drop(conn);
+        let conn = fixture.open();
+        assert!(cleanup_pending(&conn, &fixture.root).unwrap().is_empty());
+        assert!(!fixture.job.join("transcript.json").exists());
+        assert!(fixture.job.join("audio.wav").exists());
+        assert!(fixture.job.join("transcript.notes.tmp").exists());
+        assert!(cleanup_pending(&conn, &fixture.root).unwrap().is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn legacy_completed_tombstone_reports_locked_json_as_pending() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let fixture = Fixture::new();
+        let mut conn = fixture.open();
+        queue_deletion(&mut conn, &fixture.root, &[1], HistoryFileScope::Transcript).unwrap();
+        conn.execute("UPDATE history_file_deletions SET pending=0", [])
+            .unwrap();
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(fixture.job.join("transcript.json"))
+            .unwrap();
+        assert!(!cleanup_pending(&conn, &fixture.root).unwrap().is_empty());
+        assert_eq!(
+            conn.query_row("SELECT pending FROM history_file_deletions", [], |row| row
+                .get::<_, i64>(
+                0
+            ))
+            .unwrap(),
+            1
+        );
+        assert!(fixture.job.join("audio.wav").exists());
+        drop(lock);
+        assert!(cleanup_pending(&conn, &fixture.root).unwrap().is_empty());
+        assert!(!fixture.job.join("transcript.json").exists());
     }
 
     #[test]
@@ -351,6 +405,7 @@ mod tests {
         assert!(cleanup_pending(&conn, &fixture.root).unwrap().is_empty());
         for name in [
             "result.json",
+            "transcript.json",
             "transcript.txt",
             "transcript.srt",
             "transcript.vtt",

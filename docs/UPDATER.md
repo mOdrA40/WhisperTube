@@ -12,8 +12,9 @@ embedded updater public key before installation.
    normally main.
 3. Push a new application tag such as v0.1.0.
 4. build-application-bundles.yml builds the native bundles directly and
-   collects checksums and updater signatures. Tests, lint, and dependency
-   audits are run locally before pushing; there is no separate CI quality gate.
+   collects checksums and updater signatures. Tests and lint run locally before
+   pushing; there is no separate CI test/lint quality gate. dependency-audit.yml
+   runs npm/Cargo audits on dependency-file changes independently of release jobs.
 5. The workflow validates that the tag version matches all three version
    files, generates latest.json, and publishes the GitHub Release.
 6. The application checks the updater endpoint, presents the available update,

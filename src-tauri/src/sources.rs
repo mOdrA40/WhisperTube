@@ -1,13 +1,12 @@
 use serde_json::Value;
-use std::io::Read;
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Command, ExitStatus};
 use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, OnceLock,
     },
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, SystemTime},
 };
 use tauri::AppHandle;
 use url::Url;
@@ -294,116 +293,46 @@ struct CapturedOutput {
     stderr: Vec<u8>,
 }
 
-fn drain_bounded(mut reader: impl Read, limit: usize) -> Result<(Vec<u8>, bool), String> {
-    let mut captured = Vec::with_capacity(limit.min(64 * 1024));
-    let mut buffer = [0u8; 16 * 1024];
-    let mut truncated = false;
-    loop {
-        let read = match reader.read(&mut buffer) {
-            Ok(read) => read,
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(format!("Gagal membaca output metadata: {error}")),
-        };
-        if read == 0 {
-            break;
-        }
-        let remaining = limit.saturating_sub(captured.len());
-        let retained = remaining.min(read);
-        captured.extend_from_slice(&buffer[..retained]);
-        truncated |= retained < read;
-    }
-    Ok((captured, truncated))
-}
-
-struct ActiveProcessGuard {
-    active_pid: Arc<Mutex<Option<u32>>>,
-}
-
-impl ActiveProcessGuard {
-    fn new(active_pid: Arc<Mutex<Option<u32>>>, pid: u32) -> Self {
-        if let Ok(mut active) = active_pid.lock() {
-            *active = Some(pid);
-        }
-        Self { active_pid }
-    }
-}
-
-impl Drop for ActiveProcessGuard {
-    fn drop(&mut self) {
-        if let Ok(mut active) = self.active_pid.lock() {
-            *active = None;
-        }
-    }
-}
-
 fn run_output(
     mut command: Command,
     active_pid: &Arc<Mutex<Option<u32>>>,
     cancelled: &Arc<AtomicBool>,
 ) -> Result<CapturedOutput, String> {
-    crate::process::hide_console(&mut command);
-    command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .stdin(Stdio::null());
-    let mut child = command
-        .spawn()
-        .map_err(|e| format!("Gagal menjalankan process metadata: {e}"))?;
-    let _active_process = ActiveProcessGuard::new(Arc::clone(active_pid), child.id());
-    let stdout = match child.stdout.take() {
-        Some(stdout) => stdout,
-        None => {
-            crate::process::terminate_child(&mut child);
-            let _ = child.wait();
-            return Err("Stdout metadata tidak tersedia.".into());
-        }
-    };
-    let stderr = match child.stderr.take() {
-        Some(stderr) => stderr,
-        None => {
-            crate::process::terminate_child(&mut child);
-            let _ = child.wait();
-            return Err("Stderr metadata tidak tersedia.".into());
-        }
-    };
-    let stdout_reader =
-        std::thread::spawn(move || drain_bounded(stdout, MAX_METADATA_STDOUT_BYTES));
-    let stderr_reader =
-        std::thread::spawn(move || drain_bounded(stderr, MAX_METADATA_STDERR_BYTES));
-    let started = Instant::now();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if cancelled.load(Ordering::SeqCst) => {
-                crate::process::terminate_child(&mut child);
-                let _ = child.wait();
-                let _ = stdout_reader.join();
-                let _ = stderr_reader.join();
-                return Err("Pemeriksaan metadata dibatalkan.".into());
+    let mut stdout = Vec::with_capacity(64 * 1024);
+    let mut stderr = Vec::with_capacity(64 * 1024);
+    let mut stdout_truncated = false;
+    let mut stderr_truncated = false;
+    let mut active = None;
+    let status = crate::process::run_piped(
+        &mut command,
+        Some(METADATA_PROCESS_TIMEOUT),
+        Some(cancelled),
+        |pid| {
+            active = Some(crate::process::ActiveProcessGuard::new(active_pid, pid)?);
+            Ok(())
+        },
+        |event| {
+            use crate::process::{OutputEvent, OutputStream};
+            if let OutputEvent::Data(stream, bytes) = event {
+                let (captured, limit, truncated) = match stream {
+                    OutputStream::Stdout => (
+                        &mut stdout,
+                        MAX_METADATA_STDOUT_BYTES,
+                        &mut stdout_truncated,
+                    ),
+                    OutputStream::Stderr => (
+                        &mut stderr,
+                        MAX_METADATA_STDERR_BYTES,
+                        &mut stderr_truncated,
+                    ),
+                };
+                let retained = bytes.len().min(limit.saturating_sub(captured.len()));
+                captured.extend_from_slice(&bytes[..retained]);
+                *truncated |= retained < bytes.len();
             }
-            Ok(None) if started.elapsed() >= METADATA_PROCESS_TIMEOUT => {
-                crate::process::terminate_child(&mut child);
-                let _ = child.wait();
-                let _ = stdout_reader.join();
-                let _ = stderr_reader.join();
-                return Err("Pemeriksaan metadata melewati batas waktu 45 detik.".into());
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-            Err(error) => {
-                crate::process::terminate_child(&mut child);
-                let _ = child.wait();
-                let _ = stdout_reader.join();
-                let _ = stderr_reader.join();
-                return Err(format!("Gagal memantau process metadata: {error}"));
-            }
-        }
-    };
-    let (stdout, stdout_truncated) = stdout_reader
-        .join()
-        .map_err(|_| "Reader stdout metadata gagal.".to_string())??;
-    let (mut stderr, stderr_truncated) = stderr_reader
-        .join()
-        .map_err(|_| "Reader stderr metadata gagal.".to_string())??;
+            Ok(())
+        },
+    )?;
     if stdout_truncated {
         return Err("Output metadata terlalu besar untuk diproses dengan aman.".into());
     }
@@ -836,12 +765,10 @@ mod tests {
         fs::remove_file(program).unwrap();
     }
     use super::{
-        drain_bounded, metadata_error_prefix, metadata_retry_reason, safe_thumbnail,
-        source_for_host, validate_media_duration, validate_media_url, MetadataRetryReason,
-        METADATA_PRINT_TEMPLATE,
+        metadata_error_prefix, metadata_retry_reason, safe_thumbnail, source_for_host,
+        validate_media_duration, validate_media_url, MetadataRetryReason, METADATA_PRINT_TEMPLATE,
     };
     use serde_json::{json, Value};
-    use std::io::Cursor;
 
     #[test]
     fn metadata_channel_preserves_precedence_and_skips_empty_or_invalid_values() {
@@ -923,11 +850,22 @@ mod tests {
     }
 
     #[test]
-    fn bounded_metadata_reader_drains_but_caps_retained_bytes() {
-        let input = vec![b'x'; 1024];
-        let (captured, truncated) = drain_bounded(Cursor::new(input), 128).unwrap();
-        assert_eq!(captured.len(), 128);
-        assert!(truncated);
+    fn bounded_metadata_runner_rejects_oversized_stdout() {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "process::tests::captured_probe_child",
+                "--nocapture",
+            ])
+            .env("WHISPERTUBE_CAPTURE_CHILD", "large-stdout");
+        let tracker = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        assert!(super::run_output(command, &tracker, &cancelled)
+            .err()
+            .unwrap()
+            .contains("terlalu besar"));
+        assert_eq!(*tracker.lock().unwrap(), None);
     }
 
     #[test]

@@ -151,7 +151,7 @@ impl OperationGuard {
                 .as_ref()
                 .copied();
             if let Some(pid) = pid {
-                crate::process::terminate_process_tree(pid);
+                crate::process::terminate_registered(pid);
             }
         }
         Ok(())

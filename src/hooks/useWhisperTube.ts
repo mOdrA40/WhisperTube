@@ -30,7 +30,7 @@ import {
   subscribeToCudaDownload,
   subscribeToProgress,
 } from "../services/tauri";
-import { errorCode, friendlyError } from "../lib/format";
+import { errorCode, friendlyError, isOperationConflict } from "../lib/format";
 import { getAcceleratorCopy, getModelCopy, useI18n, type Translate } from "../i18n";
 import type {
   AppUpdateInfo,
@@ -602,8 +602,19 @@ export function useWhisperTube() {
       setMetadata(null);
       setResult(null);
       setSearchQuery("");
+      setCopied(false);
     } catch (cause) {
       const message = friendlyError(cause);
+      if (!isOperationConflict(cause)) {
+        // Reset is best-effort: a rejected reset may already have deleted the
+        // history and files backing the currently displayed transcript/cache.
+        setResult(null);
+        setSearchQuery("");
+        setCopied(false);
+        setJobCache(null);
+        setRetrySource(null);
+        setResumeRevision((revision) => revision + 1);
+      }
       await refreshAfterMutationFailure();
       setError(message);
       throw cause;
@@ -742,6 +753,8 @@ export function useWhisperTube() {
         setError(
           errorCode(cause) === "media_source_cookie_file"
             ? t("error.sourceCookiesFile")
+            : errorCode(cause) === "media_source_js_runtime"
+              ? t("error.sourceJsRuntime")
             : errorCode(cause) === "storage_quota_exceeded"
               ? t("error.storageQuotaExceeded")
               : message,

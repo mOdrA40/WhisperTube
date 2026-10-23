@@ -25,7 +25,9 @@ impl Owner {
         #[cfg(windows)]
         self.job.terminate();
         #[cfg(unix)]
-        super::terminate_process_tree(self.pid);
+        if let Err(error) = unix_kill_remaining_group(self.pid) {
+            eprintln!("WhisperTube: gagal menghentikan process group: {error}");
+        }
     }
 }
 
@@ -43,8 +45,22 @@ pub struct OwnedChild {
 impl OwnedChild {
     pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
         let mut registry = registry().lock().unwrap_or_else(|e| e.into_inner());
+        #[cfg(unix)]
+        if !self.reaped {
+            if !unix_leader_exited(self.owner.pid)? {
+                return Ok(None);
+            }
+            // WNOWAIT reserves the leader PID/PGID until this group cleanup
+            // finishes. Reaping first would allow an unrelated new process
+            // to reuse the PID before the group signal is sent.
+            unix_kill_remaining_group(self.owner.pid)?;
+        }
         let status = self.child.try_wait()?;
-        if status.is_some() {
+        if status.is_some() && !self.reaped {
+            #[cfg(windows)]
+            // Job ownership also covers descendants with inherited handles
+            // that are not their current stdout/stderr handles.
+            self.owner.terminate();
             self.reaped = true;
             registry.children.remove(&self.owner.pid);
         }
@@ -68,6 +84,54 @@ impl OwnedChild {
             self.owner.terminate();
             let _ = self.child.kill();
         }
+    }
+}
+
+#[cfg(unix)]
+fn unix_leader_exited(pid: u32) -> io::Result<bool> {
+    // SAFETY: siginfo_t accepts an all-zero initialization. waitid writes only
+    // this live buffer; WNOWAIT observes this owned child without reaping it.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    loop {
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        if result == 0 {
+            return Ok(unsafe { info.si_pid() } != 0);
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn unix_kill_remaining_group(pid: u32) -> io::Result<()> {
+    // SAFETY: the group belongs to a child whose leader has not been reaped.
+    // No pipeline child is allowed to leave behind an independent daemon.
+    if unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) } == 0 {
+        return Ok(());
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        Ok(())
+    } else {
+        Err(error)
+    }
+}
+
+pub fn terminate_registered(pid: u32) {
+    // Reaping/removal and cancellation share the registry lock, so a stale
+    // active_pid cannot kill an unrelated process after PID reuse.
+    let registry = registry().lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(owner) = registry.children.get(&pid) {
+        owner.terminate();
     }
 }
 

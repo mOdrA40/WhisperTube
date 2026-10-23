@@ -54,6 +54,7 @@ const english = {
   "hardware.recommendation.cpuStrong": "This CPU is suitable for transcription. Start with Balanced; use Fast if it feels slow.",
   "hardware.recommendation.cpuFast": "Start with Fast on this machine for a more responsive experience.",
   "hardware.recommendation.gpu": "A compatible GPU was detected. Install the available accelerator for faster inference.",
+  "hardware.recommendation.gpuInstalled": "A GPU accelerator is installed. Auto will check it before use; {model} is recommended.",
   "error.title": "Technical issue",
   "error.operationSucceededRefreshFailed": "The operation succeeded, but the latest status could not be loaded: {detail}",
   "error.dismiss": "Dismiss error",
@@ -326,7 +327,7 @@ const english = {
   "error.sourceDuration": "Active live streams, upcoming streams, media with unknown duration, and videos longer than 8 hours are not supported.",
   "error.sourceUnsupported": "This platform is not supported yet. Try a video link from a supported platform.",
   "error.sourceCookiesFile": "The selected cookies.txt file cannot be read. Select it again or remove it in Settings.",
-  "error.sourceJsRuntime": "YouTube needs a JavaScript runtime to prepare this video. Install Node.js or update the app runtime, then try again.",
+  "error.sourceJsRuntime": "YouTube requires Node.js 22+ or Deno 2.3+. Install one, add it to PATH, then restart WhisperTube. The JavaScript runtime is not bundled with the app.",
   "error.sourceRuntime": "The video downloader is not installed. Run the setup script or reinstall the app runtime.",
   "error.sourceMetadata": "The platform returned unreadable video information. Update the app runtime and try again.",
   "error.storageQuotaExceeded": "WhisperTube job storage has reached its 20 GiB safety limit. Review unfinished jobs in Settings or delete old history to free space.",
@@ -375,6 +376,7 @@ const messages: Record<UiLanguage, Record<TranslationKey, string>> = {
     "hardware.recommendation.cpuStrong": "CPU ini cukup untuk transkripsi. Mulai dengan Balanced; gunakan Fast jika terasa lambat.",
     "hardware.recommendation.cpuFast": "Mulai dengan Fast agar aplikasi tetap responsif di mesin ini.",
     "hardware.recommendation.gpu": "GPU yang kompatibel terdeteksi. Pasang akselerator yang tersedia untuk inferensi lebih cepat.",
+    "hardware.recommendation.gpuInstalled": "Akselerator GPU sudah terpasang. Auto akan memeriksanya sebelum digunakan; {model} direkomendasikan.",
     "error.title": "Kendala teknis",
     "error.operationSucceededRefreshFailed": "Operasi berhasil, tetapi status terbaru tidak dapat dimuat: {detail}",
     "error.dismiss": "Tutup pesan error",
@@ -647,7 +649,7 @@ const messages: Record<UiLanguage, Record<TranslationKey, string>> = {
     "error.sourceDuration": "Live stream aktif, siaran mendatang, media tanpa durasi pasti, dan video lebih dari 8 jam belum didukung.",
     "error.sourceUnsupported": "Platform ini belum didukung. Coba link video dari platform yang tersedia.",
   "error.sourceCookiesFile": "File cookies.txt yang dipilih tidak bisa dibaca. Pilih ulang atau hapus dari Pengaturan.",
-    "error.sourceJsRuntime": "YouTube membutuhkan JavaScript runtime untuk menyiapkan video ini. Pasang Node.js atau perbarui runtime aplikasi, lalu coba lagi.",
+    "error.sourceJsRuntime": "YouTube memerlukan Node.js 22+ atau Deno 2.3+. Pasang salah satunya, tambahkan ke PATH, lalu mulai ulang WhisperTube. Runtime JavaScript tidak dibundel dengan aplikasi.",
     "error.sourceRuntime": "Downloader video belum terpasang. Jalankan script setup atau pasang ulang runtime aplikasi.",
     "error.sourceMetadata": "Platform mengirim informasi video yang tidak bisa dibaca. Perbarui runtime aplikasi lalu coba lagi.",
     "error.storageQuotaExceeded": "Penyimpanan job WhisperTube sudah mencapai batas keamanan 20 GiB. Tinjau job belum selesai di Pengaturan atau hapus history lama untuk mengosongkan ruang.",
@@ -687,6 +689,7 @@ const messages: Record<UiLanguage, Record<TranslationKey, string>> = {
     "hardware.recommendation.cpuStrong": "这台电脑的 CPU 适合转录。建议从 Balanced 开始；如果速度较慢可使用 Fast。",
     "hardware.recommendation.cpuFast": "建议在这台设备上使用 Fast，以保持更好的响应速度。",
     "hardware.recommendation.gpu": "检测到兼容的 GPU。安装可用的加速器即可提高推理速度。",
+    "hardware.recommendation.gpuInstalled": "GPU 加速器已安装。自动模式将在使用前检查兼容性；推荐使用 {model}。",
     "error.title": "技术问题",
     "error.operationSucceededRefreshFailed": "操作已完成，但无法加载最新状态：{detail}",
     "error.dismiss": "关闭错误提示",
@@ -959,7 +962,7 @@ const messages: Record<UiLanguage, Record<TranslationKey, string>> = {
     "error.sourceDuration": "暂不支持正在进行的直播、即将开始的直播、时长未知的媒体以及超过 8 小时的视频。",
     "error.sourceUnsupported": "暂不支持此平台。请尝试使用受支持平台的视频链接。",
   "error.sourceCookiesFile": "无法读取所选 cookies.txt 文件。请重新选择，或在设置中移除它。",
-    "error.sourceJsRuntime": "YouTube 需要 JavaScript 运行环境来准备此视频。请安装 Node.js 或更新应用运行环境，然后重试。",
+    "error.sourceJsRuntime": "YouTube 需要 Node.js 22+ 或 Deno 2.3+。请安装其中之一并加入 PATH，然后重启 WhisperTube。应用不包含 JavaScript 运行环境。",
     "error.sourceRuntime": "视频下载器尚未安装。请运行设置脚本或重新安装应用运行环境。",
     "error.sourceMetadata": "该平台返回的视频信息无法读取。请更新应用运行环境后重试。",
     "error.storageQuotaExceeded": "WhisperTube 任务存储已达到 20 GiB 安全上限。请在设置中检查未完成的任务，或删除旧历史记录以释放空间。",
@@ -1060,6 +1063,9 @@ export function getRecommendation(system: SystemStatus | null, t: Translate) {
       vram,
       model,
     });
+  }
+  if (system.accelerators.some((accelerator) => accelerator.supported && accelerator.installed)) {
+    return t("hardware.recommendation.gpuInstalled", { model });
   }
   if (system.nvidia && system.cudaSupported && !system.cudaInstallable) {
     return t("hardware.recommendation.cudaDriver");

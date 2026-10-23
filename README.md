@@ -18,6 +18,8 @@ For predictable disk and memory use, transcription is limited to on-demand media
 
 ## Features
 
+YouTube prerequisite for installed applications: install [Node.js 22+](https://nodejs.org/en/download) or [Deno 2.3+](https://docs.deno.com/runtime/getting_started/installation/), put it on PATH, and restart WhisperTube. The installer includes yt-dlp's EJS scripts but does not bundle a JavaScript runtime. The app checks this prerequisite before YouTube extraction and reports a specific error if it is missing or unsupported. Other supported platforms do not require this prerequisite. Installing Whisper models alone does not provide a JavaScript runtime.
+
 - Paste a supported video URL and inspect metadata before downloading.
 - Public videos.
 - Login-protected videos through an imported Netscape `cookies.txt` file. The app never asks for site passwords.

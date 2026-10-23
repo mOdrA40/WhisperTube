@@ -18,6 +18,8 @@ Untuk menjaga pemakaian disk dan memori tetap terprediksi, transkripsi dibatasi 
 
 ## Fitur
 
+Prasyarat YouTube untuk aplikasi yang sudah diinstal: pasang [Node.js 22+](https://nodejs.org/en/download) atau [Deno 2.3+](https://docs.deno.com/runtime/getting_started/installation/), masukkan ke PATH, lalu mulai ulang WhisperTube. Installer membawa script EJS yt-dlp, tetapi tidak membundel runtime JavaScript. Aplikasi memeriksa prasyarat ini sebelum ekstraksi YouTube dan menampilkan error khusus bila runtime tidak tersedia atau tidak didukung. Platform lain tetap dapat digunakan tanpa prasyarat ini. Mengunduh model Whisper tidak memasang runtime JavaScript.
+
 - Tempel URL video yang didukung dan periksa metadata sebelum download.
 - Video publik dan video yang memerlukan login melalui import `cookies.txt` format Netscape.
 - Tidak meminta email atau password Google dan tidak menyalin cookies ke database aplikasi.

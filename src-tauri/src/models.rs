@@ -798,14 +798,34 @@ pub async fn install_cuda_engine(app: AppHandle, cancelled: Arc<AtomicBool>) -> 
     let cleanup_temp_root = temp_root.clone();
     let cleanup_staging_path = staging_path.clone();
     let cleanup_staging = result.is_err();
-    let _ = tokio::task::spawn_blocking(move || {
-        let _ = fs::remove_dir_all(&cleanup_temp_root);
-        if cleanup_staging {
-            let _ = fs::remove_dir_all(&cleanup_staging_path);
-        }
+    match tokio::task::spawn_blocking(move || {
+        cleanup_cuda_installation(
+            &cleanup_temp_root,
+            cleanup_staging.then_some(cleanup_staging_path.as_path()),
+        )
     })
-    .await;
+    .await
+    {
+        Ok(warnings) => {
+            for warning in warnings {
+                eprintln!("WhisperTube CUDA cleanup warning: {warning}");
+            }
+        }
+        Err(error) => eprintln!("WhisperTube CUDA cleanup task failed: {error}"),
+    }
     result
+}
+
+fn cleanup_cuda_installation(temporary: &Path, staging: Option<&Path>) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for directory in std::iter::once(temporary).chain(staging) {
+        if let Err(error) = fs::remove_dir_all(directory) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                warnings.push(format!("{}: {error}", directory.display()));
+            }
+        }
+    }
+    warnings
 }
 
 pub fn delete_model(app: &AppHandle, model_id: &str) -> Result<(), String> {
@@ -821,6 +841,32 @@ pub fn delete_model(app: &AppHandle, model_id: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    #[test]
+    fn cuda_cleanup_reports_locked_files_and_can_be_retried() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = std::env::temp_dir().join(format!("cuda-cleanup-{}", uuid::Uuid::new_v4()));
+        let temporary = root.join("temporary");
+        let staging = root.join("staging");
+        std::fs::create_dir_all(&temporary).unwrap();
+        std::fs::create_dir_all(&staging).unwrap();
+        let path = temporary.join("archive.zip");
+        std::fs::write(&path, b"fixture").unwrap();
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .unwrap();
+        let warnings = super::cleanup_cuda_installation(&temporary, Some(&staging));
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("temporary"));
+        assert!(path.exists());
+        assert!(!staging.exists());
+        drop(lock);
+        assert!(super::cleanup_cuda_installation(&temporary, Some(&staging)).is_empty());
+        assert!(!temporary.exists());
+        std::fs::remove_dir(root).unwrap();
+    }
     use super::{
         clear_invalid_model_destination, ensure_vram_available, recommended_model_id,
         recommended_model_id_for_system, verify_model_file, TemporaryFileGuard,

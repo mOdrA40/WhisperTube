@@ -461,4 +461,48 @@ describe("useWhisperTube", () => {
 
     expect(result.current.error).toContain("History sedang dikunci");
   });
+
+  it("drops the active result after a partially successful reset", async () => {
+    const { result } = renderHook(() => useWhisperTube(), { wrapper });
+    await waitFor(() => expect(result.current.system).toEqual(system));
+    act(() => result.current.setUrl(metadata.webpageUrl));
+    await act(async () => result.current.inspectVideo());
+    await act(async () => result.current.startTranscription());
+    expect(result.current.result).toEqual(transcript);
+    services.resetUserData.mockRejectedValueOnce({ code: "backend_error", detail: "Reset data tidak selesai sepenuhnya: runtime terkunci" });
+    services.listHistory.mockResolvedValue({ items: [], hasMore: false, totalCount: 0 });
+    await act(async () => {
+      await expect(result.current.resetUserData()).rejects.toMatchObject({ code: "backend_error" });
+    });
+    expect(result.current.result).toBeNull();
+    expect(result.current.historyTotalCount).toBe(0);
+    expect(result.current.jobCache).toBeNull();
+    expect(result.current.error).toContain("runtime terkunci");
+  });
+
+  it("explains the JS prerequisite if the runtime disappears after inspection", async () => {
+    const { result } = renderHook(() => useWhisperTube(), { wrapper });
+    await waitFor(() => expect(result.current.system).toEqual(system));
+    act(() => result.current.setUrl(metadata.webpageUrl));
+    await act(async () => result.current.inspectVideo());
+    services.startTranscription.mockRejectedValueOnce({ code: "media_source_js_runtime", detail: "native detail" });
+    await act(async () => result.current.startTranscription());
+    expect(result.current.error).toContain("Node.js 22+");
+    expect(result.current.error).toContain("Deno 2.3+");
+    expect(result.current.error).not.toContain("native detail");
+  });
+
+  it("preserves the result when reset is rejected before mutation", async () => {
+    const { result } = renderHook(() => useWhisperTube(), { wrapper });
+    await waitFor(() => expect(result.current.system).toEqual(system));
+    act(() => result.current.setUrl(metadata.webpageUrl));
+    await act(async () => result.current.inspectVideo());
+    await act(async () => result.current.startTranscription());
+    services.resetUserData.mockRejectedValueOnce({ code: "operation_conflict", detail: "Operasi lain aktif" });
+    await act(async () => {
+      await expect(result.current.resetUserData()).rejects.toMatchObject({ code: "operation_conflict" });
+    });
+    expect(result.current.result).toEqual(transcript);
+    expect(result.current.error).toContain("Operasi lain aktif");
+  });
 });

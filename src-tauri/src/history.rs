@@ -773,7 +773,7 @@ fn write_export_atomically(input: &mut impl Read, target: &Path) -> Result<(), S
         }
         output.sync_all()?;
         drop(output);
-        fs::rename(&temporary, target)
+        crate::durable::publish(&temporary, target)
     })();
     if let Err(error) = result {
         let cleanup = match fs::remove_file(&temporary) {

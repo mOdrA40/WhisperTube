@@ -36,7 +36,8 @@ pub fn app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
         .path()
         .app_local_data_dir()
         .map_err(|e| format!("Tidak bisa menentukan app data directory: {e}"))?;
-    fs::create_dir_all(&dir).map_err(|e| format!("Gagal membuat app data directory: {e}"))?;
+    crate::durable::create_dir_all(&dir)
+        .map_err(|e| format!("Gagal membuat app data directory: {e}"))?;
     Ok(dir)
 }
 
@@ -48,7 +49,7 @@ pub fn models_dir(app: &AppHandle) -> Result<PathBuf, String> {
 
 pub fn jobs_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app_data_dir(app)?.join("jobs");
-    fs::create_dir_all(&dir).map_err(|e| format!("Gagal membuat folder jobs: {e}"))?;
+    crate::durable::create_dir_all(&dir).map_err(|e| format!("Gagal membuat folder jobs: {e}"))?;
     Ok(dir)
 }
 

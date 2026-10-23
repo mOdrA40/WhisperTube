@@ -18,6 +18,8 @@ WhisperTube 是一款 local-first 桌面应用，使用 `yt-dlp`、FFmpeg 和 wh
 
 ## 功能
 
+已安装应用的 YouTube 前提条件：安装 [Node.js 22+](https://nodejs.org/en/download) 或 [Deno 2.3+](https://docs.deno.com/runtime/getting_started/installation/)，将其加入 PATH，然后重启 WhisperTube。安装包包含 yt-dlp 的 EJS 脚本，但不包含 JavaScript 运行环境。应用会在提取 YouTube 信息前检查此前提条件，并在运行环境缺失或版本不受支持时显示明确错误。其他支持的平台不受此前提条件限制。下载 Whisper 模型不会安装 JavaScript 运行环境。
+
 - 粘贴受支持的视频 URL，在下载前检查视频元数据。
 - 支持公开视频，以及通过导入 Netscape 格式 `cookies.txt` 来处理需要登录的视频。
 - 不要求网站密码，也不会把 cookies 复制到应用数据库。

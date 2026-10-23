@@ -1,5 +1,5 @@
 mod ownership;
-pub use ownership::shutdown;
+pub use ownership::{shutdown, terminate_registered};
 
 use std::{
     io::Read,
@@ -23,6 +23,7 @@ pub fn hide_console(command: &mut Command) {
     command.process_group(0);
 }
 
+#[cfg(all(windows, test))]
 pub fn terminate_process_tree(pid: u32) {
     #[cfg(target_os = "windows")]
     {
@@ -30,40 +31,6 @@ pub fn terminate_process_tree(pid: u32) {
         hide_console(&mut command);
         let _ = command
             .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        let mut command = Command::new("kill");
-        hide_console(&mut command);
-        let _ = command
-            .args(["-TERM", "--", &format!("-{pid}")])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while Instant::now() < deadline {
-            let mut probe = Command::new("kill");
-            hide_console(&mut probe);
-            let exited = probe
-                .args(["-0", "--", &format!("-{pid}")])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .map(|status| !status.success())
-                .unwrap_or(true);
-            if exited {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        let mut force = Command::new("kill");
-        hide_console(&mut force);
-        let _ = force
-            .args(["-KILL", "--", &format!("-{pid}")])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
@@ -229,6 +196,7 @@ pub fn run_piped(
     let outcome = (|| {
         let mut stdout_eof = false;
         let mut stderr_eof = false;
+        let mut exit_status = None;
         let mut buffer = [0u8; 8 * 1024];
         loop {
             check()?;
@@ -256,12 +224,17 @@ pub fn run_piped(
             }
             on_event(OutputEvent::Tick)?;
             check()?;
-            // Reserve the leader PID until all inherited streams have closed.
-            if stdout_eof && stderr_eof {
-                if let Some(status) = child
+            // Observe leader exit even when descendants keep a pipe open.
+            // OwnedChild cleans the remaining group/job before releasing its
+            // ownership. Drain buffered output after that cleanup, without
+            // using EOF as evidence that the leader itself has exited.
+            if exit_status.is_none() {
+                exit_status = child
                     .try_wait()
-                    .map_err(|e| format!("Status proses tidak bisa dibaca: {e}"))?
-                {
+                    .map_err(|e| format!("Status proses tidak bisa dibaca: {e}"))?;
+            }
+            if stdout_eof && stderr_eof {
+                if let Some(status) = exit_status {
                     return Ok(status);
                 }
             }
@@ -525,6 +498,26 @@ mod tests {
                 // Intentionally leave stderr inherited after the parent exits;
                 // the outer test owns cleanup of this synthetic descendant.
                 drop(child);
+                if std::env::var_os("WHISPERTUBE_CAPTURE_PARENT_LINGER").is_some() {
+                    std::thread::sleep(Duration::from_secs(30));
+                }
+            }
+            "redirected-parent" => {
+                let mut command = capture_child("sleeper");
+                #[cfg(windows)]
+                hide_console(&mut command);
+                command.stdout(Stdio::null()).stderr(Stdio::null());
+                // Inherit the owned leader's Unix group / Windows job.
+                let child = command.spawn().unwrap();
+                std::fs::write(
+                    std::env::var_os("WHISPERTUBE_CAPTURE_PID_FILE").unwrap(),
+                    child.id().to_string(),
+                )
+                .unwrap();
+                drop(child);
+                if std::env::var_os("WHISPERTUBE_CAPTURE_PARENT_FAIL").is_some() {
+                    std::process::exit(7);
+                }
             }
             _ => panic!("unknown capture fixture"),
         }
@@ -543,6 +536,40 @@ mod tests {
     }
 
     #[test]
+    fn leader_exit_cleans_descendants_even_when_they_do_not_hold_pipes() {
+        for failed in [false, true] {
+            let file = std::env::temp_dir()
+                .join(format!("whispertube-descendant-{}", uuid::Uuid::new_v4()));
+            let mut command = capture_child("redirected-parent");
+            command.env("WHISPERTUBE_CAPTURE_PID_FILE", &file);
+            if failed {
+                command.env("WHISPERTUBE_CAPTURE_PARENT_FAIL", "1");
+            }
+            let (status, _) =
+                run_with_timeout_captured(&mut command, Duration::from_secs(10), 1024).unwrap();
+            let pid = std::fs::read_to_string(&file).unwrap().parse().unwrap();
+            assert_process_exited(pid);
+            // Late cancellation must not use a stale bare PID.
+            terminate_registered(pid);
+            assert_eq!(status.success(), !failed);
+            std::fs::remove_file(file).unwrap();
+        }
+    }
+
+    #[test]
+    fn leader_exit_cleans_descendants_holding_inherited_pipes() {
+        let file =
+            std::env::temp_dir().join(format!("whispertube-inherited-{}", uuid::Uuid::new_v4()));
+        let mut command = capture_child("parent");
+        command.env("WHISPERTUBE_CAPTURE_PID_FILE", &file);
+        let (status, _) =
+            run_with_timeout_captured(&mut command, Duration::from_secs(10), 1024).unwrap();
+        assert!(status.success());
+        assert_process_exited(std::fs::read_to_string(&file).unwrap().parse().unwrap());
+        std::fs::remove_file(file).unwrap();
+    }
+
+    #[test]
     fn captured_output_drains_large_stderr_but_retains_only_the_limit() {
         let (status, output) =
             run_with_timeout_captured(&mut capture_child("writer"), Duration::from_secs(10), 1024)
@@ -554,11 +581,13 @@ mod tests {
     }
 
     #[test]
-    fn captured_timeout_includes_descendants_holding_stderr_after_parent_exit() {
+    fn captured_timeout_terminates_a_running_parent_and_its_descendants() {
         let pid_file =
             std::env::temp_dir().join(format!("whispertube-capture-{}", uuid::Uuid::new_v4()));
         let mut command = capture_child("parent");
-        command.env("WHISPERTUBE_CAPTURE_PID_FILE", &pid_file);
+        command
+            .env("WHISPERTUBE_CAPTURE_PID_FILE", &pid_file)
+            .env("WHISPERTUBE_CAPTURE_PARENT_LINGER", "1");
         let started = Instant::now();
         let result = run_with_timeout_captured(&mut command, Duration::from_millis(300), 1024);
         if pid_file.exists() {
@@ -701,12 +730,14 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_after_leader_exit_closes_inherited_pipes_and_kills_descendant() {
+    fn cancellation_terminates_running_parent_with_inherited_pipes() {
         let pid_file =
             std::env::temp_dir().join(format!("whispertube-cancel-{}", uuid::Uuid::new_v4()));
         let cancelled = AtomicBool::new(false);
         let mut command = capture_child("parent");
-        command.env("WHISPERTUBE_CAPTURE_PID_FILE", &pid_file);
+        command
+            .env("WHISPERTUBE_CAPTURE_PID_FILE", &pid_file)
+            .env("WHISPERTUBE_CAPTURE_PARENT_LINGER", "1");
         std::thread::scope(|scope| {
             scope.spawn(|| {
                 let deadline = Instant::now() + Duration::from_secs(5);
@@ -754,6 +785,30 @@ mod tests {
             0,
             "helper remains running: {pid}"
         );
+    }
+
+    #[cfg(unix)]
+    fn assert_process_exited(pid: u32) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let output = Command::new("ps")
+                .args(["-o", "stat=", "-p", &pid.to_string()])
+                .output()
+                .unwrap();
+            let state = String::from_utf8_lossy(&output.stdout);
+            // An orphan zombie is already dead; only its new parent can reap it.
+            if state.trim().is_empty() || state.trim_start().starts_with('Z') {
+                return;
+            }
+            if Instant::now() >= deadline {
+                // Clean only the synthetic helper on failure.
+                unsafe {
+                    libc::kill(pid as libc::pid_t, libc::SIGKILL);
+                }
+                panic!("helper remains running: {pid}");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[cfg(windows)]

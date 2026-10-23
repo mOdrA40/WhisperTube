@@ -54,6 +54,7 @@ The Rust backend uses similar boundaries:
 - models.rs manages model and optional CUDA downloads;
 - sources.rs validates source URLs and performs metadata inspection;
 - process.rs provides platform-specific child-process setup and termination;
+- durable.rs publishes flushed files and synchronizes directory entries;
 - resources.rs performs memory, disk, and per-mount allocation checks;
 - transcription.rs owns the media-to-transcript pipeline;
 - history.rs owns SQLite history, result files, and exports;
@@ -126,9 +127,17 @@ The cancellation path sets the relevant cancellation flag and terminates the
 active process tree where supported. Child processes are also cleaned up during
 application shutdown.
 
+Cancellation resolves the PID through the owned-process registry. On Unix,
+waitid with WNOWAIT observes leader exit without releasing its PID/PGID;
+remaining group members are killed before the leader is reaped. On Windows,
+the owned Job is terminated on leader exit. Piped execution observes leader
+exit independently of stream EOF, then drains buffered output after cleanup.
+
 job-progress events carry the current stage, progress percentage, transferred
 bytes, network speed, and best-effort CPU/GPU utilization. Unavailable metrics
 are reported as unavailable instead of being guessed.
+Download speed uses yt-dlp's current transfer rate, which excludes the resume
+offset; the cumulative downloaded-byte counter still includes cached bytes.
 
 Metadata inspection has a bounded 45-second process timeout and bounded output
 retention. Download and inference paths use inactivity watchdogs; CPU
@@ -197,8 +206,13 @@ Rollback preserves both rows and files. Export copies to a temporary sibling,
 flushes the new file, and publishes it with rename; a failed copy preserves
 the old destination. Unix replacement exports preserve the target's owner,
 group, mode and access ACL before writing transcript bytes; an inability to
-preserve those permissions aborts the export and removes staging. This is not
-a power-loss durability guarantee. Linux NFSv4 ACL destinations are rejected
+preserve those permissions aborts the export and removes staging. Publication
+syncs parent directories after rename on Unix; Windows uses MoveFileExW with
+REPLACE_EXISTING and WRITE_THROUGH. Result/checkpoint writers use the same
+publisher and propagate sync failures before acknowledging success or committing
+new history. A sync failure after rename can leave the new file in place while
+the operation reports failure. This does not guarantee survival of physical
+power loss on every filesystem or storage device. Linux NFSv4 ACL destinations are rejected
 until their access policy can be preserved. macOS staging uses an explicit
 non-inheriting ACL at creation to prevent inherited grants during preparation.
 
@@ -208,6 +222,9 @@ and its recovery sidecars. Recovery files remain when the main database cannot
 be removed; reset reports failure instead of reopening a new database with
 old recovery files. The frontend also
 clears its saved cookie-path preference from local storage.
+If a reset fails after partial cleanup, the frontend drops its active transcript
+and cache hints before reconciliation, because backing files may be gone. An
+operation conflict rejected before cleanup preserves the active transcript.
 It does not delete the WebView profile/cache, interface-language preference,
 external cookies.txt files, or exports saved outside WhisperTube storage.
 Job storage is capped at 20 GiB and the current usage is exposed in Settings.
@@ -219,6 +236,12 @@ without resetting models or unrelated history. Deleting progress requires a
 fresh download/conversion/inference for that job on the next retry.
 
 ## Runtime layout and verification
+
+YouTube inspection and fresh downloads require Node.js 22+ or Deno 2.3+.
+The installer supplies yt-dlp EJS scripts, but the JavaScript runtime is an
+explicit external prerequisite. The backend probes the runtime version and
+returns a dedicated source error when it is unavailable. Other supported
+sources and inference from a reusable WAV do not require this prerequisite.
 
 Development runtime binaries live under src-tauri/runtime/<platform> so Tauri
 can bundle them as resources. In packaged builds, the bundled runtime is

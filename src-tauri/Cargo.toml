@@ -35,3 +35,8 @@ tauri-plugin-updater = { version = "2.11.0", default-features = false, features 
 tauri-plugin-process = "2.3.1"
 tauri-plugin-single-instance = "2"
 sysinfo = "0.33"
+
+[target.'cfg(unix)'.dependencies]
+# Already in the dependency graph. Use the platform's siginfo_t/WAIT constants
+# instead of duplicating incompatible Linux/macOS FFI layouts.
+libc = "0.2"

@@ -258,12 +258,15 @@ pub(crate) fn write_wav_header(writer: &mut impl Write, bytes: u64) -> Result<()
 
 fn owned_directory(path: &Path) -> Result<(), String> {
     match fs::create_dir(path) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            crate::durable::sync_parent(path).map_err(|e| format!("Gagal flush folder resume: {e}"))
+        }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             let meta = fs::symlink_metadata(path)
                 .map_err(|e| format!("Gagal memvalidasi folder resume: {e}"))?;
             if meta.is_dir() && !meta.file_type().is_symlink() {
-                Ok(())
+                crate::durable::sync_parent(path)
+                    .map_err(|e| format!("Gagal flush folder resume: {e}"))
             } else {
                 Err("Folder resume bukan direktori biasa.".into())
             }
@@ -284,7 +287,8 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
             .and_then(|_| file.sync_all())
             .map_err(|e| format!("Gagal menyimpan checkpoint: {e}"))?;
         drop(file);
-        fs::rename(&temporary, path).map_err(|e| format!("Gagal mengaktifkan checkpoint: {e}"))
+        crate::durable::publish(&temporary, path)
+            .map_err(|e| format!("Gagal mengaktifkan checkpoint: {e}"))
     })();
     if result.is_err() {
         if let Err(error) = fs::remove_file(&temporary) {

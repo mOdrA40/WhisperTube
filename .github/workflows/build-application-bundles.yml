@@ -333,6 +333,8 @@ jobs:
           - Debian/Ubuntu x64: run `sudo apt install ./WhisperTube_*_amd64.deb`.
 
           Every installer has a matching `.sha256` file for integrity verification. Models are downloaded by the app when first selected.
+
+          YouTube prerequisite: install Node.js 22+ or Deno 2.3+, ensure it is on PATH, then restart WhisperTube. The installer includes yt-dlp EJS scripts but does not include a JavaScript runtime. Other supported sources do not require it.
           EOF
           )
 

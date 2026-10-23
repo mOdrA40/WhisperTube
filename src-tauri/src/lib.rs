@@ -3,6 +3,7 @@ mod archive;
 mod checkpoint;
 mod commands;
 mod cookies;
+mod durable;
 #[cfg(unix)]
 mod export_permissions;
 mod history;

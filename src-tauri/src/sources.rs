@@ -423,7 +423,7 @@ pub fn js_runtime_args(
         // Preserve the platform's existing executable lookup when it resolves
         // a runtime outside PATH. Without an absolute identity, do not cache it.
         let mut command = Command::new("node");
-        command.arg("--version");
+        configure_node_version_probe(&mut command);
         return Ok(
             if crate::process::probe_optional_runtime(
                 &mut command,
@@ -443,7 +443,7 @@ pub fn js_runtime_args(
         cancelled,
         || {
             let mut command = Command::new(&program);
-            command.arg("--version");
+            configure_node_version_probe(&mut command);
             crate::process::probe_optional_runtime(
                 &mut command,
                 Duration::from_secs(3),
@@ -465,6 +465,53 @@ pub fn js_runtime_args(
     } else {
         Vec::new()
     })
+}
+
+const NODE_VERSION_CHECK: &str =
+    "process.exit(Number(process.versions.node.split('.')[0]) >= 22 ? 0 : 1)";
+const DENO_VERSION_CHECK: &str = "const [major,minor]=Deno.version.deno.split('.').map(Number); Deno.exit(major>2||(major===2&&minor>=3)?0:1)";
+
+fn configure_node_version_probe(command: &mut Command) {
+    command.args(["-e", NODE_VERSION_CHECK]);
+}
+
+/// EJS scripts ship in yt-dlp, but YouTube still needs a supported JS runtime.
+/// Other platforms remain usable without this external prerequisite.
+pub fn source_js_runtime_args(
+    url: &str,
+    active_pid: &Mutex<Option<u32>>,
+    cancelled: &AtomicBool,
+) -> Result<Vec<String>, String> {
+    let args = js_runtime_args(active_pid, cancelled)?;
+    if !args.is_empty() || !is_youtube_source(url) {
+        return Ok(args);
+    }
+    let mut deno = Command::new("deno");
+    deno.args(["eval", DENO_VERSION_CHECK]);
+    if crate::process::probe_optional_runtime(
+        &mut deno,
+        Duration::from_secs(3),
+        active_pid,
+        cancelled,
+    )? {
+        return Ok(vec!["--js-runtimes".into(), "deno".into()]);
+    }
+    require_source_js_runtime(url, args)
+}
+
+fn is_youtube_source(url: &str) -> bool {
+    Url::parse(url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .is_some_and(|host| host_matches(&host, "youtube.com") || host_matches(&host, "youtu.be"))
+}
+
+fn require_source_js_runtime(url: &str, args: Vec<String>) -> Result<Vec<String>, String> {
+    if is_youtube_source(url) && args.is_empty() {
+        Err(format!("{SOURCE_JS_RUNTIME_ERROR_PREFIX}YouTube memerlukan Node.js 22+ atau Deno 2.3+ pada PATH. Runtime JavaScript tidak dibundel; pasang runtime lalu mulai ulang WhisperTube."))
+    } else {
+        Ok(args)
+    }
 }
 
 fn contains_any(value: &str, needles: &[&str]) -> bool {
@@ -620,7 +667,7 @@ pub async fn inspect_media(
         }
         let cookie_jar = CookieJar::prepare(&app, cookies_path.as_deref())
             .map_err(|error| format!("{SOURCE_COOKIE_FILE_ERROR_PREFIX}{error}"))?;
-        let runtime_args = js_runtime_args(&active_pid, &cancelled)?;
+        let runtime_args = source_js_runtime_args(&safe_url, &active_pid, &cancelled)?;
         let output = {
             let mut attempt = 0;
             loop {
@@ -701,6 +748,33 @@ pub async fn inspect_media(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn youtube_requires_js_but_other_sources_do_not() {
+        for url in [
+            "https://youtube.com/watch?v=x",
+            "https://www.youtube.com/watch?v=x",
+            "https://youtu.be/x",
+        ] {
+            let error = super::require_source_js_runtime(url, vec![]).unwrap_err();
+            assert!(error.starts_with("media_source_js_runtime:"));
+            assert!(error.contains("Node.js 22+"));
+            assert!(error.contains("Deno 2.3+"));
+            let args = vec!["--js-runtimes".into(), "node:/runtime/node".into()];
+            assert_eq!(
+                super::require_source_js_runtime(url, args.clone()).unwrap(),
+                args
+            );
+        }
+        for url in [
+            "https://vimeo.com/123",
+            "https://www.tiktok.com/video/123",
+            "https://notyoutube.com/123",
+        ] {
+            assert!(super::require_source_js_runtime(url, vec![])
+                .unwrap()
+                .is_empty());
+        }
+    }
     #[cfg(unix)]
     #[test]
     fn node_lookup_preserves_path_precedence_for_symlinks_and_skips_broken_links() {

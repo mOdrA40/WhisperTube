@@ -40,6 +40,12 @@ Check Unix script syntax locally with `bash -n scripts/<script-name>.sh`.
 
 ## Node.js, Rust, or Cargo is not recognized
 
+For an installed app, YouTube also needs Node.js 22+ or Deno 2.3+ on PATH;
+neither JavaScript runtime is included in the installer. yt-dlp's EJS scripts
+are included. Install a supported runtime and restart WhisperTube so it inherits
+the updated PATH. Other supported sources remain available without it. The
+YouTube preflight checks the runtime version before invoking the downloader.
+
 Install Node.js 22 or newer and Rust with rustup. Close the current terminal,
 open a new one, and confirm:
 

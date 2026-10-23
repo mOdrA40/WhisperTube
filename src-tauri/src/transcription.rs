@@ -21,7 +21,7 @@ use crate::{
     history, models,
     paths::{engine_path_cancelable, is_regular_file, jobs_dir, model_path, tool_path},
     process, resources,
-    sources::{js_runtime_args, validate_media_duration, validate_media_url},
+    sources::{source_js_runtime_args, validate_media_duration, validate_media_url},
     system::{
         cuda_driver_is_compatible, detect_gpu, detect_nvidia, detect_nvidia_device,
         detect_nvidia_driver_version, ensure_cuda_install_supported, UsageMonitor,
@@ -138,7 +138,8 @@ struct JobDirectoryGuard {
 
 impl JobDirectoryGuard {
     fn create(path: PathBuf) -> Result<Self, String> {
-        fs::create_dir_all(&path).map_err(|e| format!("Gagal membuat job directory: {e}"))?;
+        crate::durable::create_dir_all(&path)
+            .map_err(|e| format!("Gagal membuat job directory: {e}"))?;
         let marker = path.join(".in-progress");
         if let Err(error) = File::create(&marker) {
             let _ = fs::remove_dir_all(&path);
@@ -208,7 +209,8 @@ fn write_file_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
         file.sync_all()
             .map_err(|e| format!("Gagal flush result sementara: {e}"))?;
         drop(file);
-        fs::rename(&temporary, path).map_err(|e| format!("Gagal mengaktifkan result.json: {e}"))?;
+        crate::durable::publish(&temporary, path)
+            .map_err(|e| format!("Gagal mengaktifkan result.json: {e}"))?;
         Ok(())
     })();
     if result.is_err() {
@@ -650,13 +652,13 @@ fn run_download(
             "--quiet",
             "--progress",
             "--progress-template",
-            "download:WT_PROGRESS=%(progress._percent_str)s|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s",
+            "download:WT_PROGRESS=%(progress._percent_str)s|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s|%(progress.speed)s",
             "-f",
             "bestaudio/best",
             "-o",
         ])
         .arg(&template)
-        .args(js_runtime_args(context.active_pid, context.cancelled)?)
+        .args(source_js_runtime_args(&request.url, context.active_pid, context.cancelled)?)
         .args(cookie_jar.args())
         .arg(&request.url)
         .stdout(Stdio::piped())
@@ -664,8 +666,8 @@ fn run_download(
         .stdin(Stdio::null());
 
     let progress_re =
-        Regex::new(r"WT_PROGRESS=\s*([0-9.]+)%\|([0-9]+|NA)\|([0-9]+|NA)\|([0-9]+|NA)").unwrap();
-    let download_started_at = Instant::now();
+        Regex::new(r"WT_PROGRESS=\s*([0-9.]+)%\|([0-9]+|NA)\|([0-9]+|NA)\|([0-9]+|NA)\|([^\s|]+)")
+            .unwrap();
     let mut last_disk_check = Instant::now() - DISK_CHECK_INTERVAL;
     let (status, stderr) = run_media_command(
         context,
@@ -680,10 +682,11 @@ fn run_download(
                     .get(3)
                     .and_then(|value| value.as_str().parse().ok())
                     .or_else(|| caps.get(4).and_then(|value| value.as_str().parse().ok()));
-                let network_bytes_per_second = downloaded_bytes.and_then(|downloaded| {
-                    let elapsed = download_started_at.elapsed().as_secs_f64();
-                    (elapsed > 0.0).then(|| (downloaded as f64 / elapsed) as u64)
-                });
+                // yt-dlp subtracts the resume offset when calculating speed.
+                // downloaded_bytes includes cached bytes and cannot be used
+                // as the numerator of this invocation's transfer rate.
+                let network_bytes_per_second =
+                    caps.get(5).and_then(|value| download_speed(value.as_str()));
                 if let Ok(percent) = caps[1].parse::<f64>() {
                     context.emit(ProgressUpdate {
                         stage: "downloading",
@@ -748,6 +751,13 @@ fn run_download(
         return Err("Audio sumber melebihi batas ukuran download yang diizinkan.".into());
     }
     Ok(source)
+}
+
+fn download_speed(raw: &str) -> Option<u64> {
+    raw.parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .map(|value| value as u64)
 }
 
 fn run_ffmpeg(
@@ -1733,6 +1743,15 @@ pub fn pipeline(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn download_speed_uses_the_upstream_transfer_rate_not_cached_bytes() {
+        assert_eq!(super::download_speed("1048576.5"), Some(1_048_576));
+        assert_eq!(super::download_speed("1.048576e6"), Some(1_048_576));
+        assert_eq!(super::download_speed("0"), Some(0));
+        for unavailable in ["NA", "None", "nan", "inf", "-1"] {
+            assert_eq!(super::download_speed(unavailable), None);
+        }
+    }
     use super::{
         ffmpeg_target_duration, find_reusable_audio_job, normalize_utf8_bytes,
         parse_whisper_result, remaining_disk_reservation, run_cached_probe,

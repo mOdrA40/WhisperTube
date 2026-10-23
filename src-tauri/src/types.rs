@@ -208,6 +208,45 @@ pub struct TranscriptResult {
     pub vtt_path: String,
     #[serde(default)]
     pub audio_path: Option<String>,
+    #[serde(default = "transcript_available_default")]
+    pub transcript_available: bool,
+}
+
+fn transcript_available_default() -> bool {
+    true
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryFileKind {
+    Audio,
+    Txt,
+    Srt,
+    Vtt,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryFileScope {
+    Audio,
+    Transcript,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryFileInfo {
+    pub kind: HistoryFileKind,
+    pub path: String,
+    pub bytes: Option<u64>,
+    pub available: bool,
+    pub pending_deletion: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryFilesDeleteOutcome {
+    pub updated_ids: Vec<i64>,
+    pub cleanup_warnings: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -247,6 +286,13 @@ pub struct JobCacheEntry {
     pub source_url: String,
     pub bytes: Option<u64>,
     pub modified_at: String,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptionResumeStage {
+    Download,
+    Audio,
 }
 
 #[derive(Deserialize, Clone)]

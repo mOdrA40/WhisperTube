@@ -7,6 +7,8 @@ import { useWhisperTube } from "./useWhisperTube";
 
 const services = vi.hoisted(() => ({
   getSystemStatus: vi.fn(),
+  getTranscriptionResumeStage: vi.fn(),
+  cancelJob: vi.fn(),
   listModels: vi.fn(),
   listHistory: vi.fn(),
   listJobCache: vi.fn(),
@@ -14,6 +16,9 @@ const services = vi.hoisted(() => ({
   inspectMedia: vi.fn(),
   startTranscription: vi.fn(),
   deleteHistory: vi.fn(),
+  deleteHistoryFiles: vi.fn(),
+  listHistoryFiles: vi.fn(),
+  revealHistoryFile: vi.fn(),
   deleteModel: vi.fn(),
   loadHistory: vi.fn(),
   resetUserData: vi.fn(),
@@ -28,7 +33,6 @@ const services = vi.hoisted(() => ({
 
 vi.mock("../services/tauri", () => ({
   ...services,
-  cancelJob: vi.fn(),
   downloadModel: vi.fn(),
   exportTranscriptFile: vi.fn(),
   installAccelerator: vi.fn(),
@@ -105,6 +109,8 @@ describe("useWhisperTube", () => {
     window.localStorage.clear();
     vi.clearAllMocks();
     services.getSystemStatus.mockResolvedValue(system);
+    services.getTranscriptionResumeStage.mockReset().mockResolvedValue(null);
+    services.cancelJob.mockResolvedValue(undefined);
     services.listModels.mockResolvedValue(models);
     services.listHistory.mockResolvedValue({ items: [], hasMore: false, totalCount: 0 });
     services.listJobCache.mockResolvedValue([]);
@@ -113,6 +119,9 @@ describe("useWhisperTube", () => {
     services.startTranscription.mockResolvedValue(transcript);
     services.loadHistory.mockResolvedValue(transcript);
     services.deleteHistory.mockResolvedValue({ deletedIds: [1], cleanupWarnings: [] });
+    services.deleteHistoryFiles.mockResolvedValue({ updatedIds: [1], cleanupWarnings: [] });
+    services.listHistoryFiles.mockResolvedValue([]);
+    services.revealHistoryFile.mockResolvedValue(undefined);
     services.checkForAppUpdate.mockResolvedValue(null);
     const unlisten = vi.fn();
     services.subscribeToProgress.mockResolvedValue(unlisten);
@@ -127,6 +136,89 @@ describe("useWhisperTube", () => {
     expect(services.disposeAppUpdate).not.toHaveBeenCalled();
     unmount();
     expect(services.disposeAppUpdate).toHaveBeenCalledOnce();
+  });
+
+  it.each(["RAM tidak cukup", "Job dibatalkan.", "Proses melewati batas waktu"])("offers persisted resume after transcription fails: %s", async (message) => {
+    const { result } = renderHook(() => useWhisperTube(), { wrapper });
+    await waitFor(() => expect(result.current.system).toEqual(system));
+    act(() => result.current.setUrl(metadata.webpageUrl));
+    await act(async () => result.current.inspectVideo());
+    expect(result.current.resumeStage).toBeNull();
+    services.getTranscriptionResumeStage.mockResolvedValue("audio");
+    services.startTranscription.mockRejectedValueOnce(new Error(message));
+    await act(async () => result.current.startTranscription());
+    await waitFor(() => expect(result.current.resumeStage).toBe("audio"));
+    expect(result.current.canStart).toBe(true);
+    act(() => result.current.setLanguage("en"));
+    expect(result.current.resumeStage).toBe("audio"); // Audio is reusable with different inference settings.
+  });
+
+  it("waits for a manually cancelled job to settle before offering resume", async () => {
+    let rejectJob!: (error: Error) => void;
+    services.startTranscription.mockReturnValueOnce(new Promise((_, reject) => { rejectJob = reject; }));
+    const { result } = renderHook(() => useWhisperTube(), { wrapper });
+    await waitFor(() => expect(result.current.system).toEqual(system));
+    act(() => result.current.setUrl(metadata.webpageUrl));
+    await act(async () => result.current.inspectVideo());
+    let job!: Promise<void>;
+    act(() => { job = result.current.startTranscription(); });
+    services.getTranscriptionResumeStage.mockResolvedValue("audio");
+    await act(async () => result.current.cancelJob());
+    expect(services.cancelJob).toHaveBeenCalledOnce();
+    expect(result.current.busy).toBe(true);
+    expect(result.current.resumeStage).toBeNull();
+    await act(async () => { rejectJob(new Error("Job dibatalkan.")); await job; });
+    await waitFor(() => expect(result.current.resumeStage).toBe("audio"));
+  });
+
+  it("finds saved downloads after reopening and clears resume after cache discard", async () => {
+    services.getTranscriptionResumeStage.mockResolvedValue("download");
+    const first = renderHook(() => useWhisperTube(), { wrapper });
+    await waitFor(() => expect(first.result.current.system).toEqual(system));
+    act(() => first.result.current.setUrl(metadata.webpageUrl));
+    await act(async () => first.result.current.inspectVideo());
+    expect(first.result.current.resumeStage).toBe("download");
+    first.unmount();
+    const { result } = renderHook(() => useWhisperTube(), { wrapper });
+    await waitFor(() => expect(result.current.system).toEqual(system));
+    act(() => result.current.setUrl(metadata.webpageUrl));
+    await act(async () => result.current.inspectVideo());
+    expect(result.current.resumeStage).toBe("download");
+    services.getTranscriptionResumeStage.mockResolvedValue(null);
+    await act(async () => result.current.discardJobCache("unfinished"));
+    await waitFor(() => expect(result.current.resumeStage).toBeNull());
+  });
+
+  it("does not promise resume after a failure that saved no reusable files", async () => {
+    const { result } = renderHook(() => useWhisperTube(), { wrapper });
+    await waitFor(() => expect(result.current.system).toEqual(system));
+    act(() => result.current.setUrl(metadata.webpageUrl));
+    await act(async () => result.current.inspectVideo());
+    services.startTranscription.mockRejectedValueOnce(new Error("RAM tidak cukup"));
+    await act(async () => result.current.startTranscription());
+    expect(result.current.resumeStage).toBeNull();
+    expect(result.current.retryAvailable).toBe(true);
+    expect(result.current.canStart).toBe(true);
+    await act(async () => result.current.startTranscription());
+    expect(result.current.retryAvailable).toBe(false);
+    expect(result.current.result).toEqual(transcript);
+  });
+
+  it("ignores a late resume lookup for a different video", async () => {
+    let finishOld!: (stage: string) => void;
+    services.getTranscriptionResumeStage.mockReturnValueOnce(new Promise((resolve) => { finishOld = resolve; }));
+    const { result } = renderHook(() => useWhisperTube(), { wrapper });
+    await waitFor(() => expect(result.current.system).toEqual(system));
+    act(() => result.current.setUrl(metadata.webpageUrl));
+    await act(async () => result.current.inspectVideo());
+    expect(result.current.checkingResume).toBe(true);
+    expect(result.current.canStart).toBe(false);
+    services.inspectMedia.mockResolvedValueOnce({ ...metadata, webpageUrl: "https://www.youtube.com/watch?v=other" });
+    act(() => result.current.setUrl("https://www.youtube.com/watch?v=other"));
+    await act(async () => result.current.inspectVideo());
+    await act(async () => finishOld("audio"));
+    expect(result.current.resumeStage).toBeNull();
+    expect(result.current.checkingResume).toBe(false);
   });
 
   it("discards only the selected unfinished job and refreshes storage without resetting models/history", async () => {
@@ -178,6 +270,33 @@ describe("useWhisperTube", () => {
     expect(result.current.result).toEqual(transcript);
     expect(result.current.error).toContain("operation succeeded");
     expect(result.current.error).toContain("History tidak tersedia");
+  });
+
+  it.each(["audio", "transcript"] as const)("updates an open result after deleting %s without deleting its history", async (scope) => {
+    const { result } = renderHook(() => useWhisperTube(), { wrapper });
+    await waitFor(() => expect(result.current.system).toEqual(system));
+    act(() => result.current.setUrl(metadata.webpageUrl));
+    await act(async () => result.current.inspectVideo());
+    await act(async () => result.current.startTranscription());
+    const updated = scope === "audio" ? { ...transcript, audioPath: null, transcriptAvailable: true }
+      : { ...transcript, text: "", segments: [], txtPath: "", srtPath: "", vttPath: "", transcriptAvailable: false };
+    services.loadHistory.mockResolvedValueOnce(updated);
+    await act(async () => result.current.deleteHistoryFiles([1], scope));
+    expect(services.deleteHistoryFiles).toHaveBeenCalledWith([1], scope);
+    expect(services.deleteHistory).not.toHaveBeenCalled();
+    expect(result.current.result).toEqual(updated);
+  });
+
+  it("drops stale open text after a committed file deletion even if reloading fails", async () => {
+    const { result } = renderHook(() => useWhisperTube(), { wrapper });
+    await waitFor(() => expect(result.current.system).toEqual(system));
+    act(() => result.current.setUrl(metadata.webpageUrl));
+    await act(async () => result.current.inspectVideo());
+    await act(async () => result.current.startTranscription());
+    services.loadHistory.mockRejectedValueOnce(new Error("Reload failed"));
+    await act(async () => result.current.deleteHistoryFiles([1], "transcript"));
+    expect(result.current.result).toBeNull();
+    expect(result.current.error).toContain("Reload failed");
   });
 
   it("does not block Auto on CUDA VRAM when CUDA is not installable", async () => {

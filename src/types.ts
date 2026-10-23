@@ -154,7 +154,13 @@ export type TranscriptResult = {
   srtPath: string;
   vttPath: string;
   audioPath: string | null;
+  transcriptAvailable?: boolean;
 };
+
+export type HistoryFileKind = "audio" | "txt" | "srt" | "vtt";
+export type HistoryFileScope = "audio" | "transcript";
+export type HistoryFileInfo = { kind: HistoryFileKind; path: string; bytes: number | null; available: boolean; pendingDeletion: boolean };
+export type HistoryFilesDeleteOutcome = { updatedIds: number[]; cleanupWarnings: string[] };
 
 export type HistoryItem = {
   id: number;
@@ -186,6 +192,8 @@ export type HistoryPageResult = {
   hasMore: boolean;
   totalCount: number;
 };
+
+export type TranscriptionResumeStage = "download" | "audio";
 
 export type TranscriptRequest = {
   url: string;

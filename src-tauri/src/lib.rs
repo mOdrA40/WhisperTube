@@ -6,6 +6,7 @@ mod cookies;
 #[cfg(unix)]
 mod export_permissions;
 mod history;
+mod history_files;
 mod io_cancel;
 mod job_cache;
 mod models;
@@ -84,10 +85,14 @@ pub fn run() {
             commands::end_app_update,
             commands::inspect_media,
             commands::start_transcription,
+            commands::transcription_resume_stage,
             commands::cancel_job,
             commands::list_history,
             commands::load_history,
             commands::delete_history,
+            commands::history_files,
+            commands::delete_history_files,
+            commands::reveal_history_file,
             commands::list_job_cache,
             commands::discard_job_cache,
             commands::copy_export,

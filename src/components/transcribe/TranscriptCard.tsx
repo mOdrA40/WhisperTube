@@ -30,13 +30,14 @@ export function TranscriptCard({
   transcriptionElapsedMs,
 }: TranscriptCardProps) {
   const { t } = useI18n();
+  const transcriptAvailable = result.transcriptAvailable !== false;
 
   return (
     <div className="transcript-card card">
       <div className="transcript-toolbar">
         <div>
           <span className="success-label">
-            <Check size={14} /> {t("transcript.complete")}
+            <Check size={14} /> {t(transcriptAvailable ? "transcript.complete" : "history.savedFiles")}
           </span>
           <h3>{result.title}</h3>
           <p>
@@ -47,17 +48,17 @@ export function TranscriptCard({
           </p>
         </div>
         <div className="toolbar-actions">
-          <button type="button" className="secondary-button" onClick={onCopy} disabled={operationActive}>
+          <button type="button" className="secondary-button" onClick={onCopy} disabled={operationActive || !transcriptAvailable}>
             {copied ? <Check size={16} /> : <Copy size={16} />}
             {copied ? t("transcript.copied") : t("transcript.copy")}
           </button>
-          <button type="button" className="secondary-button" onClick={() => onExport("txt")} disabled={operationActive}>
+          <button type="button" className="secondary-button" onClick={() => onExport("txt")} disabled={operationActive || !transcriptAvailable}>
             <FileText size={16} /> TXT
           </button>
-          <button type="button" className="secondary-button" onClick={() => onExport("srt")} disabled={operationActive}>
+          <button type="button" className="secondary-button" onClick={() => onExport("srt")} disabled={operationActive || !transcriptAvailable}>
             SRT
           </button>
-          <button type="button" className="secondary-button" onClick={() => onExport("vtt")} disabled={operationActive}>
+          <button type="button" className="secondary-button" onClick={() => onExport("vtt")} disabled={operationActive || !transcriptAvailable}>
             VTT
           </button>
           {result.audioPath && (
@@ -72,15 +73,16 @@ export function TranscriptCard({
         <Search size={16} />
         <input
           value={searchQuery}
+          disabled={!transcriptAvailable}
           onChange={(event) => onSearchChange(event.target.value)}
           placeholder={t("transcript.search")}
           aria-label={t("transcript.search")}
         />
-        <span>{filteredSegments.length} {t("transcript.segments")}</span>
+        <span>{transcriptAvailable ? filteredSegments.length : 0} {t("transcript.segments")}</span>
       </div>
 
       <div className="segments">
-        {filteredSegments.length > 0 ? (
+        {transcriptAvailable && filteredSegments.length > 0 ? (
           <Virtuoso
             className="transcript-virtual-list"
             data={filteredSegments}
@@ -94,7 +96,7 @@ export function TranscriptCard({
             )}
           />
         ) : (
-          <div className="empty-inline">{t("transcript.empty")}</div>
+          <div className="empty-inline">{t(transcriptAvailable ? "transcript.empty" : "history.transcriptRemoved")}</div>
         )}
       </div>
     </div>

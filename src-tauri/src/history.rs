@@ -108,10 +108,16 @@ pub fn init_db(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(db_path)
 }
 
-fn initialize_schema(conn: &Connection) -> Result<(), String> {
+pub(crate) fn initialize_schema(conn: &Connection) -> Result<(), String> {
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS pending_job_deletions (job_name TEXT PRIMARY KEY NOT NULL);
+        CREATE TABLE IF NOT EXISTS history_file_deletions (
+            history_id INTEGER NOT NULL,
+            kind TEXT NOT NULL CHECK(kind IN ('audio','transcript')),
+            pending INTEGER NOT NULL DEFAULT 1,
+            PRIMARY KEY(history_id, kind)
+        );
         CREATE TABLE IF NOT EXISTS history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             title TEXT NOT NULL,
@@ -130,7 +136,7 @@ fn initialize_schema(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-fn open_connection(app: &AppHandle) -> Result<Connection, String> {
+pub(crate) fn open_connection(app: &AppHandle) -> Result<Connection, String> {
     let conn = Connection::open(database_path(app)?)
         .map_err(|e| format!("Gagal membuka history database: {e}"))?;
     configure_connection(&conn)?;
@@ -230,6 +236,9 @@ pub fn load_history(app: &AppHandle, id: i64) -> Result<TranscriptResult, String
         .map_err(|e| format!("History tidak ditemukan: {e}"))?;
     let job_dir = job_dir_for_result(app, &result_path)?
         .ok_or_else(|| "File transcript history tidak ditemukan.".to_string())?;
+    if crate::history_files::is_deleted(&conn, id, "transcript")? {
+        return crate::history_files::metadata_only_result(&conn, id, &job_dir);
+    }
     let safe_result_path = job_dir.join("result.json");
     let canonical_result = fs::canonicalize(&safe_result_path)
         .map_err(|e| format!("Gagal memvalidasi file history: {e}"))?;
@@ -244,7 +253,14 @@ pub fn load_history(app: &AppHandle, id: i64) -> Result<TranscriptResult, String
     file.take(MAX_TRANSCRIPT_RESULT_BYTES.saturating_add(1))
         .read_to_end(&mut bytes)
         .map_err(|e| format!("Gagal membaca file history: {e}"))?;
-    decode_history_result(&bytes)
+    let mut result = decode_history_result(&bytes)?;
+    result.transcript_available = true;
+    if crate::history_files::is_deleted(&conn, id, "audio")?
+        || !crate::paths::is_regular_file(&job_dir.join("audio.wav"))
+    {
+        result.audio_path = None;
+    }
+    Ok(result)
 }
 
 fn decode_history_result(bytes: &[u8]) -> Result<TranscriptResult, String> {
@@ -288,7 +304,10 @@ pub fn referenced_job_directories(app: &AppHandle) -> Result<HashSet<PathBuf>, S
     Ok(directories)
 }
 
-fn job_dir_for_result_in(jobs_root: &Path, result_path: &str) -> Result<Option<PathBuf>, String> {
+pub(crate) fn job_dir_for_result_in(
+    jobs_root: &Path,
+    result_path: &str,
+) -> Result<Option<PathBuf>, String> {
     let canonical_jobs_root = fs::canonicalize(jobs_root)
         .map_err(|e| format!("Gagal memvalidasi history storage: {e}"))?;
     let result_path = PathBuf::from(result_path);
@@ -382,10 +401,12 @@ fn cleanup_committed_job(job_dir: &Path) -> Result<(), String> {
     }
 }
 
-fn cleanup_job_storage_in(conn: &Connection, root: &Path) -> Result<(), String> {
+pub(crate) fn cleanup_job_storage_in(conn: &Connection, root: &Path) -> Result<(), String> {
     let canonical_root =
         fs::canonicalize(root).map_err(|e| format!("Gagal memvalidasi job storage: {e}"))?;
     let mut warnings = cleanup_pending_deletions(conn, root)?;
+    warnings.extend(crate::history_files::cleanup_pending(conn, root)?);
+    let removed_transcripts = crate::history_files::removed_transcript_directories(conn, root)?;
     let mut statement = conn
         .prepare("SELECT result_path FROM history")
         .map_err(|e| format!("Gagal membaca referensi history: {e}"))?;
@@ -419,6 +440,9 @@ fn cleanup_job_storage_in(conn: &Connection, root: &Path) -> Result<(), String> 
             continue;
         }
         if committed_jobs.contains(&canonical_job_dir) {
+            if removed_transcripts.contains(&canonical_job_dir) {
+                continue;
+            }
             if let Err(error) = cleanup_committed_job(&canonical_job_dir) {
                 warnings.push(format!(
                     "Pembersihan history {} tertunda: {error}",
@@ -477,6 +501,12 @@ fn queue_history_deletion(
                 )
                 .map_err(|e| format!("Gagal menyimpan intent penghapusan: {e}"))?;
         }
+        transaction
+            .execute(
+                "DELETE FROM history_file_deletions WHERE history_id = ?1",
+                [id],
+            )
+            .map_err(|e| format!("Gagal membersihkan status file history: {e}"))?;
         transaction
             .execute("DELETE FROM history WHERE id = ?1", [id])
             .map_err(|e| format!("Gagal menghapus history {id}: {e}"))?;
@@ -899,6 +929,7 @@ mod tests {
                 vtt_path: job.join("transcript.vtt").to_string_lossy().into_owned(),
                 audio_path: keep_audio
                     .then(|| job.join("audio.wav").to_string_lossy().into_owned()),
+                transcript_available: true,
             };
             fs::write(
                 job.join("result.json"),
@@ -919,6 +950,43 @@ mod tests {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.root).unwrap();
         }
+    }
+
+    #[test]
+    fn whole_history_deletion_removes_partial_file_intents_in_the_same_transaction() {
+        let fixture = Fixture::new();
+        let mut conn = fixture.open();
+        let job = fixture.completed_job(&conn, "partial", true);
+        let mut legacy: serde_json::Value =
+            serde_json::from_slice(&fs::read(job.join("result.json")).unwrap()).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("transcriptAvailable");
+        assert!(
+            decode_history_result(&serde_json::to_vec(&legacy).unwrap())
+                .unwrap()
+                .transcript_available
+        );
+        conn.execute(
+            "INSERT INTO history_file_deletions(history_id,kind) VALUES (1,'transcript')",
+            [],
+        )
+        .unwrap();
+        queue_history_deletion(&mut conn, &fixture.root, &[1]).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM history_file_deletions", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert!(crate::history_files::cleanup_pending(&conn, &fixture.root)
+            .unwrap()
+            .is_empty());
+        assert!(cleanup_pending_deletions(&conn, &fixture.root)
+            .unwrap()
+            .is_empty());
+        assert!(!job.exists());
     }
 
     fn expire_job(path: &std::path::Path) {

@@ -284,6 +284,15 @@ fn find_reusable_audio_job(
     request: &TranscriptRequest,
     committed_jobs: &HashSet<PathBuf>,
 ) -> Result<Option<PathBuf>, String> {
+    find_reusable_audio_job_for_source(jobs_dir, &request.url, request.duration, committed_jobs)
+}
+
+fn find_reusable_audio_job_for_source(
+    jobs_dir: &Path,
+    url: &str,
+    duration: f64,
+    committed_jobs: &HashSet<PathBuf>,
+) -> Result<Option<PathBuf>, String> {
     let canonical_root = fs::canonicalize(jobs_dir)
         .map_err(|error| format!("Gagal memvalidasi folder cache audio: {error}"))?;
     let mut candidates = Vec::new();
@@ -313,11 +322,11 @@ fn find_reusable_audio_job(
             continue;
         };
         if !matches!(cache.version, 1 | AUDIO_CACHE_METADATA_VERSION)
-            || validate_media_url(&cache.url).ok().as_deref() != Some(request.url.as_str())
+            || validate_media_url(&cache.url).ok().as_deref() != Some(url)
             || !cache.duration.is_finite()
             || cache.duration <= 0.0
             || cache.duration > MAX_MEDIA_DURATION_SECONDS
-            || (cache.duration - request.duration).abs() > 1.0
+            || (cache.duration - duration).abs() > 1.0
         {
             continue;
         }
@@ -328,7 +337,7 @@ fn find_reusable_audio_job(
         }
         if cache.audio_ready {
             let audio = canonical_job_dir.join("audio.wav");
-            if checkpoint::PcmAudio::inspect(&audio, request.duration, || false).is_err() {
+            if checkpoint::PcmAudio::inspect(&audio, duration, || false).is_err() {
                 continue;
             }
         }
@@ -339,6 +348,54 @@ fn find_reusable_audio_job(
     }
     candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.0));
     Ok(candidates.into_iter().next().map(|(_, path)| path))
+}
+
+fn resume_stage_in(
+    root: &Path,
+    url: &str,
+    duration: f64,
+    committed: &HashSet<PathBuf>,
+) -> Result<Option<crate::types::TranscriptionResumeStage>, String> {
+    use crate::types::TranscriptionResumeStage;
+    let Some(job) = find_reusable_audio_job_for_source(root, url, duration, committed)? else {
+        return Ok(None);
+    };
+    if read_audio_cache_metadata(&job.join(AUDIO_CACHE_METADATA_FILE))
+        .is_some_and(|cache| cache.audio_ready)
+    {
+        return Ok(Some(TranscriptionResumeStage::Audio));
+    }
+    for entry in fs::read_dir(&job).map_err(|e| format!("Gagal membaca progres unduhan: {e}"))? {
+        let entry = entry.map_err(|e| format!("Gagal membaca progres unduhan: {e}"))?;
+        let metadata = fs::symlink_metadata(entry.path())
+            .map_err(|e| format!("Gagal memeriksa progres unduhan: {e}"))?;
+        if entry.file_name().to_string_lossy().starts_with("source.")
+            && metadata.is_file()
+            && !metadata.file_type().is_symlink()
+            && metadata.len() > 0
+        {
+            return Ok(Some(TranscriptionResumeStage::Download));
+        }
+    }
+    Ok(None)
+}
+
+// Advisory UI lookup: use the pipeline's own candidate selection, without
+// hashing full audio or promising any completed inference checkpoints. The
+// pipeline revalidates audio and checkpoint settings when the user continues.
+pub fn resume_stage(
+    app: &AppHandle,
+    url: &str,
+    duration: f64,
+) -> Result<Option<crate::types::TranscriptionResumeStage>, String> {
+    let url = validate_media_url(url)?;
+    validate_media_duration(duration, false)?;
+    resume_stage_in(
+        &jobs_dir(app)?,
+        &url,
+        duration,
+        &history::referenced_job_directories(app)?,
+    )
 }
 
 const MAX_CAPTURED_STDERR_BYTES: usize = 64 * 1024;
@@ -1954,7 +2011,7 @@ pub fn pipeline(
                 backend: None, downloaded_bytes: None, total_bytes: None, network_bytes_per_second: None,
             });
         },
-    ).map_err(|error| format!("{error} Bagian yang selesai tersimpan; coba transkripsi lagi dengan sumber dan pengaturan yang sama untuk melanjutkan."))?;
+    ).map_err(|error| format!("{error} Audio dan checkpoint yang berhasil disimpan tetap tersedia. Percobaan dengan sumber dan pengaturan yang sama dapat memakai ulang progres tersebut."))?;
     if context.is_cancelled() {
         return Err("Job dibatalkan.".into());
     }
@@ -1979,6 +2036,7 @@ pub fn pipeline(
     ensure_job_storage_quota(&app)?;
     let result_store_path = job_dir.join("result.json");
     let mut result = TranscriptResult {
+        transcript_available: true,
         history_id: 0,
         title: request.title.clone(),
         channel: request.channel.clone(),
@@ -2154,6 +2212,15 @@ mod tests {
             find_reusable_audio_job(&root, &matching_request, &HashSet::new()).unwrap(),
             Some(fs::canonicalize(&job).unwrap())
         );
+        use crate::types::TranscriptionResumeStage;
+        let stage = |url: &str, committed: &HashSet<std::path::PathBuf>| {
+            super::resume_stage_in(&root, url, matching_request.duration, committed).unwrap()
+        };
+        assert_eq!(
+            stage(&matching_request.url, &HashSet::new()),
+            Some(TranscriptionResumeStage::Audio)
+        );
+        assert_eq!(stage(&other_request.url, &HashSet::new()), None);
         assert_eq!(
             find_reusable_audio_job(&root, &other_request, &HashSet::new()).unwrap(),
             None
@@ -2180,6 +2247,16 @@ mod tests {
         let saved_audio = fs::read(job.join("audio.wav")).unwrap();
         fs::remove_file(job.join("audio.wav")).unwrap();
         write_audio_cache_metadata(&job, &matching_request, false).unwrap();
+        // Metadata alone is not saved work: a cancellation before download
+        // writes bytes must not turn the UI action into Continue.
+        assert_eq!(stage(&matching_request.url, &HashSet::new()), None);
+        fs::write(job.join("source.webm.part"), b"partial download").unwrap();
+        assert_eq!(
+            stage(&matching_request.url, &HashSet::new()),
+            Some(TranscriptionResumeStage::Download)
+        );
+        fs::write(job.join("source.webm.part"), b"").unwrap();
+        assert_eq!(stage(&matching_request.url, &HashSet::new()), None);
         assert_eq!(
             find_reusable_audio_job(&root, &no_keep_request, &HashSet::new()).unwrap(),
             Some(fs::canonicalize(&job).unwrap())
@@ -2194,10 +2271,13 @@ mod tests {
         );
         // A committed row, even with a marker left by a crash, prevents duplication.
         let committed = HashSet::from([fs::canonicalize(&job).unwrap()]);
+        assert_eq!(stage(&matching_request.url, &committed), None);
         assert_eq!(
             find_reusable_audio_job(&root, &no_keep_request, &committed).unwrap(),
             None
         );
+        fs::write(job.join("audio.wav"), b"truncated WAV").unwrap();
+        assert_eq!(stage(&matching_request.url, &HashSet::new()), None);
         fs::remove_dir_all(root).unwrap();
     }
 

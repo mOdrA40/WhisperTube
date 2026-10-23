@@ -68,6 +68,9 @@ export default function App() {
           language={app.language}
           keepAudio={app.keepAudio}
           canStart={app.canStart}
+          resumeStage={app.resumeStage}
+          checkingResume={app.checkingResume}
+          retryAvailable={app.retryAvailable}
           modelDownloadBlocked={app.modelDownloadBlocked}
           runtimeReady={app.runtimeReady}
           computeTargetId={app.computeTargetId}
@@ -118,6 +121,9 @@ export default function App() {
           onLoadMore={app.loadMoreHistory}
           onLoad={app.loadHistory}
           onDelete={app.deleteHistory}
+          onDeleteFiles={app.deleteHistoryFiles}
+          onListFiles={app.listHistoryFiles}
+          onRevealFile={app.revealHistoryFile}
           onTabChange={app.setTab}
         />
       )}

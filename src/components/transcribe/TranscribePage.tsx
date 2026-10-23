@@ -12,6 +12,7 @@ import type {
   Segment,
   SystemStatus,
   TranscriptResult,
+  TranscriptionResumeStage,
   VideoMetadata,
 } from "../../types";
 
@@ -27,6 +28,9 @@ type TranscribePageProps = {
   transcriptionElapsedMs: number | null;
   selectedModel: ModelInfo | undefined;
   canStart: boolean;
+  resumeStage: TranscriptionResumeStage | null;
+  checkingResume: boolean;
+  retryAvailable: boolean;
   modelDownloadBlocked: boolean;
   backend: BackendChoice;
   computeTargetId: string;
@@ -84,6 +88,9 @@ export function TranscribePage({
   transcriptionElapsedMs,
   selectedModel,
   canStart,
+  resumeStage,
+  checkingResume,
+  retryAvailable,
   modelDownloadBlocked,
   backend,
   computeTargetId,
@@ -167,6 +174,9 @@ export function TranscribePage({
           modelId={modelId}
           selectedModel={selectedModel}
           canStart={canStart}
+          resumeStage={resumeStage}
+          checkingResume={checkingResume}
+          retryAvailable={retryAvailable}
           modelDownloadBlocked={modelDownloadBlocked}
           computeTargetId={computeTargetId}
           language={language}

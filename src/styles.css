@@ -1467,6 +1467,46 @@ input:focus-visible,
   box-shadow: 0 24px 70px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.03) inset;
 }
 
+.history-modal-backdrop {
+  grid-template-rows: minmax(0, 1fr);
+}
+
+body:has(.window-titlebar) .history-modal-backdrop {
+  top: 36px;
+}
+
+.history-modal-backdrop .history-delete-modal {
+  max-height: 100%;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.history-modal-backdrop .history-files-modal {
+  width: min(700px, 100%);
+  flex-direction: column;
+  align-items: stretch;
+  overflow: hidden;
+}
+
+.history-files-header, .history-files-footer { flex: 0 0 auto; }
+.history-files-header h3 {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  font-size: 15px;
+  margin-bottom: 5px;
+}
+.history-files-header p { font-size: 11.5px; line-height: 1.5; }
+.history-files-body { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.history-files-list { display: grid; gap: 12px; margin: 16px 0; }
+.history-file-row { display: grid; gap: 8px; padding: 12px; border: 1px solid rgba(255,255,255,.12); border-radius: 10px; }
+.history-file-row code { overflow-wrap: anywhere; white-space: normal; font-size: 12px; }
+.history-file-row .secondary-button { justify-self: start; }
+.history-delete-scope { display: grid; gap: 10px; border: 0; padding: 0; margin: 14px 0; }
+.history-delete-scope label { display: flex; align-items: center; gap: 8px; }
+
 .cookies-guide-modal {
   width: min(560px, 100%);
   display: flex;
@@ -1682,7 +1722,7 @@ input:focus-visible,
 .history-item {
   width: 100%;
   display: grid;
-  grid-template-columns: 24px minmax(0, 1fr) 32px;
+  grid-template-columns: 24px minmax(0, 1fr) 32px 32px;
   gap: 12px;
   align-items: center;
   padding: 8px 10px;
@@ -2579,6 +2619,9 @@ input:focus-visible,
 }
 
 @media (max-width: 760px) {
+  body:has(.window-titlebar) .history-modal-backdrop {
+    top: 34px;
+  }
   .app-shell-with-window-titlebar {
     margin-top: 34px;
   }
@@ -2665,7 +2708,7 @@ input:focus-visible,
     grid-template-columns: 1fr;
   }
   .history-item {
-    grid-template-columns: 20px minmax(0, 1fr) 32px;
+    grid-template-columns: 20px minmax(0, 1fr) 32px 32px;
   }
   .history-item-main {
     grid-template-columns: 36px minmax(0, 1fr);

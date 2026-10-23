@@ -3,12 +3,16 @@ import {
   cancelJob as cancelJobRequest,
   checkForAppUpdate,
   deleteHistory as deleteHistoryRequest,
+  deleteHistoryFiles as deleteHistoryFilesRequest,
+  listHistoryFiles as listHistoryFilesRequest,
+  revealHistoryFile as revealHistoryFileRequest,
   deleteModel,
   discardJobCache as discardJobCacheRequest,
   disposeAppUpdate,
   downloadModel,
   exportTranscriptFile,
   getSystemStatus,
+  getTranscriptionResumeStage,
   installAccelerator,
   installCudaEngine,
   inspectMedia,
@@ -35,12 +39,15 @@ import type {
   AppTab,
   BackendChoice,
   HistoryItem,
+  HistoryFileKind,
+  HistoryFileScope,
   JobCacheEntry,
   ModelInfo,
   ModelDownloadPayload,
   ProgressPayload,
   SystemStatus,
   TranscriptResult,
+  TranscriptionResumeStage,
   VideoMetadata,
 } from "../types";
 
@@ -128,6 +135,11 @@ export function useWhisperTube() {
   const [resettingData, setResettingData] = useState(false);
   const [historyOperation, setHistoryOperation] = useState<"reading" | "deleting" | "exporting" | "revealing" | null>(null);
   const [jobCache, setJobCache] = useState<JobCacheEntry[] | null>(null);
+  const [resumeRevision, setResumeRevision] = useState(0);
+  const [retrySource, setRetrySource] = useState<string | null>(null);
+  const [resumeCheck, setResumeCheck] = useState<{
+    source: string; pending: boolean; stage: TranscriptionResumeStage | null;
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [downloadingModel, setDownloadingModel] = useState<Record<string, ModelDownloadPayload>>({});
   const [copied, setCopied] = useState(false);
@@ -338,10 +350,12 @@ export function useWhisperTube() {
   function handleUrlChange(nextUrl: string) {
     setUrl(nextUrl);
     setMetadata(null);
+    setRetrySource(null);
   }
 
   function resetInspectedVideo() {
     setMetadata(null);
+    setRetrySource(null);
     setResult(null);
     setSearchQuery("");
     setCopied(false);
@@ -351,6 +365,7 @@ export function useWhisperTube() {
     if (busy || inspecting) return;
     setUrl("");
     setMetadata(null);
+    setRetrySource(null);
     setResult(null);
     setSearchQuery("");
     setCopied(false);
@@ -392,6 +407,32 @@ export function useWhisperTube() {
   const operationActive = Boolean(
     busy || inspecting || resettingData || deletingModel || historyOperation || modelDownloadActive || installingCuda || installingAccelerator || appUpdateInstalling || refreshingSystem,
   );
+  const resumeUrl = metadata?.webpageUrl;
+  const resumeDuration = metadata?.duration;
+  const resumeSource = JSON.stringify([resumeUrl, resumeDuration, resumeRevision]);
+  const checkingResume = Boolean(metadata && !operationActive &&
+    (resumeCheck?.source !== resumeSource || resumeCheck.pending));
+  const resumeStage = !operationActive && resumeCheck?.source === resumeSource
+    ? resumeCheck.stage : null;
+  const retryAvailable = !operationActive && metadata !== null &&
+    retrySource === JSON.stringify([resumeUrl, resumeDuration]);
+  useEffect(() => {
+    if (!resumeUrl || resumeDuration === undefined || operationActive) {
+      setResumeCheck(null);
+      return;
+    }
+    let disposed = false;
+    const source = JSON.stringify([resumeUrl, resumeDuration, resumeRevision]);
+    setResumeCheck({ source, pending: true, stage: null });
+    getTranscriptionResumeStage(resumeUrl, resumeDuration).then((stage) => {
+      if (!disposed) setResumeCheck({ source, pending: false, stage });
+    }).catch((cause) => {
+      if (disposed) return;
+      setResumeCheck({ source, pending: false, stage: null });
+      setError((previous) => previous ?? friendlyError(cause));
+    });
+    return () => { disposed = true; };
+  }, [resumeUrl, resumeDuration, operationActive, resumeRevision]);
   const vramWarning = useMemo(() => {
     if (!selectedModel || backend !== "cuda" || !system) return null;
     if (backend === "cuda" && (!system.cudaSupported || !system.nvidia)) {
@@ -433,7 +474,7 @@ export function useWhisperTube() {
     }
     return null;
   }, [backend, system, t]);
-  const canStart = Boolean(!operationActive && metadata && selectedModel?.installed && runtimeReady && !vramWarning && !acceleratorWarning);
+  const canStart = Boolean(!operationActive && !checkingResume && metadata && selectedModel?.installed && runtimeReady && !vramWarning && !acceleratorWarning);
   const modelDownloadBlockReasons = useMemo<Record<string, string>>(() => {
     const reasons: Record<string, string> = {};
     const cudaTarget = backend === "cuda";
@@ -557,6 +598,7 @@ export function useWhisperTube() {
       }
       setCookiesPath("");
       setJobCache(null);
+      setRetrySource(null);
       setMetadata(null);
       setResult(null);
       setSearchQuery("");
@@ -633,7 +675,7 @@ export function useWhisperTube() {
   }
 
   async function handleStartTranscription() {
-    if (operationActive) return;
+    if (operationActive || checkingResume) return;
     if (!metadata) {
       setError(t("error.videoCheckFirst"));
       return;
@@ -689,9 +731,11 @@ export function useWhisperTube() {
       });
       stopTranscriptionTimer();
       setResult(completedResult);
+      setRetrySource(null);
       setSearchQuery("");
       await refreshAfterSuccessfulOperation();
     } catch (cause) {
+      setRetrySource(JSON.stringify([metadata.webpageUrl, metadata.duration]));
       const message = friendlyError(cause);
       const normalizedMessage = message.toLowerCase();
       if (!normalizedMessage.includes("dibatalkan")) {
@@ -706,6 +750,7 @@ export function useWhisperTube() {
     } finally {
       stopTranscriptionTimer();
       setBusy(false);
+      setResumeRevision((revision) => revision + 1);
     }
   }
 
@@ -771,6 +816,7 @@ export function useWhisperTube() {
       throw cause;
     } finally {
       setHistoryOperation(null);
+      setResumeRevision((revision) => revision + 1);
     }
     await refreshAfterSuccessfulOperation();
   }
@@ -800,8 +846,47 @@ export function useWhisperTube() {
     }
   }
 
+  async function handleListHistoryFiles(id: number) {
+    if (operationActive) throw new Error(t("history.operationBusy"));
+    setHistoryOperation("reading");
+    try { return await listHistoryFilesRequest(id); }
+    finally { setHistoryOperation(null); }
+  }
+
+  async function handleRevealHistoryFile(id: number, kind: HistoryFileKind) {
+    if (operationActive) throw new Error(t("history.operationBusy"));
+    setHistoryOperation("revealing");
+    try { await revealHistoryFileRequest(id, kind); }
+    finally { setHistoryOperation(null); }
+  }
+
+  async function handleDeleteHistoryFiles(ids: number[], scope: HistoryFileScope) {
+    if (operationActive || ids.length === 0) return;
+    setHistoryOperation("deleting");
+    setError(null);
+    try {
+      const outcome = await deleteHistoryFilesRequest(ids, scope);
+      if (result && outcome.updatedIds.includes(result.historyId)) {
+        // Drop stale transcript/audio immediately; a refresh error must never
+        // leave deleted text available to copy or export in the WebView.
+        setResult(null);
+        setSearchQuery("");
+        setCopied(false);
+        try { setResult(await loadHistory(result.historyId)); }
+        catch (cause) { setError(friendlyError(cause)); }
+      }
+      await refreshAfterSuccessfulOperation();
+      if (outcome.cleanupWarnings.length) {
+        setError((previous) => [previous, ...outcome.cleanupWarnings].filter(Boolean).join("\n"));
+      }
+    } catch (cause) {
+      setError(friendlyError(cause));
+      throw cause;
+    } finally { setHistoryOperation(null); }
+  }
+
   async function handleExport(kind: "txt" | "srt" | "vtt") {
-    if (operationActive || !result) return;
+    if (operationActive || !result || result.transcriptAvailable === false) return;
     setHistoryOperation("exporting");
     try {
       await exportTranscriptFile(result, kind);
@@ -846,7 +931,7 @@ export function useWhisperTube() {
   }
 
   async function copyTranscript() {
-    if (operationActive || !result) return;
+    if (operationActive || !result || result.transcriptAvailable === false) return;
     try {
       await navigator.clipboard.writeText(result.text);
       setCopied(true);
@@ -906,6 +991,9 @@ export function useWhisperTube() {
     runtimeReady,
     filteredSegments,
     canStart,
+    resumeStage,
+    checkingResume,
+    retryAvailable,
     modelDownloadBlocked,
     modelDownloadBlockReasons,
     vramWarning,
@@ -934,6 +1022,9 @@ export function useWhisperTube() {
     loadHistory: handleLoadHistory,
     loadMoreHistory: handleLoadMoreHistory,
     deleteHistory: handleDeleteHistory,
+    deleteHistoryFiles: handleDeleteHistoryFiles,
+    listHistoryFiles: handleListHistoryFiles,
+    revealHistoryFile: handleRevealHistoryFile,
     exportFile: handleExport,
     revealAudio: handleRevealAudio,
     copyTranscript,

@@ -19,6 +19,9 @@ pub const CHUNK_SECONDS: u64 = 300;
 pub const MAX_CHECKPOINT_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_CHUNK_SAMPLES: u64 = SAMPLE_RATE * CHUNK_SECONDS;
 const CHECKPOINT_VERSION: u8 = 1;
+// whisper.cpp decodes 30-second windows (WHISPER_CHUNK_SIZE in whisper.h).
+// Its final timestamp can include the unused tail of that decoder window.
+const WHISPER_DECODE_WINDOW_MS: u64 = 30_000;
 
 pub struct PcmAudio {
     path: PathBuf,
@@ -358,6 +361,27 @@ fn validate_output(output: &ChunkOutput, chunk: &AudioChunk) -> Result<(), Strin
     Ok(())
 }
 
+fn normalize_engine_output(output: &mut ChunkOutput, chunk: &AudioChunk) -> Result<(), String> {
+    let duration_ms = (chunk.end - chunk.start) * 1000 / SAMPLE_RATE;
+    if let Some(last) = output.segments.last_mut() {
+        let start = timestamp_ms(&last.from)?;
+        let end = timestamp_ms(&last.to)?;
+        // Only repair the final decoder endpoint when its segment starts in
+        // real audio and fits one native decoding window. Do not normalize
+        // persisted checkpoints, earlier outliers, reversed or unordered ranges.
+        // Clipping before saving preserves the text and makes resume validate
+        // the same bounded timestamps that will appear in the merged exports.
+        if start < duration_ms && end > duration_ms && end - start <= WHISPER_DECODE_WINDOW_MS {
+            eprintln!(
+                "WhisperTube: timestamp akhir bagian {} dibatasi dari {end} ms ke {duration_ms} ms sesuai durasi audio.",
+                chunk.index + 1
+            );
+            last.to = timestamp(duration_ms, ',');
+        }
+    }
+    validate_output(output, chunk)
+}
+
 /// The callback runs only missing/invalid chunks. It must return only after the
 /// native child exits successfully and its complete JSON has been decoded.
 pub fn transcribe<F, C, P>(
@@ -456,13 +480,13 @@ where
                     Err(e) => return Err(format!("Gagal membersihkan output potongan: {e}")),
                 }
             }
-            let output = run(
+            let mut output = run(
                 &chunk_audio,
                 &prefix,
                 inference_language,
                 (start_percent, end_percent),
             )?;
-            validate_output(&output, &chunk)?;
+            normalize_engine_output(&mut output, &chunk)?;
             let saved = SavedChunk {
                 version: CHECKPOINT_VERSION,
                 key: key.clone(),
@@ -892,6 +916,111 @@ mod tests {
         for pair in chunks.windows(2) {
             assert_eq!(pair[0].end, pair[1].start);
         }
+    }
+
+    #[test]
+    fn decoder_tail_overrun_is_clipped_before_checkpoint_and_reused_on_retry() {
+        let fixture = Fixture::new(299);
+        // Reproduce the observed engine output on a 298.4453125-second chunk.
+        let samples = 4_775_125;
+        let mut wav = OpenOptions::new().write(true).open(&fixture.wav).unwrap();
+        write_wav_header(&mut wav, samples * 2).unwrap();
+        wav.set_len(samples * 2 + 44).unwrap();
+        drop(wav);
+        let audio = fixture.audio();
+        let completed = transcribe(
+            &audio,
+            &fixture.root,
+            &fixture.request,
+            |_, _, _, _| {
+                Ok(ChunkOutput {
+                    language: "en".into(),
+                    backend: "cpu".into(),
+                    segments: vec![
+                        Segment {
+                            from: "00:04:55,780".into(),
+                            to: "00:04:58,040".into(),
+                            text: "before tail".into(),
+                        },
+                        Segment {
+                            from: "00:04:58,040".into(),
+                            to: "00:05:28,020".into(),
+                            text: "tail".into(),
+                        },
+                    ],
+                })
+            },
+            || false,
+            |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(completed.segments.len(), 2);
+        assert_eq!(completed.segments[0].to, "00:04:58,040");
+        assert_eq!(completed.segments[1].from, "00:04:58,040");
+        assert_eq!(completed.segments[1].to, "00:04:58,445");
+        assert_eq!(completed.text, "before tail\ntail");
+        let saved: SavedChunk = serde_json::from_slice(
+            &fs::read(fixture.checkpoint_directory().join("0000.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved.output.segments[1].to, "00:04:58,445");
+        let resumed = transcribe(
+            &audio,
+            &fixture.root,
+            &fixture.request,
+            |_, _, _, _| panic!("normalized checkpoint must be reusable"),
+            || false,
+            |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(resumed.text, completed.text);
+        assert_eq!(resumed.segments[1].to, "00:04:58,445");
+    }
+
+    #[test]
+    fn decoder_tail_normalization_does_not_accept_other_invalid_ranges() {
+        let chunk = AudioChunk {
+            index: 0,
+            start: 0,
+            end: 300 * SAMPLE_RATE,
+        };
+        for (from, to) in [
+            ("00:04:59,000", "00:05:29,001"), // More than one decoder window.
+            ("00:05:01,010", "00:05:29,000"), // Starts outside actual audio.
+            ("00:04:59,000", "00:04:58,000"), // Reversed.
+            ("00:04:59,000", "00:05:90,000"), // Malformed.
+        ] {
+            let mut invalid = output("invalid");
+            invalid.segments[0].from = from.into();
+            invalid.segments[0].to = to.into();
+            assert!(
+                normalize_engine_output(&mut invalid, &chunk).is_err(),
+                "{from} -> {to}"
+            );
+        }
+        let mut out_of_order = output("first");
+        out_of_order.segments[0].from = "00:04:59,500".into();
+        out_of_order.segments[0].to = "00:04:59,600".into();
+        out_of_order.segments.push(Segment {
+            from: "00:04:59,000".into(),
+            to: "00:05:29,000".into(),
+            text: "backwards".into(),
+        });
+        assert!(normalize_engine_output(&mut out_of_order, &chunk).is_err());
+        let mut earlier_outlier = output("earlier outlier");
+        earlier_outlier.segments[0].to = "00:05:29,000".into();
+        earlier_outlier.segments.push(Segment {
+            from: "00:04:59,000".into(),
+            to: "00:05:29,000".into(),
+            text: "tail".into(),
+        });
+        assert!(normalize_engine_output(&mut earlier_outlier, &chunk).is_err());
+        let mut raw_tail = output("must not repair saved checkpoints");
+        raw_tail.segments[0].from = "00:04:59,000".into();
+        raw_tail.segments[0].to = "00:05:29,000".into();
+        assert!(validate_output(&raw_tail, &chunk).is_err());
+        normalize_engine_output(&mut raw_tail, &chunk).unwrap();
+        assert_eq!(raw_tail.segments[0].to, "00:05:00,000");
     }
 
     #[test]

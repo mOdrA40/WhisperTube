@@ -11,7 +11,7 @@ import {
   Zap,
 } from "lucide-react";
 import { formatBytes, formatMemory } from "../../lib/format";
-import type { AcceleratorInfo, BackendChoice, ModelDownloadPayload, ModelInfo, SystemStatus } from "../../types";
+import type { AcceleratorInfo, BackendChoice, ModelDownloadPayload, ModelInfo, SystemStatus, TranscriptionResumeStage } from "../../types";
 import { getAcceleratorCopy, getModelCopy, getRecommendation, useI18n } from "../../i18n";
 import { CustomSelect, type SelectOption } from "../common/CustomSelect";
 
@@ -20,6 +20,9 @@ type ControlsCardProps = {
   modelId: string;
   selectedModel: ModelInfo | undefined;
   canStart: boolean;
+  resumeStage: TranscriptionResumeStage | null;
+  checkingResume: boolean;
+  retryAvailable: boolean;
   modelDownloadBlocked: boolean;
   computeTargetId: string;
   language: string;
@@ -55,6 +58,9 @@ export function ControlsCard({
   modelId,
   selectedModel,
   canStart,
+  resumeStage,
+  checkingResume,
+  retryAvailable,
   modelDownloadBlocked,
   computeTargetId,
   language,
@@ -356,8 +362,15 @@ export function ControlsCard({
       )}
 
       <button type="button" className="start-button" disabled={!canStart} onClick={onStart}>
-        <AudioWaveform size={18} /> {t("controls.transcribe")}
+        {checkingResume ? <LoaderCircle className="spin" size={18} /> : <AudioWaveform size={18} />}
+        {t(checkingResume ? "controls.checkingResume" : resumeStage ? "controls.resume" : retryAvailable ? "controls.retry" : "controls.transcribe")}
       </button>
+      {resumeStage && <p className="setup-hint" role="status">
+        {t(resumeStage === "audio" ? "controls.resumeAudioHint" : "controls.resumeDownloadHint")}
+      </p>}
+      {!resumeStage && !checkingResume && retryAvailable && <p className="setup-hint" role="status">
+        {t("controls.retryHint")}
+      </p>}
 
       {!runtimeReady && system && (
         <p className="setup-hint">

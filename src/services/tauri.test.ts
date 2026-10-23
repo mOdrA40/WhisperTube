@@ -4,7 +4,7 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { save } from "@tauri-apps/plugin-dialog";
 import type { TranscriptResult } from "../types";
-import { checkForAppUpdate, disposeAppUpdate, deleteModel, discardJobCache, downloadModel, exportTranscriptFile, inspectMedia, installAppUpdate, listHistory, listJobCache, startTranscription } from "./tauri";
+import { checkForAppUpdate, disposeAppUpdate, deleteModel, discardJobCache, downloadModel, exportTranscriptFile, getTranscriptionResumeStage, inspectMedia, installAppUpdate, listHistory, listJobCache, startTranscription, deleteHistoryFiles, listHistoryFiles, revealHistoryFile } from "./tauri";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn().mockResolvedValue(undefined),
@@ -85,6 +85,23 @@ describe("Tauri IPC contracts", () => {
     expect(update.downloadAndInstall).toHaveBeenCalledWith(expect.any(Function), { timeout: 900_000 });
     expect(invoke).toHaveBeenNthCalledWith(2, "end_app_update");
     expect(relaunch).toHaveBeenCalledOnce();
+  });
+});
+
+it("uses history IDs and explicit kinds for file management IPC", async () => {
+  await listHistoryFiles(42);
+  expect(invoke).toHaveBeenLastCalledWith("history_files", { id: 42 });
+  await deleteHistoryFiles([42], "audio");
+  expect(invoke).toHaveBeenLastCalledWith("delete_history_files", { ids: [42], scope: "audio" });
+  await revealHistoryFile(42, "txt");
+  expect(invoke).toHaveBeenLastCalledWith("reveal_history_file", { id: 42, kind: "txt" });
+});
+
+it("looks up persisted resume availability for the inspected source", async () => {
+  vi.mocked(invoke).mockResolvedValueOnce("audio");
+  expect(await getTranscriptionResumeStage("https://www.youtube.com/watch?v=test", 60)).toBe("audio");
+  expect(invoke).toHaveBeenLastCalledWith("transcription_resume_stage", {
+    url: "https://www.youtube.com/watch?v=test", duration: 60,
   });
 });
 

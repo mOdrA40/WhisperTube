@@ -57,6 +57,8 @@ The Rust backend uses similar boundaries:
 - resources.rs performs memory, disk, and per-mount allocation checks;
 - transcription.rs owns the media-to-transcript pipeline;
 - history.rs owns SQLite history, result files, and exports;
+- history_files.rs owns file inventory, safe location reveal, and durable partial
+  deletion of saved audio or transcripts;
 - accelerators.rs downloads and activates Metal/Vulkan packs;
 - system.rs detects hardware and collects telemetry;
 - user_data.rs implements the application-data reset;
@@ -92,6 +94,11 @@ with a known duration of at most eight hours and a source download limit of
 divides normalized audio into approximately 300-second sections (maximum
 301 seconds), preferring quiet boundaries. A successful section is validated
 and checkpointed atomically; matching completed sections are reused on retry.
+Before saving fresh engine output, a final segment that starts within the real
+audio and spans at most one 30-second decoder window has its endpoint clipped
+to the chunk duration if necessary. Earlier outliers, malformed, reversed or
+unordered ranges still fail validation; saved checkpoints are validated without
+this repair.
 The model reloads per section, and boundary recognition can differ from
 whole-file inference. The converted WAV size is checked again
 before inference, and transcript text, segment count, serialized result size,
@@ -150,8 +157,31 @@ Tauri application-local-data directory:
 
 Failed/cancelled jobs retain downloads, completed WAV conversion, and validated
 inference checkpoints for retry, independently of the final audio preference.
+The transcription action checks persisted cache availability for the inspected
+source when idle and after operations finish. It offers Continue for a valid
+cached WAV or nonempty saved download data, including after reopening the app.
+Metadata alone and committed history do not qualify. The hint distinguishes
+download reuse from audio reuse; completed inference sections are reused only
+after the pipeline checks their settings and fingerprint. This advisory lookup
+does not hash the whole WAV or promise a specific completed percentage.
+An unsuccessful attempt without reusable data offers Try again rather than
+claiming that it can continue saved work. No retry starts automatically.
 On success, source downloads and checkpoints are removed; audio.wav remains
 only when Keep audio after completion is enabled.
+
+History offers audio-only deletion, transcript-only deletion, and deletion of
+the complete history item. Partial deletion records a tombstone and pending
+cleanup in `history_file_deletions` before unlinking files. Cleanup retries on
+startup and reports locked files as pending. Audio-only deletion preserves
+JSON/TXT/SRT/VTT; transcript-only deletion removes those plus recognized result/
+export staging files and residual checkpoint text, while retaining WAV and the
+SQLite metadata row. Loading a transcript-only
+deleted item returns metadata and remaining audio, with transcript actions
+disabled. Full history deletion removes its tombstones in the same transaction.
+Existing history rows and result JSON remain compatible; missing
+`transcriptAvailable` in legacy results defaults to true. Exported external
+copies are never selected by these deletion operations. The saved-files dialog
+lists WAV/TXT/SRT/VTT sizes and paths and reveals only validated internal files.
 
 Each job receives an .in-progress marker. A failed or cancelled pipeline
 preserves its job directory for retry. At startup, unreferenced jobs older than

@@ -14,6 +14,48 @@ use crate::{
 type CommandResult<T> = Result<T, ErrorPayload>;
 
 #[tauri::command]
+pub async fn history_files(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: i64,
+) -> CommandResult<Vec<crate::types::HistoryFileInfo>> {
+    let operation = OperationGuard::reserve_history_read(&state)?;
+    Ok(tokio::task::spawn_blocking(move || {
+        let _operation = operation;
+        crate::history_files::list(&app, id)
+    })
+    .await
+    .map_err(|e| format!("Pembacaan file history gagal: {e}"))??)
+}
+
+#[tauri::command]
+pub async fn delete_history_files(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    ids: Vec<i64>,
+    scope: crate::types::HistoryFileScope,
+) -> CommandResult<crate::types::HistoryFilesDeleteOutcome> {
+    let operation = OperationGuard::reserve_history_delete(&state)?;
+    Ok(tokio::task::spawn_blocking(move || {
+        let _operation = operation;
+        crate::history_files::delete(&app, &ids, scope)
+    })
+    .await
+    .map_err(|e| format!("Penghapusan file history gagal: {e}"))??)
+}
+
+#[tauri::command]
+pub fn reveal_history_file(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: i64,
+    kind: crate::types::HistoryFileKind,
+) -> CommandResult<()> {
+    let _operation = OperationGuard::reserve_history_reveal(&state)?;
+    Ok(crate::history_files::reveal(&app, id, kind)?)
+}
+
+#[tauri::command]
 pub async fn list_job_cache(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -145,6 +187,19 @@ pub async fn inspect_media(
         state.inspect_cancelled.clone(),
     )
     .await?)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn transcription_resume_stage(
+    app: AppHandle,
+    url: String,
+    duration: f64,
+) -> CommandResult<Option<crate::types::TranscriptionResumeStage>> {
+    Ok(
+        tokio::task::spawn_blocking(move || transcription::resume_stage(&app, &url, duration))
+            .await
+            .map_err(|e| format!("Pemeriksaan progres tersimpan gagal: {e}"))??,
+    )
 }
 
 #[tauri::command(rename_all = "camelCase")]

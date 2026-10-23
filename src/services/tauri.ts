@@ -11,6 +11,10 @@ import type {
   BackendChoice,
   CudaDownloadPayload,
   HistoryDeleteOutcome,
+  HistoryFileInfo,
+  HistoryFileKind,
+  HistoryFileScope,
+  HistoryFilesDeleteOutcome,
   HistoryPageResult,
   JobCacheEntry,
   ModelDownloadPayload,
@@ -18,6 +22,7 @@ import type {
   ProgressPayload,
   SystemStatus,
   TranscriptRequest,
+  TranscriptionResumeStage,
   TranscriptResult,
   VideoMetadata,
 } from "../types";
@@ -198,6 +203,10 @@ export function startTranscription(request: TranscriptRequest) {
   return invoke<TranscriptResult>("start_transcription", { request });
 }
 
+export function getTranscriptionResumeStage(url: string, duration: number) {
+  return invoke<TranscriptionResumeStage | null>("transcription_resume_stage", { url, duration });
+}
+
 export function cancelJob() {
   return invoke("cancel_job");
 }
@@ -208,6 +217,16 @@ export function loadHistory(id: number) {
 
 export function deleteHistory(ids: number[]) {
   return invoke<HistoryDeleteOutcome>("delete_history", { ids });
+}
+
+export function listHistoryFiles(id: number) {
+  return invoke<HistoryFileInfo[]>("history_files", { id });
+}
+export function deleteHistoryFiles(ids: number[], scope: HistoryFileScope) {
+  return invoke<HistoryFilesDeleteOutcome>("delete_history_files", { ids, scope });
+}
+export function revealHistoryFile(id: number, kind: HistoryFileKind) {
+  return invoke<void>("reveal_history_file", { id, kind });
 }
 
 export function listJobCache() {

@@ -146,6 +146,7 @@ export type TranscriptResult = {
   channel: string;
   language: string;
   duration: number;
+  sourceDuration?: number | null;
   model: string;
   backend: string;
   segments: Segment[];

@@ -31,13 +31,14 @@ export function TranscriptCard({
 }: TranscriptCardProps) {
   const { t } = useI18n();
   const transcriptAvailable = result.transcriptAvailable !== false;
+  const durationMismatch = transcriptAvailable && result.sourceDuration != null;
 
   return (
     <div className="transcript-card card">
       <div className="transcript-toolbar">
         <div>
           <span className="success-label">
-            <Check size={14} /> {t(transcriptAvailable ? "transcript.complete" : "history.savedFiles")}
+            <Check size={14} /> {t(!transcriptAvailable ? "history.savedFiles" : durationMismatch ? "transcript.availableAudioComplete" : "transcript.complete")}
           </span>
           <h3>{result.title}</h3>
           <p>
@@ -68,6 +69,15 @@ export function TranscriptCard({
           )}
         </div>
       </div>
+
+      {durationMismatch && (
+        <p role="status" className="warning-inline">
+          {t("transcript.durationMismatch", {
+            actual: formatElapsedDuration(result.duration * 1000),
+            source: formatElapsedDuration(result.sourceDuration! * 1000),
+          })}
+        </p>
+      )}
 
       <div className="transcript-search">
         <Search size={16} />

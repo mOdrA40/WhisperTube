@@ -89,6 +89,15 @@ to signed 16-bit PCM WAV, mono, 16 kHz, and passes the WAV to the selected
 whisper.cpp engine. Results contain timestamped segments and are written as
 JSON, TXT, SRT, VTT, and a SQLite history row.
 
+Conversion aborts on FFmpeg decode errors. Result and history duration use the
+validated PCM sample count. When available audio differs from source metadata
+by more than two seconds, result.json retains `sourceDuration` and the UI says
+that only the available audio was transcribed. A genuinely shorter audio track
+remains usable. Conversion reads one second beyond the accepted duration window
+as a bounded sentinel; audio exceeding metadata by more than two seconds or the
+eight-hour limit fails validation rather than being silently truncated to the
+metadata duration. Cache/checkpoint matching retains the source duration.
+
 The pipeline accepts on-demand media and completed live replays
 with a known duration of at most eight hours and a source download limit of
 4 GiB. Active and upcoming live streams remain unsupported. checkpoint.rs
@@ -119,8 +128,12 @@ operations. The guard covers:
 - application-data reset.
 
 A transcription reserves the Transcribing state before spawning the blocking
-pipeline. Each other operation reserves its own state. The guard releases its
-reservation on every return path, so an active child-process PID is used for
+pipeline. Each other operation reserves its own state. Model/runtime reservations
+cover both preflight and transfer.
+Blocking preflight owns the guard and checks cancellation before and after its
+work, so cancelling during preflight prevents the subsequent transfer. The
+guard also remains held until that worker finishes if its IPC future is dropped.
+The guard releases its reservation on every return path, so an active child-process PID is used for
 termination, not as the sole concurrency lock.
 
 The cancellation path sets the relevant cancellation flag and terminates the

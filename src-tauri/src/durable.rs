@@ -34,6 +34,68 @@ pub fn create_dir_all(path: &Path) -> io::Result<()> {
     }
 }
 
+/// Only for application-owned storage leaves. Do not chmod user ancestors or
+/// external export directories. Securing the root also protects legacy files
+/// and files created by SQLite, yt-dlp, FFmpeg and Whisper inside it.
+pub fn create_private_dir_all(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            create_dir_all(parent)?;
+        }
+        match fs::DirBuilder::new().mode(0o700).create(path) {
+            Ok(()) => sync_parent(path)?,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+        // Operate on the opened directory, never follow a substituted leaf
+        // symlink or change a directory belonging to a different OS account.
+        let directory = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
+            .open(path)?;
+        // SAFETY: geteuid has no arguments or memory preconditions.
+        if directory.metadata()?.uid() != unsafe { libc::geteuid() } {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "App storage directory belongs to another OS account",
+            ));
+        }
+        directory.set_permissions(fs::Permissions::from_mode(0o700))?;
+        #[cfg(target_os = "macos")]
+        remove_directory_acl(&directory)?;
+        directory.sync_all()
+    }
+    #[cfg(not(unix))]
+    create_dir_all(path)
+}
+
+#[cfg(target_os = "macos")]
+fn remove_directory_acl(directory: &fs::File) -> io::Result<()> {
+    use std::{ffi::c_void, os::fd::AsRawFd};
+    unsafe extern "C" {
+        fn acl_init(count: i32) -> *mut c_void;
+        fn acl_set_fd(fd: i32, acl: *mut c_void) -> i32;
+        fn acl_free(acl: *mut c_void) -> i32;
+    }
+    // Darwin extended allow entries can grant access independently of mode
+    // bits. Replace inherited/old ACLs on this owned root before using it.
+    // SAFETY: acl_init returns an owned empty ACL; a live fd is passed below.
+    let acl = unsafe { acl_init(0) };
+    if acl.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    let status = unsafe { acl_set_fd(directory.as_raw_fd(), acl) };
+    let error = (status != 0).then(io::Error::last_os_error);
+    // SAFETY: release the owned ACL once on both paths.
+    unsafe { acl_free(acl) };
+    match error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
 /// Both paths must be on the same filesystem. Callers flush file bytes first.
 pub fn publish(temporary: &Path, target: &Path) -> io::Result<()> {
     #[cfg(unix)]
@@ -98,6 +160,106 @@ fn publish_unix(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn private_storage_protects_new_and_legacy_contents_without_changing_ancestors() {
+        use std::os::unix::fs::PermissionsExt;
+        let parent =
+            std::env::temp_dir().join(format!("whispertube-private-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&parent).unwrap();
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).unwrap();
+        let root = parent.join("app");
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+        for name in [
+            "result.json",
+            "transcript.txt",
+            "audio.wav",
+            "whispertube.db",
+            "whispertube.db-wal",
+        ] {
+            fs::write(root.join(name), b"private legacy bytes").unwrap();
+            fs::set_permissions(root.join(name), fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        create_private_dir_all(&root).unwrap();
+        create_private_dir_all(&root).unwrap();
+        assert_eq!(
+            fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(&parent).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        let job = root.join("jobs");
+        create_private_dir_all(&job).unwrap();
+        assert_eq!(
+            fs::metadata(job).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        for name in [
+            "result.json",
+            "transcript.txt",
+            "audio.wav",
+            "whispertube.db",
+            "whispertube.db-wal",
+        ] {
+            assert_eq!(fs::read(root.join(name)).unwrap(), b"private legacy bytes");
+        }
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_storage_rejects_symlink_and_file_without_changing_their_targets() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let parent =
+            std::env::temp_dir().join(format!("whispertube-private-link-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&parent).unwrap();
+        let outside = parent.join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::set_permissions(&outside, fs::Permissions::from_mode(0o755)).unwrap();
+        let link = parent.join("app");
+        symlink(&outside, &link).unwrap();
+        assert!(create_private_dir_all(&link).is_err());
+        assert_eq!(
+            fs::metadata(&outside).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        let file = parent.join("file");
+        fs::write(&file, b"unchanged").unwrap();
+        assert!(create_private_dir_all(&file).is_err());
+        assert_eq!(fs::read(file).unwrap(), b"unchanged");
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn private_storage_clears_inherited_macos_allow_acl() {
+        let parent =
+            std::env::temp_dir().join(format!("whispertube-private-acl-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&parent).unwrap();
+        assert!(std::process::Command::new("/bin/chmod")
+            .args(["+a", "everyone allow list,search,readattr,readextattr,readsecurity,file_inherit,directory_inherit"])
+            .arg(&parent).status().unwrap().success());
+        let root = parent.join("app");
+        fs::create_dir(&root).unwrap();
+        let acl = |path: &Path| {
+            let output = std::process::Command::new("/bin/ls")
+                .arg("-lde")
+                .arg(path)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            String::from_utf8(output.stdout).unwrap()
+        };
+        assert!(acl(&root).contains("everyone"));
+        create_private_dir_all(&root).unwrap();
+        assert!(!acl(&root).contains("everyone"));
+        assert!(acl(&parent).contains("everyone"));
+        fs::remove_dir_all(parent).unwrap();
+    }
+
     #[test]
     fn publish_replaces_only_after_the_complete_staging_file_exists() {
         let root =

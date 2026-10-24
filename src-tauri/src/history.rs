@@ -990,6 +990,7 @@ mod tests {
                 channel: "channel".into(),
                 language: "id".into(),
                 duration: 1.0,
+                source_duration: None,
                 model: "base".into(),
                 backend: "cpu".into(),
                 segments: vec![],
@@ -1038,6 +1039,14 @@ mod tests {
                 .unwrap()
                 .transcript_available
         );
+        assert!(decode_history_result(&serde_json::to_vec(&legacy).unwrap())
+            .unwrap()
+            .source_duration
+            .is_none());
+        legacy["sourceDuration"] = serde_json::json!(60.0);
+        let decoded = decode_history_result(&serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert_eq!(decoded.duration, 1.0);
+        assert_eq!(decoded.source_duration, Some(60.0));
         conn.execute(
             "INSERT INTO history_file_deletions(history_id,kind) VALUES (1,'transcript')",
             [],

@@ -218,6 +218,10 @@ pub struct TranscriptResult {
     pub channel: String,
     pub language: String,
     pub duration: f64,
+    // Present when source metadata materially differs from decoded audio.
+    // Older saved results do not have this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_duration: Option<f64>,
     pub model: String,
     pub backend: String,
     pub segments: Vec<Segment>,

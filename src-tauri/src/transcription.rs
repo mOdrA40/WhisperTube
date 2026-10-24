@@ -138,7 +138,7 @@ struct JobDirectoryGuard {
 
 impl JobDirectoryGuard {
     fn create(path: PathBuf) -> Result<Self, String> {
-        crate::durable::create_dir_all(&path)
+        crate::durable::create_private_dir_all(&path)
             .map_err(|e| format!("Gagal membuat job directory: {e}"))?;
         let marker = path.join(".in-progress");
         if let Err(error) = File::create(&marker) {
@@ -157,6 +157,8 @@ impl JobDirectoryGuard {
         if !path.is_dir() {
             return Err("Folder cache audio tidak valid.".into());
         }
+        crate::durable::create_private_dir_all(&path)
+            .map_err(|e| format!("Gagal mengamankan folder cache audio: {e}"))?;
         let marker = path.join(".in-progress");
         if !fs::symlink_metadata(&marker).is_ok_and(|metadata| metadata.is_file()) {
             return Err("Cache audio tidak memiliki marker job yang valid.".into());
@@ -409,7 +411,7 @@ pub fn resume_stage(
 
 const MAX_CAPTURED_STDERR_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_MEDIA_DURATION_SECONDS: f64 = 8.0 * 60.0 * 60.0;
-const MEDIA_DURATION_TOLERANCE_SECONDS: f64 = 2.0;
+pub(crate) const MEDIA_DURATION_TOLERANCE_SECONDS: f64 = 2.0;
 const MAX_MEDIA_DOWNLOAD_BYTES: &str = "4G";
 const MAX_MEDIA_DOWNLOAD_BYTES_VALUE: u64 = 4 * 1024 * 1024 * 1024;
 const AUDIO_CACHE_METADATA_FILE: &str = ".audio-cache.json";
@@ -465,7 +467,12 @@ fn validate_transcript_request(request: &TranscriptRequest) -> Result<(), String
 }
 
 fn pcm_wav_bytes(duration: f64) -> u64 {
-    duration.max(0.0).ceil() as u64 * 16_000 * 2 + 44
+    (duration.max(0.0) + MEDIA_DURATION_TOLERANCE_SECONDS)
+        .min(MAX_MEDIA_DURATION_SECONDS)
+        .ceil() as u64
+        * 16_000
+        * 2
+        + 44
 }
 
 fn validate_audio_wav(path: &Path, duration: f64) -> Result<u64, String> {
@@ -482,6 +489,14 @@ fn validate_audio_wav(path: &Path, duration: f64) -> Result<u64, String> {
         return Err("WAV hasil konversi melebihi batas durasi media yang diizinkan.".into());
     }
     Ok(size)
+}
+
+fn reconciled_audio_duration(audio: &checkpoint::PcmAudio, source: f64) -> (f64, Option<f64>) {
+    let actual = audio.duration_seconds();
+    // A shorter audio track is legitimate. Never claim it covered the source
+    // metadata's full duration: retain that discrepancy for the result UI.
+    let source = ((source - actual).abs() > MEDIA_DURATION_TOLERANCE_SECONDS).then_some(source);
+    (actual, source)
 }
 
 fn media_disk_reservation(duration: f64) -> u64 {
@@ -535,7 +550,13 @@ pub(crate) fn ensure_job_storage_budget(used: u64, limit: u64) -> Result<(), Str
 }
 
 fn ffmpeg_target_duration(duration: f64) -> f64 {
-    duration.max(MINIMUM_AUDIO_DURATION_SECONDS)
+    // Read beyond the accepted window. Capping at the metadata duration would
+    // silently truncate a longer track and produce a seemingly complete WAV.
+    // The extra second is a sentinel: validators reject it before readiness.
+    (duration + MEDIA_DURATION_TOLERANCE_SECONDS + 1.0).clamp(
+        MINIMUM_AUDIO_DURATION_SECONDS,
+        MAX_MEDIA_DURATION_SECONDS + 1.0,
+    )
 }
 
 fn whisper_inactivity_timeout(backend: &str) -> std::time::Duration {
@@ -803,18 +824,14 @@ fn download_speed(raw: &str) -> Option<u64> {
         .map(|value| value as u64)
 }
 
-fn run_ffmpeg(
-    context: &JobContext,
-    input: &Path,
-    output: &Path,
-    duration: f64,
-) -> Result<(), String> {
-    let ffmpeg = tool_path(context.app, "ffmpeg")?;
+fn ffmpeg_command(ffmpeg: &Path, input: &Path, output: &Path, duration: f64) -> Command {
     let mut command = Command::new(ffmpeg);
     process::hide_console(&mut command);
     command
         .args([
             "-y",
+            "-nostdin",
+            "-xerror",
             "-nostats",
             "-loglevel",
             "error",
@@ -831,6 +848,17 @@ fn run_ffmpeg(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(Stdio::null());
+    command
+}
+
+fn run_ffmpeg(
+    context: &JobContext,
+    input: &Path,
+    output: &Path,
+    duration: f64,
+) -> Result<(), String> {
+    let ffmpeg = tool_path(context.app, "ffmpeg")?;
+    let mut command = ffmpeg_command(&ffmpeg, input, output, duration);
     let mut last_disk_check = Instant::now() - DISK_CHECK_INTERVAL;
     let (status, stderr) = run_media_command(
         context,
@@ -1678,6 +1706,7 @@ pub fn pipeline(
         network_bytes_per_second: None,
     });
     let audio = checkpoint::PcmAudio::open(&wav, request.duration, || context.is_cancelled())?;
+    let (audio_duration, source_duration) = reconciled_audio_duration(&audio, request.duration);
     let mut resolved_engine = None;
     let completed = checkpoint::transcribe(
         &audio,
@@ -1740,7 +1769,8 @@ pub fn pipeline(
         title: request.title.clone(),
         channel: request.channel.clone(),
         language: language.clone(),
-        duration: request.duration,
+        duration: audio_duration,
+        source_duration,
         model: request.model_id.clone(),
         backend: resolved_backend.clone(),
         segments,
@@ -1752,9 +1782,13 @@ pub fn pipeline(
             .keep_audio
             .then(|| wav.to_string_lossy().to_string()),
     };
+    // Keep cache/checkpoint identity tied to the inspected source, but persist
+    // the duration actually transcribed in both the result and SQLite.
+    let mut history_request = request.clone();
+    history_request.duration = audio_duration;
     let history_id = history::save_history_record_with(
         &app,
-        &request,
+        &history_request,
         &language,
         &resolved_backend,
         &result_store_path,
@@ -1839,6 +1873,93 @@ mod tests {
         sync::{Arc, Mutex},
     };
     use uuid::Uuid;
+
+    #[test]
+    fn decoded_audio_duration_is_truthful_and_short_tracks_are_explicit() {
+        use std::io::Write;
+        let root = std::env::temp_dir().join(format!("whispertube-duration-{}", Uuid::new_v4()));
+        let _guard = JobDirectoryGuard::create(root.clone()).unwrap();
+        let wav = root.join("audio.wav");
+        let mut file = fs::File::create(&wav).unwrap();
+        checkpoint::write_wav_header(&mut file, 32_000).unwrap();
+        file.write_all(&vec![0; 32_000]).unwrap();
+        drop(file);
+        let audio = checkpoint::PcmAudio::open(&wav, 60.0, || false).unwrap();
+        assert_eq!(
+            super::reconciled_audio_duration(&audio, 60.0),
+            (1.0, Some(60.0))
+        );
+        // Rounding/padding differences do not falsely label normal audio.
+        assert_eq!(super::reconciled_audio_duration(&audio, 1.25), (1.0, None));
+        assert_eq!(super::reconciled_audio_duration(&audio, 1.0), (1.0, None));
+        // The tolerance also applies to sub-second source metadata; the old
+        // minimum-padding allowance must not widen the accepted window.
+        let mut file = fs::File::create(&wav).unwrap();
+        checkpoint::write_wav_header(&mut file, 3 * 32_000).unwrap();
+        file.write_all(&vec![0; 3 * 32_000]).unwrap();
+        drop(file);
+        assert!(checkpoint::PcmAudio::inspect(&wav, 0.25, || false).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "Requires installed Windows FFmpeg runtime; run explicitly with --ignored"]
+    fn native_ffmpeg_accepts_short_track_but_rejects_corrupt_partial_decode() {
+        use std::io::Write;
+        let ffmpeg =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("runtime/windows/ffmpeg.exe");
+        assert!(
+            ffmpeg.is_file(),
+            "Install the runtime before this native QA test"
+        );
+        let root =
+            std::env::temp_dir().join(format!("whispertube-ffmpeg-duration-{}", Uuid::new_v4()));
+        let _guard = JobDirectoryGuard::create(root.clone()).unwrap();
+        for corrupt in [false, true] {
+            let input = root.join("source.wav");
+            let output = root.join("audio.wav");
+            let mut file = fs::File::create(&input).unwrap();
+            checkpoint::write_wav_header(&mut file, if corrupt { 60 * 32_000 } else { 32_000 })
+                .unwrap();
+            file.write_all(&vec![0; 32_000]).unwrap();
+            drop(file);
+            let mut command = super::ffmpeg_command(&ffmpeg, &input, &output, 60.0);
+            let (status, _) = crate::process::run_with_timeout_captured_cancelable(
+                &mut command,
+                std::time::Duration::from_secs(10),
+                4096,
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+            assert_eq!(status.success(), !corrupt, "corrupt={corrupt}");
+            if !corrupt {
+                let audio = checkpoint::PcmAudio::open(&output, 60.0, || false).unwrap();
+                assert_eq!(
+                    super::reconciled_audio_duration(&audio, 60.0),
+                    (1.0, Some(60.0))
+                );
+            }
+        }
+        // A longer source must not be cut to the metadata duration and then
+        // accepted as complete. The bounded sentinel is rejected instead.
+        let input = root.join("long-source.wav");
+        let output = root.join("long-audio.wav");
+        let mut file = fs::File::create(&input).unwrap();
+        checkpoint::write_wav_header(&mut file, 4 * 32_000).unwrap();
+        file.write_all(&vec![0; 4 * 32_000]).unwrap();
+        drop(file);
+        let mut command = super::ffmpeg_command(&ffmpeg, &input, &output, 1.0);
+        let (status, _) = crate::process::run_with_timeout_captured_cancelable(
+            &mut command,
+            std::time::Duration::from_secs(10),
+            4096,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert!(status.success());
+        assert!(super::validate_audio_wav(&output, 1.0).is_err());
+        assert!(checkpoint::PcmAudio::inspect(&output, 1.0, || false).is_err());
+    }
 
     #[test]
     fn replaces_invalid_utf8_without_panicking() {
@@ -2249,9 +2370,13 @@ mod tests {
     }
 
     #[test]
-    fn short_audio_is_padded_to_the_safe_minimum_duration() {
-        assert_eq!(ffmpeg_target_duration(0.25), 1.0);
-        assert_eq!(ffmpeg_target_duration(12.0), 12.0);
+    fn conversion_limit_includes_a_sentinel_beyond_the_accepted_duration() {
+        assert_eq!(ffmpeg_target_duration(0.25), 3.25);
+        assert_eq!(ffmpeg_target_duration(12.0), 15.0);
+        assert_eq!(
+            ffmpeg_target_duration(super::MAX_MEDIA_DURATION_SECONDS),
+            super::MAX_MEDIA_DURATION_SECONDS + 1.0
+        );
     }
 
     #[test]

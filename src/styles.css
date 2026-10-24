@@ -2134,6 +2134,13 @@ body:has(.window-titlebar) .history-modal-backdrop {
   line-height: 1.45;
 }
 
+.warning-inline {
+  padding: 12px 16px;
+  border-left: 3px solid #d4a248;
+  color: #e4cc9d;
+  line-height: 1.5;
+}
+
 .data-reset-warning {
   display: flex;
   align-items: flex-start;

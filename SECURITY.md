@@ -30,8 +30,21 @@ contains real account data.
 WhisperTube may use a user-selected Netscape-format cookies.txt file for
 login-protected media. The application does not ask for the website password,
 does not upload the file, and does not copy cookie contents into its database.
-The selected file is passed to yt-dlp only while the relevant local operation
-is running.
+The original selected file is left unchanged. For each relevant local operation,
+WhisperTube creates a temporary copy under its app-local `cookie-jars` directory
+and passes that copy to yt-dlp. The copy is removed when the operation finishes
+or is cancelled. A crash or cleanup failure can leave a copy on disk; startup
+attempts cleanup again and reports failures. Cookie contents are not copied into
+the history database. Treat the app-local directory and any backups as sensitive.
+
+On Unix, app-local storage and job directories are restricted to the owning OS
+account (0700), including existing application directories. macOS extended ACLs
+on these owned roots are cleared before use. Symlinked storage roots and roots
+owned by another OS account are rejected; parent directories outside the app's
+storage are not changed. This also protects existing internal files and SQLite
+sidecars. It cannot revoke access to bytes or open file handles obtained before
+the permissions were tightened. User-selected external exports retain their
+separate destination permission policy.
 
 Do not commit any of the following:
 
@@ -58,6 +71,10 @@ provided to release automation only through the repository secret
 TAURI_SIGNING_PRIVATE_KEY.
 
 ## Dependency audit status
+
+The 2026-10-24 remediation raises the Tokio minimum and lockfile to 1.53.3 for
+RUSTSEC-2026-0386. No exception was added for this advisory. The stricter gate
+again reports only the five upstream residuals described below.
 
 Dependency status is a dated observation, not a permanent assurance. Run
 `npm audit --audit-level=high` and `cargo audit --file src-tauri/Cargo.lock`

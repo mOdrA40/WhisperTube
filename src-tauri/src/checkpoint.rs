@@ -70,6 +70,10 @@ fn ordinary_file(path: &Path) -> Result<File, String> {
 }
 
 impl PcmAudio {
+    pub fn duration_seconds(&self) -> f64 {
+        self.samples as f64 / SAMPLE_RATE as f64
+    }
+
     pub fn inspect(
         path: &Path,
         duration: f64,
@@ -134,7 +138,10 @@ impl PcmAudio {
         if !duration.is_finite()
             || duration <= 0.0
             || duration > crate::transcription::MAX_MEDIA_DURATION_SECONDS
-            || samples > ((duration.max(1.0) + 1.0) * SAMPLE_RATE as f64) as u64
+            || samples
+                > ((duration + crate::transcription::MEDIA_DURATION_TOLERANCE_SECONDS)
+                    .min(crate::transcription::MAX_MEDIA_DURATION_SECONDS)
+                    * SAMPLE_RATE as f64) as u64
         {
             return Err("Durasi WAV berada di luar batas media.".into());
         }

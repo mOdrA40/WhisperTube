@@ -3,6 +3,17 @@ import { afterEach, expect, it, vi } from "vitest";
 import { I18nProvider } from "../../i18n";
 import { TranscriptCard } from "./TranscriptCard";
 afterEach(cleanup);
+it("shows the actual audio coverage without claiming the full source was transcribed", () => {
+  render(<I18nProvider><TranscriptCard result={{ historyId: 1, title: "Short audio", channel: "Channel", language: "en", duration: 1, sourceDuration: 60,
+    model: "base", backend: "cpu", segments: [], text: "", txtPath: "", srtPath: "", vttPath: "", audioPath: null }}
+    operationActive={false} copied={false} searchQuery="" filteredSegments={[]} onCopy={vi.fn()} onExport={vi.fn()}
+    onRevealAudio={vi.fn()} onSearchChange={vi.fn()} transcriptionElapsedMs={null} /></I18nProvider>);
+  expect(screen.getByText("Available audio transcribed")).toBeTruthy();
+  expect(screen.queryByText("Transcription complete")).toBeNull();
+  expect(screen.getByRole("status").textContent).toContain("00:01");
+  expect(screen.getByRole("status").textContent).toContain("01:00");
+  expect((screen.getByRole("button", { name: "TXT" }) as HTMLButtonElement).disabled).toBe(false);
+});
 it("keeps saved audio accessible while disabling deleted transcript actions", () => {
   const onRevealAudio = vi.fn();
   const onCopy = vi.fn();

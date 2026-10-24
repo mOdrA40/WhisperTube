@@ -69,6 +69,7 @@ pub(crate) fn metadata_only_result(
                     channel: row.get(1)?,
                     language: row.get(2)?,
                     duration: row.get(3)?,
+                    source_duration: None,
                     model: row.get(4)?,
                     backend: row.get(5)?,
                     segments: vec![],

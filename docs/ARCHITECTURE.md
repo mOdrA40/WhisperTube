@@ -139,10 +139,31 @@ are reported as unavailable instead of being guessed.
 Download speed uses yt-dlp's current transfer rate, which excludes the resume
 offset; the cumulative downloaded-byte counter still includes cached bytes.
 
-Metadata inspection has a bounded 45-second process timeout and bounded output
-retention. Download and inference paths use inactivity watchdogs; CPU
+Each metadata extractor invocation has a 45-second process timeout and bounded
+output retention. For missing duration on concrete Instagram Reels and LinkedIn
+post VOD routes, inspection downloads at most 32 MiB of audio to a bounded
+buffer under a separate 45-second watchdog, then decodes a temporary local file
+to a null sink under a 10-second watchdog. Machine-readable completed FFmpeg
+progress supplies measured duration; container text metadata is not trusted.
+Only local-file protocols are enabled for this probe. Known live/upcoming/
+processing streams and media above eight hours remain rejected. Other routes
+with unknown duration remain rejected. No new executable/dependency is bundled.
+Temporary files are removed on return; crash leftovers use the existing
+UUID-scoped, 24-hour transient cleanup. The transcription download applies the
+same source-aware filter and captures extractor duration at before_dl. If duration
+is still missing, it rechecks actual audio before conversion, rejects a difference
+above two seconds and uses measured duration for small rounding/codec-padding
+differences. A known extractor duration keeps the normal long-VOD path without
+an extra full decode under the probe watchdog. Inspection audio is not a persistent cache.
+Download and inference paths use inactivity watchdogs; CPU
 inference receives a longer allowance than downloads, conversion, and
 accelerated inference.
+
+Metadata errors distinguish explicit login, HTTP 403/session blocking, transient
+network/service errors and extractor parse failures. These codes, including
+unknown-duration errors, are preserved through ErrorPayload into localized UI
+messages; HTTP 403 alone is not treated as proof that a signed-in account is
+required. No unproven browser-profile or IPv4 retry is enabled globally.
 
 ## Storage model
 
@@ -275,12 +296,16 @@ macOS bootstrap builds pinned FFmpeg and both CPU and Apple Metal whisper.cpp
 engines. Linux bootstrap builds pinned static FFmpeg and a CPU whisper.cpp
 engine. The Unix scripts pin whisper.cpp v1.9.2 to commit
 306c88f4d1286aec1bf96e544632897886af5501. The published accelerator pack is
-released separately as accelerators-v0.1.2 and uses the same whisper.cpp v1.9.2
-runtime generation.
+released separately as accelerators-v0.1.3 and uses whisper.cpp v1.9.2.
+User-runtime manifests include the accelerator pack generation, so a legacy
+runtime cannot bypass a corrected catalog merely by matching the engine version.
 
 Downloaded model files are SHA-256 verified before use. The verification cache
 is valid only for the current file size and modification timestamp and is
 cleared by a data reset.
+Accelerator inference probes use the same verifier: an invalid model is skipped
+in favor of the next valid candidate. If models exist but none verify, installation
+reports a model error rather than misdiagnosing all GPU devices as incompatible.
 
 Archives are downloaded to unique temporary staging paths, checked for size
 and checksum limits, extracted with path-traversal protection, self-tested,
@@ -311,6 +336,8 @@ cuda:<index> and vulkan:<index> when available.
 
 CUDA model guardrails use free NVIDIA VRAM as a conservative preflight:
 approximately 2 GiB for Fast, 4 GiB for Balanced, and 7 GiB for Accurate.
+An explicit CUDA target uses only that adapter's telemetry. Unknown memory or
+a disappeared adapter cannot borrow the default GPU's available-memory value.
 These thresholds are not a universal guarantee because other GPU processes
 can consume memory.
 CUDA installation additionally requires a detected Windows x64 NVIDIA GPU and
@@ -376,12 +403,12 @@ workflow also checks the staged binary load paths and rejects external OpenMP
 runtime dependencies. Configuration-policy tests do not replace native
 artifact/inference QA.
 
-The application catalog still pins accelerators-v0.1.2. Its published Unix packs
-predate this recipe and contain build-host load paths; changing the workflow
-cannot repair those existing assets. Publish a new accelerator tag, inspect all
-four native packs, then update RELEASE_TAG and their verified SHA-256 pins via
-scripts/sync-accelerator-hashes.ps1 before the next application release. Never
-replace the old assets or use an application v* tag for this step.
+The application catalog pins the verified accelerators-v0.1.3 assets. The old
+v0.1.2 Unix packs contain build-host load paths and must not be reinstated.
+For a future pack generation, publish a new accelerator tag, inspect all four
+packs, update RELEASE_TAG, the accelerator manifest generation, and SHA-256 pins.
+The catalog/generation contract is tested. Never replace old assets or use an
+application v* tag for this step.
 
 See [Dependency audit status](../SECURITY.md#dependency-audit-status) for open inherited
 Rust advisories and the evidence required to close them.

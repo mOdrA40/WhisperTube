@@ -18,6 +18,9 @@ use crate::{
     types::VideoMetadata,
 };
 
+mod duration_probe;
+pub(crate) use duration_probe::probe_local_duration;
+
 #[derive(Clone, Copy)]
 struct SourceDefinition {
     label: &'static str,
@@ -141,10 +144,13 @@ const SOURCE_ACCESS_ERROR_PREFIX: &str = "media_source_access_required:";
 const SOURCE_UNAVAILABLE_ERROR_PREFIX: &str = "media_source_unavailable:";
 const SOURCE_INPUT_ERROR_PREFIX: &str = "media_source_input:";
 const SOURCE_DURATION_ERROR_PREFIX: &str = "media_source_duration:";
+const SOURCE_UNKNOWN_DURATION_ERROR_PREFIX: &str = "media_source_duration_unknown:";
 const SOURCE_COOKIE_FILE_ERROR_PREFIX: &str = "media_source_cookie_file:";
 const SOURCE_JS_RUNTIME_ERROR_PREFIX: &str = "media_source_js_runtime:";
 const SOURCE_RUNTIME_ERROR_PREFIX: &str = "media_source_runtime:";
 const SOURCE_METADATA_ERROR_PREFIX: &str = "media_source_metadata:";
+const SOURCE_BLOCKED_ERROR_PREFIX: &str = "media_source_blocked:";
+const SOURCE_EXTRACTOR_ERROR_PREFIX: &str = "media_source_extractor:";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MetadataRetryReason {
     TikTokRehydration,
@@ -199,6 +205,97 @@ pub(crate) fn validate_media_duration(duration: f64, is_live: bool) -> Result<()
         ));
     }
     Ok(())
+}
+
+// Only the concrete VOD route with a reproduced missing-duration failure is
+// eligible. Do not turn unknown live status on arbitrary sources into a VOD.
+pub(crate) fn is_instagram_reel(url: &str) -> bool {
+    if validate_media_url(url).is_err() {
+        return false;
+    }
+    let Ok(url) = Url::parse(url) else {
+        return false;
+    };
+    if url.scheme() != "https"
+        || !url
+            .host_str()
+            .is_some_and(|host| host_matches(host, "instagram.com"))
+    {
+        return false;
+    }
+    let parts = url.path().trim_matches('/').split('/').collect::<Vec<_>>();
+    parts.len() == 2 && matches!(parts[0], "reel" | "reels") && !parts[1].is_empty()
+}
+
+fn duration_probe_extractor(raw: &str) -> Option<&'static str> {
+    validate_media_url(raw).ok()?;
+    if is_instagram_reel(raw) {
+        return Some("Instagram");
+    }
+    let url = Url::parse(raw).ok()?;
+    (url.scheme() == "https"
+        && url
+            .host_str()
+            .is_some_and(|host| host_matches(host, "linkedin.com"))
+        && url.path().starts_with("/posts/")
+        && url.path().trim_matches('/').split('/').count() == 2)
+        .then_some("LinkedIn")
+}
+
+pub(crate) fn supports_duration_probe(url: &str) -> bool {
+    duration_probe_extractor(url).is_some()
+}
+
+pub(crate) fn download_media_filter(url: &str) -> String {
+    // Missing duration is permitted only on concrete VOD routes that are
+    // checked locally during inspection and again before audio conversion.
+    let optional = if supports_duration_probe(url) {
+        "?"
+    } else {
+        ""
+    };
+    format!("!is_live & live_status !=? is_upcoming & live_status !=? post_live & duration <={optional} {}", MAX_MEDIA_DURATION_SECONDS as u64)
+}
+
+fn inspected_duration(
+    value: &Value,
+    url: &str,
+    recover: impl FnOnce() -> Result<f64, String>,
+) -> Result<f64, String> {
+    let live = value
+        .get("is_live")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || matches!(
+            value.get("live_status").and_then(Value::as_str),
+            Some("is_live" | "is_upcoming" | "post_live")
+        );
+    if live {
+        return Err(format!(
+            "{SOURCE_DURATION_ERROR_PREFIX}Live stream aktif atau belum siap diproses."
+        ));
+    }
+    let duration = value
+        .get("duration")
+        .and_then(Value::as_f64)
+        .filter(|duration| duration.is_finite() && *duration > 0.0);
+    let duration = match duration {
+        Some(duration) => duration,
+        None if duration_probe_extractor(url).is_some()
+            && value.get("extractor_key").and_then(Value::as_str)
+                == duration_probe_extractor(url) =>
+        {
+            recover()?
+        }
+        None => {
+            return Err(format!(
+                "{SOURCE_UNKNOWN_DURATION_ERROR_PREFIX}Durasi tidak tersedia dari platform."
+            ))
+        }
+    };
+    validate_media_duration(duration, false)
+        .map_err(|error| format!("{SOURCE_DURATION_ERROR_PREFIX}{error}"))?;
+    Ok(duration)
 }
 
 fn source_label_from_metadata(value: &Value, safe_url: &str) -> Result<String, String> {
@@ -294,9 +391,25 @@ struct CapturedOutput {
 }
 
 fn run_output(
+    command: Command,
+    active_pid: &Arc<Mutex<Option<u32>>>,
+    cancelled: &Arc<AtomicBool>,
+) -> Result<CapturedOutput, String> {
+    run_output_limited(
+        command,
+        active_pid,
+        cancelled,
+        MAX_METADATA_STDOUT_BYTES,
+        METADATA_PROCESS_TIMEOUT,
+    )
+}
+
+fn run_output_limited(
     mut command: Command,
     active_pid: &Arc<Mutex<Option<u32>>>,
     cancelled: &Arc<AtomicBool>,
+    stdout_limit: usize,
+    timeout: Duration,
 ) -> Result<CapturedOutput, String> {
     let mut stdout = Vec::with_capacity(64 * 1024);
     let mut stderr = Vec::with_capacity(64 * 1024);
@@ -305,7 +418,7 @@ fn run_output(
     let mut active = None;
     let status = crate::process::run_piped(
         &mut command,
-        Some(METADATA_PROCESS_TIMEOUT),
+        Some(timeout),
         Some(cancelled),
         |pid| {
             active = Some(crate::process::ActiveProcessGuard::new(active_pid, pid)?);
@@ -315,11 +428,7 @@ fn run_output(
             use crate::process::{OutputEvent, OutputStream};
             if let OutputEvent::Data(stream, bytes) = event {
                 let (captured, limit, truncated) = match stream {
-                    OutputStream::Stdout => (
-                        &mut stdout,
-                        MAX_METADATA_STDOUT_BYTES,
-                        &mut stdout_truncated,
-                    ),
+                    OutputStream::Stdout => (&mut stdout, stdout_limit, &mut stdout_truncated),
                     OutputStream::Stderr => (
                         &mut stderr,
                         MAX_METADATA_STDERR_BYTES,
@@ -329,6 +438,11 @@ fn run_output(
                 let retained = bytes.len().min(limit.saturating_sub(captured.len()));
                 captured.extend_from_slice(&bytes[..retained]);
                 *truncated |= retained < bytes.len();
+                if stdout_truncated {
+                    return Err(
+                        "Output metadata/media terlalu besar untuk diproses dengan aman.".into(),
+                    );
+                }
             }
             Ok(())
         },
@@ -536,11 +650,12 @@ fn is_access_error(normalized: &str) -> bool {
         &[
             "sign in to confirm",
             "login required",
+            "authentication is required",
+            "login-required",
             "private video",
             "age-restricted",
             "age restricted",
             "http error 401",
-            "http error 403",
         ],
     )
 }
@@ -575,6 +690,7 @@ fn metadata_retry_reason(safe_url: &str, error: &str) -> Option<MetadataRetryRea
     if is_membership_error(&normalized)
         || is_access_error(&normalized)
         || is_unavailable_error(&normalized)
+        || normalized.contains("http error 403")
     {
         return None;
     }
@@ -632,11 +748,32 @@ fn metadata_error_prefix(safe_url: &str, error: &str) -> &'static str {
     {
         return SOURCE_JS_RUNTIME_ERROR_PREFIX;
     }
+    if normalized.contains("session request failed") && normalized.contains("http error 403") {
+        return SOURCE_BLOCKED_ERROR_PREFIX;
+    }
     if is_access_error(&normalized) {
         return SOURCE_ACCESS_ERROR_PREFIX;
     }
+    if normalized.contains("http error 403")
+        || normalized.contains("your ip address is unable to access")
+    {
+        return SOURCE_BLOCKED_ERROR_PREFIX;
+    }
     if is_unavailable_error(&normalized) {
         return SOURCE_UNAVAILABLE_ERROR_PREFIX;
+    }
+    if metadata_retry_reason(safe_url, error).is_none()
+        && contains_any(
+            &normalized,
+            &[
+                "an extractor error has occurred",
+                "unable to extract initial state",
+                "failed to extract",
+                "cannot parse data",
+            ],
+        )
+    {
+        return SOURCE_EXTRACTOR_ERROR_PREFIX;
     }
     match metadata_retry_reason(safe_url, error) {
         Some(MetadataRetryReason::TikTokRehydration) => TIKTOK_TRANSIENT_ERROR_PREFIX,
@@ -715,11 +852,10 @@ pub async fn inspect_media(
         }
         let value: Value = serde_json::from_slice(&output.stdout)
             .map_err(|e| format!("{SOURCE_METADATA_ERROR_PREFIX}Output metadata yt-dlp tidak valid: {e}"))?;
-        let duration = value.get("duration").and_then(Value::as_f64).unwrap_or(0.0);
-        let is_live = value.get("is_live").and_then(Value::as_bool).unwrap_or(false)
-            || matches!(value.get("live_status").and_then(Value::as_str), Some("is_live" | "is_upcoming"));
-        validate_media_duration(duration, is_live)
-            .map_err(|error| format!("{SOURCE_DURATION_ERROR_PREFIX}{error}"))?;
+        let duration = inspected_duration(&value, &safe_url, || {
+            duration_probe::recover_public_duration(&app, &yt_dlp, &safe_url, &runtime_args, &cookie_jar, &active_pid, &cancelled)
+                .map_err(|error| if cancelled.load(Ordering::SeqCst) || error.starts_with(SOURCE_DURATION_ERROR_PREFIX) { error } else { format!("{SOURCE_UNKNOWN_DURATION_ERROR_PREFIX}{error}") })
+        })?;
         let title = required_metadata_text(
             &value,
             "title",
@@ -843,6 +979,99 @@ mod tests {
         validate_media_duration, validate_media_url, MetadataRetryReason, METADATA_PRINT_TEMPLATE,
     };
     use serde_json::{json, Value};
+    use std::{
+        sync::{atomic::AtomicBool, Arc, Mutex},
+        time::Duration,
+    };
+
+    #[test]
+    fn missing_reel_duration_is_recovered_but_live_and_other_sources_are_not() {
+        let reel = "https://www.instagram.com/reels/Dez2E3jElJn/";
+        let missing = json!({"extractor_key": "Instagram", "duration": null});
+        assert_eq!(
+            super::inspected_duration(&missing, reel, || Ok(61.97)).unwrap(),
+            61.97
+        );
+        assert_eq!(
+            super::inspected_duration(
+                &json!({"extractor_key":"LinkedIn"}),
+                "https://www.linkedin.com/posts/example-activity-7151241570371948544-id",
+                || Ok(42.0)
+            )
+            .unwrap(),
+            42.0
+        );
+        for status in ["is_live", "is_upcoming", "post_live"] {
+            let live = json!({"extractor_key": "Instagram", "live_status": status});
+            assert!(
+                super::inspected_duration(&live, reel, || panic!("must not download live"))
+                    .unwrap_err()
+                    .starts_with("media_source_duration:")
+            );
+        }
+        assert!(
+            super::inspected_duration(&json!({"is_live": true}), reel, || panic!("live")).is_err()
+        );
+        assert_eq!(
+            super::inspected_duration(&json!({"duration": 60}), reel, || panic!("known duration"))
+                .unwrap(),
+            60.0
+        );
+        assert!(
+            super::inspected_duration(&json!({"duration": 28801}), reel, || panic!("too long"))
+                .is_err()
+        );
+        assert!(super::inspected_duration(&missing, reel, || Ok(28801.0)).is_err());
+        assert!(
+            super::inspected_duration(&missing, reel, || Err("cancelled".into()))
+                .unwrap_err()
+                .contains("cancelled")
+        );
+        for url in [
+            "https://user:password@instagram.com/reel/id",
+            "https://instagram.com.evil.test/reel/id",
+            "https://instagram.com/user/live",
+            "https://instagram.com/p/id",
+            "https://youtube.com/watch?v=id",
+        ] {
+            assert!(!super::is_instagram_reel(url));
+            assert!(
+                super::inspected_duration(&missing, url, || panic!("unsupported fallback"))
+                    .unwrap_err()
+                    .starts_with("media_source_duration_unknown:")
+            );
+        }
+        assert!(
+            super::inspected_duration(&json!({"extractor_key": "Other"}), reel, || panic!(
+                "wrong extractor"
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn bounded_media_capture_aborts_and_clears_the_process_tracker() {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "process::tests::captured_probe_child",
+                "--nocapture",
+            ])
+            .env("WHISPERTUBE_CAPTURE_CHILD", "large-stdout");
+        let tracker = Arc::new(Mutex::new(None));
+        let error = super::run_output_limited(
+            command,
+            &tracker,
+            &Arc::new(AtomicBool::new(false)),
+            4096,
+            Duration::from_secs(5),
+        )
+        .err()
+        .unwrap();
+        assert!(error.contains("terlalu besar"));
+        assert_eq!(*tracker.lock().unwrap(), None);
+    }
 
     #[test]
     fn metadata_channel_preserves_precedence_and_skips_empty_or_invalid_values() {
@@ -1053,6 +1282,25 @@ mod tests {
                 "ERROR: unable to download video"
             ),
             None
+        );
+    }
+
+    #[test]
+    fn source_failures_distinguish_access_blocks_from_explicit_login_and_extractor_breakage() {
+        let reddit = "https://www.reddit.com/r/test/comments/example";
+        for (message, expected) in [
+            ("Session request failed: HTTP Error 403: Blocked\nAccount authentication is required", super::SOURCE_BLOCKED_ERROR_PREFIX),
+            ("Account authentication is required", super::SOURCE_ACCESS_ERROR_PREFIX),
+            ("HTTP Error 403: Forbidden", super::SOURCE_BLOCKED_ERROR_PREFIX),
+            ("An extractor error has occurred. KeyError('bvid')", super::SOURCE_EXTRACTOR_ERROR_PREFIX),
+            ("Unable to extract initial state", super::SOURCE_EXTRACTOR_ERROR_PREFIX),
+            ("Connection timed out", super::SOURCE_TRANSIENT_ERROR_PREFIX),
+            ("HTTP Error 429; An extractor error has occurred", super::SOURCE_RATE_LIMITED_ERROR_PREFIX),
+            ("Connection timed out; failed to extract", super::SOURCE_TRANSIENT_ERROR_PREFIX),
+        ] { assert_eq!(metadata_error_prefix(reddit, message), expected, "{message}"); }
+        assert!(
+            metadata_retry_reason(reddit, "HTTP Error 403: Forbidden; Connection timed out")
+                .is_none()
         );
     }
 

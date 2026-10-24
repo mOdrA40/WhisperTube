@@ -9,6 +9,9 @@ on:
       - src-tauri/Cargo.toml
       - src-tauri/Cargo.lock
       - .github/workflows/dependency-audit.yml
+      - scripts/check-cargo-advisories.mjs
+      - scripts/cargo-advisory-policy.json
+      - scripts/test-cargo-advisories.mjs
   push:
     paths:
       - package.json
@@ -16,6 +19,9 @@ on:
       - src-tauri/Cargo.toml
       - src-tauri/Cargo.lock
       - .github/workflows/dependency-audit.yml
+      - scripts/check-cargo-advisories.mjs
+      - scripts/cargo-advisory-policy.json
+      - scripts/test-cargo-advisories.mjs
 
 permissions:
   contents: read
@@ -34,5 +40,7 @@ jobs:
         run: npm audit --audit-level=moderate
       - name: Install Cargo Audit
         run: cargo install cargo-audit --locked --version 0.22.2
-      - name: Audit Cargo (informational warnings remain open)
-        run: cargo audit --file src-tauri/Cargo.lock
+      - name: Test advisory regression gate
+        run: node --test scripts/test-cargo-advisories.mjs
+      - name: Audit Cargo (print tracked risks and reject new advisories)
+        run: node scripts/check-cargo-advisories.mjs

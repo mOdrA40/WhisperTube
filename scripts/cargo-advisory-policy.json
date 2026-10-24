@@ -1,0 +1,46 @@
+{
+  "reviewedOn": "2026-10-23",
+  "owner": "WhisperTube maintainers",
+  "knownRisks": [
+    {
+      "id": "RUSTSEC-2024-0370",
+      "package": "proc-macro-error",
+      "version": "1.0.4",
+      "kind": "unmaintained",
+      "upstream": "GTK3 glib-macros 0.18.5 and gtk3-macros 0.18.2 via Tauri/WebKitGTK on Linux",
+      "resolution": "Adopt compatible maintained GTK3 macro dependencies when upstream provides them; do not force GTK4 or fork the framework merely to clear an informational warning."
+    },
+    {
+      "id": "RUSTSEC-2026-0371",
+      "package": "zbus_names",
+      "version": "4.3.4",
+      "kind": "unmaintained",
+      "upstream": "zbus 5 via tauri-plugin-opener 2.5.5 and tauri-plugin-single-instance 2.x on Linux",
+      "resolution": "Upgrade the plugins when stable upstream supports zbus 6; its names module replaces this crate. A forced major replacement is not API compatible."
+    },
+    {
+      "id": "RUSTSEC-2026-0370",
+      "package": "zvariant",
+      "version": "5.15.0",
+      "kind": "unmaintained",
+      "upstream": "zbus 5 and zbus_macros 5 via the Linux opener/single-instance plugins",
+      "resolution": "Follow the plugins' compatible migration to zbus 6 and its wire module; verify D-Bus activation and single-instance behavior on native Linux."
+    },
+    {
+      "id": "RUSTSEC-2026-0372",
+      "package": "zvariant_derive",
+      "version": "5.15.0",
+      "kind": "unmaintained",
+      "upstream": "zvariant 5 via zbus 5 on Linux",
+      "resolution": "Remove with the upstream zbus 6 migration, not by mixing incompatible derive/runtime types."
+    },
+    {
+      "id": "RUSTSEC-2024-0429",
+      "package": "glib",
+      "version": "0.18.5",
+      "kind": "unsound",
+      "upstream": "GTK3/WebKitGTK/Tauri Linux dependency graph",
+      "resolution": "Track a compatible GTK3 fix for VariantStrIter; the fixed glib >=0.20 line cannot simply replace 0.18.5. Application reachability remains unproven and native Linux validation remains required."
+    }
+  ]
+}

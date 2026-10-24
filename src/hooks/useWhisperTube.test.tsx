@@ -138,6 +138,43 @@ describe("useWhisperTube", () => {
     expect(services.disposeAppUpdate).toHaveBeenCalledOnce();
   });
 
+  it.each([null, 0, 8192, "missing"] as const)("uses only the explicit CUDA adapter's memory (%s)", async (free) => {
+    services.getSystemStatus.mockResolvedValue({ ...system, nvidia: true, cudaSupported: true,
+      cudaInstallable: true, cudaEngine: true, gpuFreeMemoryMb: free === 8192 ? 0 : 8192,
+      computeDevices: free === "missing" ? [] : [{ id: "cuda:1", backend: "cuda", name: "Second GPU",
+        vendor: "nvidia", deviceIndex: 1, integrated: false, totalMemoryMb: 8192, freeMemoryMb: free }] });
+    services.listModels.mockResolvedValue([{ ...models[0], vramRequiredMb: 4096 }]);
+    const { result } = renderHook(() => useWhisperTube(), { wrapper });
+    await waitFor(() => expect(result.current.system?.cudaEngine).toBe(true));
+    act(() => { result.current.setComputeTarget("cuda:1"); result.current.setUrl(metadata.webpageUrl); });
+    await act(async () => result.current.inspectVideo());
+    if (free === 8192) {
+      expect(result.current.vramWarning).toBeNull();
+      expect(result.current.modelDownloadBlockReasons).toEqual({});
+      expect(result.current.canStart).toBe(true);
+    } else {
+      expect(result.current.vramWarning).toContain(free === 0 ? "but only 0.0 GB" : "VRAM could not be read");
+      expect(result.current.modelDownloadBlockReasons.base).toBe(result.current.vramWarning);
+      expect(result.current.canStart).toBe(false);
+    }
+  });
+
+  it.each(["success", "failure", "cancel"])("invalidates the lazy cache snapshot after transcription %s", async (outcome) => {
+    const entry = { id: "unfinished", title: "Video", sourceUrl: metadata.webpageUrl, bytes: 1024, modifiedAt: "2026-10-23T00:00:00Z" };
+    services.listJobCache.mockResolvedValue([entry]);
+    if (outcome !== "success") services.startTranscription.mockRejectedValueOnce(new Error(outcome === "cancel" ? "Job dibatalkan." : "inference failed"));
+    const { result } = renderHook(() => useWhisperTube(), { wrapper });
+    await waitFor(() => expect(result.current.system).toEqual(system));
+    await act(async () => result.current.loadJobCache());
+    expect(result.current.jobCache).toEqual([entry]);
+    act(() => result.current.setUrl(metadata.webpageUrl));
+    await act(async () => result.current.inspectVideo());
+    await act(async () => result.current.startTranscription());
+    expect(result.current.jobCache).toBeNull();
+    expect(services.listJobCache).toHaveBeenCalledOnce();
+    expect(result.current.busy).toBe(false);
+  });
+
   it.each(["RAM tidak cukup", "Job dibatalkan.", "Proses melewati batas waktu"])("offers persisted resume after transcription fails: %s", async (message) => {
     const { result } = renderHook(() => useWhisperTube(), { wrapper });
     await waitFor(() => expect(result.current.system).toEqual(system));
@@ -354,6 +391,27 @@ describe("useWhisperTube", () => {
     await act(async () => result.current.inspectVideo());
 
     expect(result.current.error).toBeNull();
+  });
+
+  it("explains missing duration separately from live or over-limit media", async () => {
+    services.inspectMedia.mockRejectedValueOnce(new Error("media_source_duration_unknown:probe failed"));
+    const { result } = renderHook(() => useWhisperTube(), { wrapper });
+    await waitFor(() => expect(result.current.system).toEqual(system));
+    act(() => result.current.setUrl("https://www.instagram.com/reels/Dez2E3jElJn/"));
+    await act(async () => result.current.inspectVideo());
+    expect(result.current.error).toContain("duration could not be verified");
+    expect(result.current.error).toContain("cookies.txt");
+    expect(result.current.metadata).toBeNull();
+    expect(result.current.canStart).toBe(false);
+  });
+
+  it.each([["media_source_blocked", "refused this request"], ["media_source_extractor", "could not read"]])("localizes structured IPC error %s", async (code, text) => {
+    services.inspectMedia.mockRejectedValueOnce({ code, detail: "native detail" });
+    const { result } = renderHook(() => useWhisperTube(), { wrapper });
+    await waitFor(() => expect(result.current.system).toEqual(system));
+    act(() => result.current.setUrl(metadata.webpageUrl));
+    await act(async () => result.current.inspectVideo());
+    expect(result.current.error).toContain(text);
   });
 
   it.each([0, 1024, null])("lets Auto fall back when installable CUDA has insufficient or unknown VRAM (%s)", async (free) => {

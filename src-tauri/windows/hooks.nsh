@@ -5,17 +5,15 @@
 Var WhisperTubeRemoveUserData
 
 !macro NSIS_HOOK_PREUNINSTALL
+  ; Use Tauri's confirmation-page checkbox as the only deletion decision.
+  ; Consume it before the template reaches its whole-app-data deletion block:
+  ; our POST hook owns the narrower, application-managed cleanup scope.
   StrCpy $WhisperTubeRemoveUserData "0"
-  MessageBox MB_YESNO|MB_ICONQUESTION \
-    "Remove WhisperTube user data too?$\r$\n$\r$\nThis deletes downloaded Whisper models, CUDA/Vulkan runtimes, history, saved audio, transcription jobs, and internal cookie copies. External files such as cookies.txt are not touched.$\r$\n$\r$\nChoose No to uninstall the application but keep the data for a future reinstall." \
-    IDYES whispertube_remove_data IDNO whispertube_keep_data
-
-  Goto whispertube_keep_data
-
-  whispertube_remove_data:
-    StrCpy $WhisperTubeRemoveUserData "1"
-
+  StrCmp $UpdateMode "1" whispertube_keep_data
+  StrCmp $DeleteAppDataCheckboxState "1" 0 whispertube_keep_data
+  StrCpy $WhisperTubeRemoveUserData "1"
   whispertube_keep_data:
+  StrCpy $DeleteAppDataCheckboxState "0"
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL

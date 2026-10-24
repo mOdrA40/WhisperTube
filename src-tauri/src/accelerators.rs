@@ -14,13 +14,13 @@ use tokio::io::AsyncWriteExt;
 
 use crate::{
     network,
-    paths::{engine_available, engine_path, is_regular_file, model_path, user_runtime_dir},
+    paths::{engine_available, engine_path, is_regular_file, models_dir, user_runtime_dir},
     process,
     types::{AcceleratorDownloadPayload, AcceleratorInfo},
 };
 
 const RELEASE_REPOSITORY: &str = "mOdrA40/WhisperTube";
-const RELEASE_TAG: &str = "accelerators-v0.1.2";
+const RELEASE_TAG: &str = "accelerators-v0.1.3";
 const MAX_ACCELERATOR_ARCHIVE_BYTES: u64 = 1024 * 1024 * 1024;
 // The lightest supported model needs about 2 GiB for shared-memory Vulkan;
 // keep an additional 512 MiB headroom for the process and operating system.
@@ -32,19 +32,19 @@ pub const MIN_VULKAN_INSTALL_MEMORY_MB: u64 = 2_560;
 // silently accepted by a shipped build.
 #[allow(dead_code)]
 const METAL_MACOS_ARM64_SHA256: Option<&str> =
-    Some("67e5c54b591fe3ddcc6818a5a8f1fa4f330a184ef10c00bf1403fe7cff3ea276");
+    Some("e35f4d2484f240885b932e8afb6753df1c2b6565377e39841c56e76376637aba");
 
 #[allow(dead_code)]
 const METAL_MACOS_X64_SHA256: Option<&str> =
-    Some("3c19d59d8933f8264efd6a37507595858223c12ac70c85011bf8c815f6b64aa3");
+    Some("1486ca997bc599d537b02e7916dc3f1c47c1d60d17b6574b4aff71e3f0f59bf7");
 
 #[allow(dead_code)]
 const VULKAN_WINDOWS_X64_SHA256: Option<&str> =
-    Some("e10c8238e23f60b611006d6dc0d53b7b18d4b70cc62232cfd6419cb9678430b1");
+    Some("a06d3d32d6d3a2e0350eb1b8703bb7fb9a0d53039ab50b41ba8440121d1b7c33");
 
 #[allow(dead_code)]
 const VULKAN_LINUX_X64_SHA256: Option<&str> =
-    Some("5fa88c7d584c626c47d3d27a96baf88cad4b971290992745ecb8d34d9c464671");
+    Some("b27cdd6f6bfb8669de97f137861c771560ccc774d881ef9d5b8d8f6b240a88bc");
 
 struct PackSpec {
     backend: &'static str,
@@ -444,14 +444,48 @@ fn write_capability_probe_wav(path: &Path) -> Result<(), String> {
     fs::write(path, wav).map_err(|e| format!("Gagal membuat audio capability probe: {e}"))
 }
 
-fn first_installed_model(app: &AppHandle) -> Result<Option<PathBuf>, String> {
+fn select_probe_model(
+    directory: &Path,
+    cancelled: &AtomicBool,
+    mut verify: impl FnMut(&Path, &str) -> Result<(), String>,
+) -> Result<Option<PathBuf>, String> {
+    let mut failures = Vec::new();
     for model_id in ["base", "large-v3-turbo-q5_0", "large-v3-q5_0"] {
-        let path = model_path(app, model_id)?;
-        if is_regular_file(&path) {
-            return Ok(Some(path));
+        crate::io_cancel::check(cancelled)?;
+        let path = directory.join(format!("ggml-{model_id}.bin"));
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(format!(
+                    "Model probe {model_id} tidak dapat diperiksa: {error}"
+                ))
+            }
+        };
+        let result = if metadata.is_file() && !metadata.file_type().is_symlink() {
+            verify(&path, model_id)
+        } else {
+            Err("Path model bukan file biasa.".into())
+        };
+        crate::io_cancel::check(cancelled)?;
+        match result {
+            Ok(()) => {
+                for failure in failures {
+                    eprintln!("WhisperTube skipped invalid probe model: {failure}");
+                }
+                return Ok(Some(path));
+            }
+            Err(error) => failures.push(format!("{model_id}: {error}")),
         }
     }
-    Ok(None)
+    if failures.is_empty() {
+        Ok(None)
+    } else {
+        Err(format!(
+            "Model untuk capability probe tidak valid. Hapus/unduh ulang model dari Settings. {}",
+            failures.join("; ")
+        ))
+    }
 }
 
 fn validate_staged_capability(
@@ -473,7 +507,10 @@ fn validate_staged_capability(
     } else {
         vec![None]
     };
-    let Some(model) = first_installed_model(app)? else {
+    let Some(model) = select_probe_model(&models_dir(app)?, cancelled, |path, id| {
+        crate::models::verify_model_file(path, id, cancelled)
+    })?
+    else {
         // A real inference probe cannot run before the user has downloaded a model.
         return Ok(());
     };
@@ -740,10 +777,92 @@ pub async fn install(
 
 #[cfg(test)]
 mod tests {
-    use super::{install_memory_status_for, pack_specs, MIN_VULKAN_INSTALL_MEMORY_MB};
+    use super::{
+        install_memory_status_for, pack_specs, select_probe_model, MIN_VULKAN_INSTALL_MEMORY_MB,
+    };
+    use std::{
+        fs,
+        sync::atomic::{AtomicBool, Ordering},
+    };
+
+    struct ProbeModels(std::path::PathBuf);
+    impl ProbeModels {
+        fn new() -> Self {
+            let directory =
+                std::env::temp_dir().join(format!("probe-models-{}", uuid::Uuid::new_v4()));
+            fs::create_dir(&directory).unwrap();
+            Self(directory)
+        }
+    }
+    impl Drop for ProbeModels {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    #[test]
+    fn probe_skips_corrupt_model_and_uses_next_verified_candidate() {
+        use sha2::{Digest, Sha256};
+        let fixture = ProbeModels::new();
+        fs::write(fixture.0.join("ggml-base.bin"), b"corrupt").unwrap();
+        let valid = fixture.0.join("ggml-large-v3-turbo-q5_0.bin");
+        fs::write(&valid, b"trusted fixture").unwrap();
+        let cancelled = AtomicBool::new(false);
+        let expected = format!("{:x}", Sha256::digest(b"trusted fixture"));
+        let mut checked = Vec::new();
+        let selected = select_probe_model(&fixture.0, &cancelled, |path, id| {
+            checked.push(id.to_string());
+            if crate::io_cancel::file_sha256(path, &cancelled)? == expected {
+                Ok(())
+            } else {
+                Err("checksum mismatch".into())
+            }
+        })
+        .unwrap();
+        assert_eq!(selected, Some(valid));
+        assert_eq!(checked, ["base", "large-v3-turbo-q5_0"]);
+    }
+
+    #[test]
+    fn absent_models_skip_inference_but_invalid_models_report_model_error() {
+        let fixture = ProbeModels::new();
+        let cancelled = AtomicBool::new(false);
+        assert_eq!(
+            select_probe_model(&fixture.0, &cancelled, |_, _| panic!("no file to verify")).unwrap(),
+            None
+        );
+        fs::create_dir(fixture.0.join("ggml-base.bin")).unwrap();
+        fs::write(fixture.0.join("ggml-large-v3-q5_0.bin"), b"corrupt").unwrap();
+        let error = select_probe_model(&fixture.0, &cancelled, |_, _| {
+            Err("checksum mismatch".into())
+        })
+        .unwrap_err();
+        assert!(error.contains("Model untuk capability probe tidak valid"));
+        assert!(error.contains("base: Path model bukan file biasa"));
+        assert!(error.contains("large-v3-q5_0: checksum mismatch"));
+    }
+
+    #[test]
+    fn probe_model_cancellation_is_not_reclassified_as_invalid_model() {
+        let fixture = ProbeModels::new();
+        fs::write(fixture.0.join("ggml-base.bin"), b"candidate").unwrap();
+        let cancelled = AtomicBool::new(false);
+        let error = select_probe_model(&fixture.0, &cancelled, |_, _| {
+            cancelled.store(true, Ordering::SeqCst);
+            Err("verification interrupted".into())
+        })
+        .unwrap_err();
+        assert!(error.contains("dibatalkan"));
+        assert!(!error.contains("tidak valid"));
+        assert!(
+            select_probe_model(&fixture.0, &cancelled, |_, _| panic!("already cancelled")).is_err()
+        );
+    }
 
     #[test]
     fn pack_asset_matches_target_platform() {
+        assert!(crate::paths::accelerator_runtime_manifest_version()
+            .starts_with(&format!("{}/", super::RELEASE_TAG)));
         let specs = pack_specs();
         if cfg!(target_os = "windows") && cfg!(target_arch = "x86_64") {
             assert_eq!(specs[0].asset_name, "whispertube-windows-x64-vulkan.zip");

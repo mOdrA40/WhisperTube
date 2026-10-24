@@ -18,6 +18,9 @@ impl From<String> for ErrorPayload {
             "media_source_unavailable",
             "media_source_input",
             "media_source_duration",
+            "media_source_duration_unknown",
+            "media_source_blocked",
+            "media_source_extractor",
             "media_source_cookie_file",
             "media_source_js_runtime",
             "media_source_runtime",
@@ -54,6 +57,22 @@ impl From<&str> for ErrorPayload {
 fn non_empty_detail(value: &str) -> Option<String> {
     let value = value.trim();
     (!value.is_empty()).then(|| value.to_string())
+}
+
+#[cfg(test)]
+mod error_tests {
+    #[test]
+    fn source_diagnostics_survive_the_ipc_boundary() {
+        for code in [
+            "media_source_duration_unknown",
+            "media_source_blocked",
+            "media_source_extractor",
+        ] {
+            let error = super::ErrorPayload::from(format!("{code}:safe detail"));
+            assert_eq!(error.code, code);
+            assert_eq!(error.detail.as_deref(), Some("safe detail"));
+        }
+    }
 }
 
 pub(crate) const MAX_TRANSCRIPT_RESULT_BYTES: u64 = 32 * 1024 * 1024;

@@ -67,14 +67,26 @@ runs npm and Cargo audits for dependency-file changes. Release workflows do not
 wait for a separate test/lint quality gate. Do not suppress audit failures to publish a release.
 Check the resolved versions and enabled features as well as the advisory count.
 
-The remediation baseline checked on 2026-10-21 reports zero npm vulnerabilities
-and zero Cargo vulnerability matches. Cargo still reports nine unmaintained
-package warnings and one unsoundness warning. In particular, Linux builds
+The remediation baseline checked on 2026-10-23 reports zero npm vulnerabilities
+and zero Cargo vulnerability matches. Updating the compatible tauri-utils
+dependency to 2.10.2 removed all five unmaintained unic-* packages. Cargo still
+reports four unmaintained package warnings and one unsoundness warning.
+The remaining GTK3 macro and zbus 5 dependencies come from upstream stable
+desktop components; replacing them with GTK4 or zbus 6 is not an API-compatible
+dependency substitution. In particular, Linux builds
 inherit GTK3 `glib 0.18.5` through Tauri/WebKitGTK; RUSTSEC-2024-0429 concerns
 its `VariantStrIter` implementation. No compatible fixed GTK3 dependency line
 has been applied here. This residual requires upstream tracking and native
 Linux validation; a passing audit exit code does not mean Linux is fully
 hardened or that the application is free of vulnerabilities.
+
+Run `node scripts/check-cargo-advisories.mjs` for the stricter regression gate
+also used in dependency CI. It prints every tracked residual, fails for any
+vulnerability or unavailable audit, and rejects new advisories or changes to
+their package version/kind. `scripts/cargo-advisory-policy.json` records the
+exact residuals, owner, upstream dependency path and resolution requirements.
+This is not a blanket advisory ignore: the four unmaintained packages and glib
+unsoundness remain open until a compatible upstream migration is verified.
 
 The application ZIP reader uses ZIP 9.0.5 or newer. The updater's optional
 Windows ZIP / Linux gzip support is disabled: the application release workflow

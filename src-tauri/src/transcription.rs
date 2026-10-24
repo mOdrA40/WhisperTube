@@ -275,10 +275,23 @@ pub(crate) fn cached_job_source(job_dir: &Path) -> Option<(String, String)> {
 
 fn find_reusable_audio_job(
     jobs_dir: &Path,
-    request: &TranscriptRequest,
+    request: &mut TranscriptRequest,
     committed_jobs: &HashSet<PathBuf>,
-) -> Result<Option<PathBuf>, String> {
-    find_reusable_audio_job_for_source(jobs_dir, &request.url, request.duration, committed_jobs)
+) -> Result<Option<(PathBuf, bool)>, String> {
+    let job = find_reusable_audio_job_for_source(
+        jobs_dir,
+        &request.url,
+        request.duration,
+        committed_jobs,
+    )?;
+    Ok(job.map(|(path, cache)| {
+        if cache.audio_ready {
+            // Checkpoints belong to the measured audio duration, which may
+            // differ slightly from the metadata sent again by the frontend.
+            request.duration = cache.duration;
+        }
+        (path, cache.audio_ready)
+    }))
 }
 
 fn find_reusable_audio_job_for_source(
@@ -286,7 +299,7 @@ fn find_reusable_audio_job_for_source(
     url: &str,
     duration: f64,
     committed_jobs: &HashSet<PathBuf>,
-) -> Result<Option<PathBuf>, String> {
+) -> Result<Option<(PathBuf, AudioCacheMetadata)>, String> {
     let canonical_root = fs::canonicalize(jobs_dir)
         .map_err(|error| format!("Gagal memvalidasi folder cache audio: {error}"))?;
     let mut candidates = Vec::new();
@@ -320,7 +333,7 @@ fn find_reusable_audio_job_for_source(
             || !cache.duration.is_finite()
             || cache.duration <= 0.0
             || cache.duration > MAX_MEDIA_DURATION_SECONDS
-            || (cache.duration - duration).abs() > 1.0
+            || (cache.duration - duration).abs() > MEDIA_DURATION_TOLERANCE_SECONDS
         {
             continue;
         }
@@ -331,17 +344,20 @@ fn find_reusable_audio_job_for_source(
         }
         if cache.audio_ready {
             let audio = canonical_job_dir.join("audio.wav");
-            if checkpoint::PcmAudio::inspect(&audio, duration, || false).is_err() {
+            if checkpoint::PcmAudio::inspect(&audio, cache.duration, || false).is_err() {
                 continue;
             }
         }
         let modified = fs::metadata(&canonical_job_dir)
             .and_then(|metadata| metadata.modified())
             .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-        candidates.push((modified, canonical_job_dir));
+        candidates.push((modified, canonical_job_dir, cache));
     }
     candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.0));
-    Ok(candidates.into_iter().next().map(|(_, path)| path))
+    Ok(candidates
+        .into_iter()
+        .next()
+        .map(|(_, path, cache)| (path, cache)))
 }
 
 fn resume_stage_in(
@@ -351,12 +367,11 @@ fn resume_stage_in(
     committed: &HashSet<PathBuf>,
 ) -> Result<Option<crate::types::TranscriptionResumeStage>, String> {
     use crate::types::TranscriptionResumeStage;
-    let Some(job) = find_reusable_audio_job_for_source(root, url, duration, committed)? else {
+    let Some((job, cache)) = find_reusable_audio_job_for_source(root, url, duration, committed)?
+    else {
         return Ok(None);
     };
-    if read_audio_cache_metadata(&job.join(AUDIO_CACHE_METADATA_FILE))
-        .is_some_and(|cache| cache.audio_ready)
-    {
+    if cache.audio_ready {
         return Ok(Some(TranscriptionResumeStage::Audio));
     }
     for entry in fs::read_dir(&job).map_err(|e| format!("Gagal membaca progres unduhan: {e}"))? {
@@ -394,6 +409,7 @@ pub fn resume_stage(
 
 const MAX_CAPTURED_STDERR_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_MEDIA_DURATION_SECONDS: f64 = 8.0 * 60.0 * 60.0;
+const MEDIA_DURATION_TOLERANCE_SECONDS: f64 = 2.0;
 const MAX_MEDIA_DOWNLOAD_BYTES: &str = "4G";
 const MAX_MEDIA_DOWNLOAD_BYTES_VALUE: u64 = 4 * 1024 * 1024 * 1024;
 const AUDIO_CACHE_METADATA_FILE: &str = ".audio-cache.json";
@@ -622,12 +638,34 @@ fn run_media_command(
     Ok((status, stderr))
 }
 
+fn download_needs_duration_probe(value: &str, inspected: f64) -> Result<bool, String> {
+    let Some(duration) = value
+        .parse::<f64>()
+        .ok()
+        .filter(|duration| duration.is_finite() && *duration > 0.0)
+    else {
+        return Ok(true);
+    };
+    validate_media_duration(duration, false)?;
+    if (duration - inspected).abs() > MEDIA_DURATION_TOLERANCE_SECONDS {
+        return Err(
+            "Durasi audio berubah setelah pemeriksaan. Periksa ulang URL sebelum transkripsi."
+                .into(),
+        );
+    }
+    Ok(false)
+}
+
 fn run_download(
     context: &JobContext,
     request: &TranscriptRequest,
     job_dir: &Path,
-) -> Result<PathBuf, String> {
+) -> Result<(PathBuf, bool), String> {
     let yt_dlp = tool_path(context.app, "yt-dlp")?;
+    let probe_eligible = crate::sources::supports_duration_probe(&request.url);
+    // Fail closed if the marker is absent. A known extractor duration keeps
+    // the existing long-VOD path, without an extra full decode under 10 seconds.
+    let mut needs_duration_probe = probe_eligible;
     let template = job_dir.join("source.%(ext)s");
     let mut command = Command::new(yt_dlp);
     process::hide_console(&mut command);
@@ -641,10 +679,7 @@ fn run_download(
         })?;
     command
         .args(["--ignore-config", "--continue", "--part", "--no-playlist", "--match-filter"])
-        .arg(format!(
-            "!is_live & duration <= {}",
-            MAX_MEDIA_DURATION_SECONDS as u64
-        ))
+        .arg(crate::sources::download_media_filter(&request.url))
         .args([
             "--max-filesize",
             MAX_MEDIA_DOWNLOAD_BYTES,
@@ -660,6 +695,9 @@ fn run_download(
         .arg(&template)
         .args(source_js_runtime_args(&request.url, context.active_pid, context.cancelled)?)
         .args(cookie_jar.args())
+        .args(if probe_eligible {
+            vec!["--no-simulate", "--print", "before_dl:WT_SOURCE_DURATION=%(duration|NA)s"]
+        } else { vec![] })
         .arg(&request.url)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -676,6 +714,11 @@ fn run_download(
         PROCESS_INACTIVITY_TIMEOUT,
         None,
         |line| {
+            if probe_eligible {
+                if let Some(value) = line.strip_prefix("WT_SOURCE_DURATION=") {
+                    needs_duration_probe = download_needs_duration_probe(value, request.duration)?;
+                }
+            }
             if let Some(caps) = progress_re.captures(line) {
                 let downloaded_bytes = caps.get(2).and_then(|value| value.as_str().parse().ok());
                 let total_bytes = caps
@@ -750,7 +793,7 @@ fn run_download(
     if source_size > MAX_MEDIA_DOWNLOAD_BYTES_VALUE {
         return Err("Audio sumber melebihi batas ukuran download yang diizinkan.".into());
     }
-    Ok(source)
+    Ok((source, needs_duration_probe))
 }
 
 fn download_speed(raw: &str) -> Option<u64> {
@@ -1513,11 +1556,11 @@ pub fn pipeline(
         .saturating_add(model_bytes)
         .saturating_add(512 * 1024 * 1024);
     let committed_jobs = history::referenced_job_directories(&app)?;
-    let reusable_job_dir = find_reusable_audio_job(&jobs_dir, &request, &committed_jobs)?;
-    let audio_ready = reusable_job_dir
-        .as_ref()
-        .and_then(|path| read_audio_cache_metadata(&path.join(AUDIO_CACHE_METADATA_FILE)))
-        .is_some_and(|cache| cache.audio_ready);
+    let (reusable_job_dir, audio_ready) =
+        match find_reusable_audio_job(&jobs_dir, &mut request, &committed_jobs)? {
+            Some((path, ready)) => (Some(path), ready),
+            None => (None, false),
+        };
     if !audio_ready {
         crate::resources::require_memory(inference_required, "transkripsi")?;
     }
@@ -1581,9 +1624,22 @@ pub fn pipeline(
             total_bytes: None,
             network_bytes_per_second: None,
         });
-        let source = run_download(&context, &request, &job_dir)?;
+        let (source, needs_duration_probe) = run_download(&context, &request, &job_dir)?;
         if context.is_cancelled() {
             return Err("Job dibatalkan.".into());
+        }
+
+        if needs_duration_probe {
+            let actual =
+                crate::sources::probe_local_duration(&ffmpeg, &source, &active_pid, &cancelled)?;
+            if (actual - request.duration).abs() > MEDIA_DURATION_TOLERANCE_SECONDS {
+                return Err("Durasi audio berubah setelah pemeriksaan. Periksa ulang URL sebelum transkripsi.".into());
+            }
+            // Metadata can round seconds or include slightly different codec
+            // padding. Convert the measured audio length, never truncate it to
+            // the earlier estimate after accepting this small difference.
+            request.duration = actual;
+            write_audio_cache_metadata(&job_dir, &request, false)?;
         }
 
         context.emit(ProgressUpdate {
@@ -1744,6 +1800,21 @@ pub fn pipeline(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn downloaded_duration_preserves_known_long_vod_and_verifies_unknown_or_changed_sources() {
+        assert!(!super::download_needs_duration_probe("7200.25", 7200.0).unwrap());
+        assert!(!super::download_needs_duration_probe("61.97", 61.97).unwrap());
+        for missing in ["NA", "0", "-1", "NaN", "inf", "", "not-a-duration"] {
+            assert!(
+                super::download_needs_duration_probe(missing, 61.97).unwrap(),
+                "{missing}"
+            );
+        }
+        assert!(super::download_needs_duration_probe("28801", 28801.0).is_err());
+        assert!(super::download_needs_duration_probe("600", 61.97)
+            .unwrap_err()
+            .contains("berubah"));
+    }
+    #[test]
     fn download_speed_uses_the_upstream_transfer_rate_not_cached_bytes() {
         assert_eq!(super::download_speed("1048576.5"), Some(1_048_576));
         assert_eq!(super::download_speed("1.048576e6"), Some(1_048_576));
@@ -1760,7 +1831,7 @@ mod tests {
         ComputeDeviceInfo, JobDirectoryGuard, CPU_INACTIVITY_TIMEOUT, DISK_SAFETY_BUFFER_BYTES,
         PROCESS_INACTIVITY_TIMEOUT,
     };
-    use crate::types::TranscriptRequest;
+    use crate::{checkpoint, types::TranscriptRequest};
     use std::{
         collections::HashSet,
         fs,
@@ -1818,6 +1889,137 @@ mod tests {
     }
 
     #[test]
+    fn resume_restores_measured_duration_and_reuses_completed_checkpoints() {
+        for measured in [620.03, 621.5, 622.0, 618.5] {
+            let root =
+                std::env::temp_dir().join(format!("whispertube-duration-{}", Uuid::new_v4()));
+            let _root_guard = JobDirectoryGuard::create(root.clone()).unwrap();
+            let job = root.join("saved-job");
+            let _job_guard = JobDirectoryGuard::create(job.clone()).unwrap();
+            let mut request = TranscriptRequest {
+                url: "https://www.linkedin.com/posts/resume-test".into(),
+                title: "Cached video".into(),
+                channel: "Test channel".into(),
+                duration: measured,
+                cookies_path: None,
+                backend: "cpu".into(),
+                compute_device_id: None,
+                language: "id".into(),
+                model_id: "base".into(),
+                keep_audio: false,
+            };
+            let wav = job.join("audio.wav");
+            let bytes = (measured * checkpoint::SAMPLE_RATE as f64).round() as u64 * 2;
+            let mut file = fs::File::create(&wav).unwrap();
+            checkpoint::write_wav_header(&mut file, bytes).unwrap();
+            file.set_len(bytes + 44).unwrap();
+            drop(file);
+            write_audio_cache_metadata(&job, &request, true).unwrap();
+            let audio = checkpoint::PcmAudio::open(&wav, measured, || false).unwrap();
+            let output = || checkpoint::ChunkOutput {
+                language: "id".into(),
+                backend: "cpu".into(),
+                segments: vec![crate::types::Segment {
+                    from: "00:00:00,000".into(),
+                    to: "00:00:01,000".into(),
+                    text: "saved chunk".into(),
+                }],
+            };
+            let mut calls = 0;
+            assert!(checkpoint::transcribe(
+                &audio,
+                &job,
+                &request,
+                |_, _, _, _| {
+                    calls += 1;
+                    if calls == 2 {
+                        Err("inference interrupted".into())
+                    } else {
+                        Ok(output())
+                    }
+                },
+                || false,
+                |_, _| {},
+            )
+            .is_err());
+            drop(audio);
+
+            // The frontend retries with its original inspection metadata.
+            request.duration = 620.0;
+            assert_eq!(
+                super::resume_stage_in(&root, &request.url, request.duration, &HashSet::new())
+                    .unwrap(),
+                Some(crate::types::TranscriptionResumeStage::Audio)
+            );
+            let (resumed_job, ready) =
+                find_reusable_audio_job(&root, &mut request, &HashSet::new())
+                    .unwrap()
+                    .unwrap();
+            assert!(ready);
+            assert_eq!(request.duration.to_bits(), measured.to_bits());
+            super::validate_audio_wav(&resumed_job.join("audio.wav"), request.duration).unwrap();
+            let audio = checkpoint::PcmAudio::open(
+                &resumed_job.join("audio.wav"),
+                request.duration,
+                || false,
+            )
+            .unwrap();
+            let mut rerun = 0;
+            let mut reused = 0;
+            checkpoint::transcribe(
+                &audio,
+                &resumed_job,
+                &request,
+                |_, _, _, _| {
+                    rerun += 1;
+                    Ok(output())
+                },
+                || false,
+                |_, saved| reused += usize::from(saved),
+            )
+            .unwrap();
+            assert_eq!(reused, 1, "measured duration {measured}");
+            assert_eq!(rerun, 2, "measured duration {measured}");
+        }
+    }
+
+    #[test]
+    fn resume_preserves_inspected_duration_until_audio_is_ready_and_rejects_changed_sources() {
+        let root = std::env::temp_dir().join(format!("whispertube-duration-{}", Uuid::new_v4()));
+        let _root_guard = JobDirectoryGuard::create(root.clone()).unwrap();
+        let job = root.join("saved-job");
+        let _job_guard = JobDirectoryGuard::create(job.clone()).unwrap();
+        let mut request = TranscriptRequest {
+            url: "https://www.linkedin.com/posts/resume-test".into(),
+            title: "Cached video".into(),
+            channel: "Test channel".into(),
+            duration: 621.5,
+            cookies_path: None,
+            backend: "cpu".into(),
+            compute_device_id: None,
+            language: "id".into(),
+            model_id: "base".into(),
+            keep_audio: false,
+        };
+        write_audio_cache_metadata(&job, &request, false).unwrap();
+        request.duration = 620.0;
+        let (_, ready) = find_reusable_audio_job(&root, &mut request, &HashSet::new())
+            .unwrap()
+            .unwrap();
+        assert!(!ready);
+        assert_eq!(request.duration, 620.0);
+        for changed in [619.499, 623.501] {
+            request.duration = changed;
+            assert!(
+                find_reusable_audio_job(&root, &mut request, &HashSet::new())
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(request.duration, changed);
+        }
+    }
+
+    #[test]
     fn finds_matching_saved_audio_job_without_reusing_another_video() {
         let root =
             std::env::temp_dir().join(format!("whispertube-audio-cache-test-{}", Uuid::new_v4()));
@@ -1862,8 +2064,8 @@ mod tests {
         };
 
         assert_eq!(
-            find_reusable_audio_job(&root, &matching_request, &HashSet::new()).unwrap(),
-            Some(fs::canonicalize(&job).unwrap())
+            find_reusable_audio_job(&root, &mut matching_request.clone(), &HashSet::new()).unwrap(),
+            Some((fs::canonicalize(&job).unwrap(), true))
         );
         use crate::types::TranscriptionResumeStage;
         let stage = |url: &str, committed: &HashSet<std::path::PathBuf>| {
@@ -1875,7 +2077,7 @@ mod tests {
         );
         assert_eq!(stage(&other_request.url, &HashSet::new()), None);
         assert_eq!(
-            find_reusable_audio_job(&root, &other_request, &HashSet::new()).unwrap(),
+            find_reusable_audio_job(&root, &mut other_request.clone(), &HashSet::new()).unwrap(),
             None
         );
         // Resume is independent of the preference to keep audio after success.
@@ -1893,8 +2095,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            find_reusable_audio_job(&root, &no_keep_request, &HashSet::new()).unwrap(),
-            Some(fs::canonicalize(&job).unwrap())
+            find_reusable_audio_job(&root, &mut no_keep_request.clone(), &HashSet::new()).unwrap(),
+            Some((fs::canonicalize(&job).unwrap(), true))
         );
         // An interrupted download has metadata but no completed WAV yet.
         let saved_audio = fs::read(job.join("audio.wav")).unwrap();
@@ -1911,22 +2113,22 @@ mod tests {
         fs::write(job.join("source.webm.part"), b"").unwrap();
         assert_eq!(stage(&matching_request.url, &HashSet::new()), None);
         assert_eq!(
-            find_reusable_audio_job(&root, &no_keep_request, &HashSet::new()).unwrap(),
-            Some(fs::canonicalize(&job).unwrap())
+            find_reusable_audio_job(&root, &mut no_keep_request.clone(), &HashSet::new()).unwrap(),
+            Some((fs::canonicalize(&job).unwrap(), false))
         );
         fs::write(job.join("audio.wav"), saved_audio).unwrap();
         write_audio_cache_metadata(&job, &matching_request, true).unwrap();
         // A result written before a rolled-back commit must still resume.
         fs::write(job.join("result.json"), b"uncommitted result").unwrap();
         assert_eq!(
-            find_reusable_audio_job(&root, &no_keep_request, &HashSet::new()).unwrap(),
-            Some(fs::canonicalize(&job).unwrap())
+            find_reusable_audio_job(&root, &mut no_keep_request.clone(), &HashSet::new()).unwrap(),
+            Some((fs::canonicalize(&job).unwrap(), true))
         );
         // A committed row, even with a marker left by a crash, prevents duplication.
         let committed = HashSet::from([fs::canonicalize(&job).unwrap()]);
         assert_eq!(stage(&matching_request.url, &committed), None);
         assert_eq!(
-            find_reusable_audio_job(&root, &no_keep_request, &committed).unwrap(),
+            find_reusable_audio_job(&root, &mut no_keep_request.clone(), &committed).unwrap(),
             None
         );
         fs::write(job.join("audio.wav"), b"truncated WAV").unwrap();

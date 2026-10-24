@@ -18,6 +18,14 @@ Untuk menjaga pemakaian disk dan memori tetap terprediksi, transkripsi dibatasi 
 
 ## Fitur
 
+Jika durasi Instagram Reels atau post video LinkedIn publik tidak tersedia,
+**Periksa video** mencoba mengunduh audio sementara tanpa mewajibkan cookies:
+maksimal 32 MiB/45 detik, lalu verifikasi audio lokal maksimal 10 detik.
+File sementara dibersihkan setelah pemeriksaan. Ini dapat menambah waktu dan
+pemakaian bandwidth pemeriksaan; audio diunduh kembali saat transkripsi.
+Media dengan durasi yang tetap tidak dapat diverifikasi ditolak dengan pesan
+khusus. Pembatasan login, wilayah, dan anti-bot tetap dapat memerlukan cookies.
+
 Prasyarat YouTube untuk aplikasi yang sudah diinstal: pasang [Node.js 22+](https://nodejs.org/en/download) atau [Deno 2.3+](https://docs.deno.com/runtime/getting_started/installation/), masukkan ke PATH, lalu mulai ulang WhisperTube. Installer membawa script EJS yt-dlp, tetapi tidak membundel runtime JavaScript. Aplikasi memeriksa prasyarat ini sebelum ekstraksi YouTube dan menampilkan error khusus bila runtime tidak tersedia atau tidak didukung. Platform lain tetap dapat digunakan tanpa prasyarat ini. Mengunduh model Whisper tidak memasang runtime JavaScript.
 
 - Tempel URL video yang didukung dan periksa metadata sebelum download.
@@ -100,8 +108,10 @@ eksternal seperti `cookies.txt` pilihan user dan export di luar storage
 WhisperTube tidak ikut dihapus.
 
 - **Windows NSIS setup EXE:** uninstall dari Windows Settings atau `uninstall.exe`
-  menampilkan prompt cleanup. Pilihan cleanup menghapus data lokal WhisperTube;
-  pilihan simpan data mempertahankannya untuk reinstall berikutnya.
+  menyediakan satu checkbox penghapusan data aplikasi. Biarkan kosong untuk
+  mempertahankan data saat reinstall, atau centang untuk menghapus hanya data
+  yang dikelola WhisperTube di atas. WebView/konfigurasi dan file eksternal
+  tetap dipertahankan. Pembaruan aplikasi selalu mempertahankan data pengguna.
 - **macOS DMG/app:** memindahkan `.app` ke Trash menghapus aplikasi, tetapi
   tidak menghapus app-local-data. Gunakan reset dari dalam aplikasi jika ingin
   cleanup penuh.

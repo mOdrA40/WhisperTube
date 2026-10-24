@@ -18,6 +18,11 @@ WhisperTube 是一款 local-first 桌面应用，使用 `yt-dlp`、FFmpeg 和 wh
 
 ## 功能
 
+公开 Instagram Reels 或 LinkedIn 视频帖子缺少时长时，检查功能会尝试临时下载
+音频（最多 32 MiB、45 秒），再用本地音频验证时长（最多 10 秒）。成功时无需
+cookies。临时文件会被清理，转录时会再次下载音频；登录、地区和反机器人限制
+仍可能需要 cookies。
+
 已安装应用的 YouTube 前提条件：安装 [Node.js 22+](https://nodejs.org/en/download) 或 [Deno 2.3+](https://docs.deno.com/runtime/getting_started/installation/)，将其加入 PATH，然后重启 WhisperTube。安装包包含 yt-dlp 的 EJS 脚本，但不包含 JavaScript 运行环境。应用会在提取 YouTube 信息前检查此前提条件，并在运行环境缺失或版本不受支持时显示明确错误。其他支持的平台不受此前提条件限制。下载 Whisper 模型不会安装 JavaScript 运行环境。
 
 - 粘贴受支持的视频 URL，在下载前检查视频元数据。
@@ -76,7 +81,8 @@ WhisperTube 将已安装的应用文件与用户数据分开保存。若要在�
 选择的 `cookies.txt`）以及 WhisperTube 存储目录之外的导出文件不会被删除。
 
 - **Windows NSIS setup EXE：** 从 Windows Settings 或 `uninstall.exe` 卸载时会
-  显示清理提示。选择清理会删除 WhisperTube 本地数据；选择保留则方便以后重新安装。
+  显示一个删除应用数据的复选框。不勾选会保留数据以便重新安装；勾选只会删除上述
+  WhisperTube 管理的数据。WebView、配置和外部文件均会保留。应用更新始终保留用户数据。
 - **macOS DMG/app：** 将 `.app` 移到 Trash 只会删除应用，不会删除 app-local-data。
   如果需要完整清理，请先在应用中执行 reset。
 - **Linux AppImage：** 删除 AppImage 不会删除 app-local-data。对于 Debian/Ubuntu

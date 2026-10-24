@@ -13,7 +13,9 @@ use crate::models::model_spec;
 
 const RUNTIME_MANIFEST_NAME: &str = "runtime-manifest.json";
 const CORE_RUNTIME_MANIFEST_VERSION: &str = "whisper.cpp-v1.9.2";
-const ACCELERATOR_RUNTIME_MANIFEST_VERSION: &str = "whisper.cpp-v1.9.2";
+// Include the pack generation: an old, hash-valid runtime must not bypass a
+// corrected catalog merely because it uses the same whisper.cpp source tag.
+const ACCELERATOR_RUNTIME_MANIFEST_VERSION: &str = "accelerators-v0.1.3/whisper.cpp-v1.9.2";
 const MAX_RUNTIME_MANIFEST_BYTES: u64 = 64 * 1024;
 pub(crate) const MAX_RUNTIME_FILES: usize = 256;
 const TRANSIENT_STORAGE_GRACE: Duration = Duration::from_secs(24 * 60 * 60);
@@ -385,6 +387,7 @@ fn owned_temp_directory(name: &str) -> bool {
             "whispertube-cuda-probe-",
             "whispertube-metal-probe-",
             "whispertube-vulkan-probe-",
+            "whispertube-media-probe-",
         ],
     )
 }
@@ -573,13 +576,61 @@ mod tests {
     }
 
     #[test]
+    fn accelerator_pack_generation_rejects_and_replaces_legacy_runtime() {
+        let root = temporary_path("pack-generation");
+        let destination = root.join("vulkan");
+        let staging = root.join("staging");
+        fs::create_dir_all(&destination).unwrap();
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        fs::write(destination.join("whisper-cli.exe"), b"legacy runtime").unwrap();
+        write_runtime_manifest(
+            &destination,
+            "whisper-cli.exe",
+            "whisper.cpp-v1.9.2",
+            &cancelled,
+        )
+        .unwrap();
+        let version = super::accelerator_runtime_manifest_version();
+        assert!(!runtime_manifest_matches(
+            &destination,
+            &destination.join("whisper-cli.exe"),
+            version
+        ));
+        clear_invalid_runtime_destination(&destination, "whisper-cli.exe", version, &cancelled)
+            .unwrap();
+        assert!(!destination.exists());
+        fs::create_dir(&staging).unwrap();
+        fs::write(staging.join("whisper-cli.exe"), b"corrected runtime").unwrap();
+        write_runtime_manifest(&staging, "whisper-cli.exe", version, &cancelled).unwrap();
+        super::activate_runtime(&staging, &destination, &cancelled).unwrap();
+        assert!(runtime_manifest_matches(
+            &destination,
+            &destination.join("whisper-cli.exe"),
+            version
+        ));
+        assert!(clear_invalid_runtime_destination(
+            &destination,
+            "whisper-cli.exe",
+            version,
+            &cancelled
+        )
+        .is_err());
+        assert_eq!(
+            fs::read(destination.join("whisper-cli.exe")).unwrap(),
+            b"corrected runtime"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn transient_cleanup_only_removes_expired_owned_directories() {
         let root = temporary_path("cleanup");
         fs::create_dir_all(&root).unwrap();
         let old = format!("whispertube-cuda-{}", uuid::Uuid::new_v4());
+        let old_media = format!("whispertube-media-probe-{}", uuid::Uuid::new_v4());
         let new = format!("whispertube-metal-probe-{}", uuid::Uuid::new_v4());
         let matching_file = format!("whispertube-accelerator-{}", uuid::Uuid::new_v4());
-        for name in [&old, &new, "whispertube-cuda-personal-backup"] {
+        for name in [&old, &old_media, &new, "whispertube-cuda-personal-backup"] {
             fs::create_dir(root.join(name)).unwrap();
         }
         fs::write(root.join(&matching_file), b"preserve").unwrap();
@@ -590,6 +641,7 @@ mod tests {
         .unwrap();
         for name in [
             &old,
+            &old_media,
             &matching_file,
             "whispertube-cuda-personal-backup",
             "whispertube-cuda-personal-backup.zip",
@@ -615,6 +667,7 @@ mod tests {
         }
         assert!(super::cleanup_stale_entries(&root, true, super::owned_temp_directory).is_empty());
         assert!(!root.join(old).exists());
+        assert!(!root.join(old_media).exists());
         assert!(root.join(new).is_dir());
         assert!(root.join(matching_file).is_file());
         assert!(root.join("whispertube-cuda-personal-backup").is_dir());

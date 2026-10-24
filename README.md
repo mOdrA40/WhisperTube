@@ -18,6 +18,12 @@ For predictable disk and memory use, transcription is limited to on-demand media
 
 ## Features
 
+When public Instagram Reels or LinkedIn video posts omit duration, metadata
+inspection attempts a temporary audio download capped at 32 MiB/45 seconds,
+then verifies local audio under a 10-second watchdog. Cookies are not mandatory
+when this succeeds. Temporary files are cleaned up; transcription downloads
+audio again. Login, regional and anti-bot restrictions may still require cookies.
+
 YouTube prerequisite for installed applications: install [Node.js 22+](https://nodejs.org/en/download) or [Deno 2.3+](https://docs.deno.com/runtime/getting_started/installation/), put it on PATH, and restart WhisperTube. The installer includes yt-dlp's EJS scripts but does not bundle a JavaScript runtime. The app checks this prerequisite before YouTube extraction and reports a specific error if it is missing or unsupported. Other supported platforms do not require this prerequisite. Installing Whisper models alone does not provide a JavaScript runtime.
 
 - Paste a supported video URL and inspect metadata before downloading.
@@ -183,9 +189,10 @@ External files such as a user-selected `cookies.txt` and exports outside
 WhisperTube storage are not removed.
 
 - **Windows NSIS setup EXE:** uninstalling from Windows Settings or from
-  `uninstall.exe` shows a cleanup prompt. Choosing cleanup removes the local
-  WhisperTube data listed above; choosing to keep data preserves it for a
-  future reinstall.
+  `uninstall.exe` offers one delete-app-data checkbox. Leave it unchecked to
+  keep data for reinstall, or check it to remove only the managed data listed
+  above. WebView/configuration and external files are preserved in either case.
+  Application updates always retain user data.
 - **macOS DMG/app:** moving the `.app` to Trash removes the application but
   does not remove app-local data. Use the in-app reset first if a full cleanup
   is wanted.
@@ -359,7 +366,7 @@ Tauri selects the platform-specific app-local-data directory. WhisperTube stores
 - Known model and accelerator downloads are verified with checksums before activation.
 - Imported cookies are read by yt-dlp only for the selected local job.
 - Only one transcription job and one runtime installer can run at a time; job reservation is independent of child-process PID state.
-- Cancellation terminates the active process tree on Windows with `taskkill /T /F`.
+- Cancellation terminates the registered process tree through an owned Windows Job Object or a Unix process group. Shutdown uses the same ownership registry, so a stale PID is never used to terminate an unrelated process.
 - Failed/cancelled jobs preserve temporary progress for retry within the storage quota and orphan retention period; runtime bootstrap downloads are pinned and checksum-verified before activation.
 
 ## Known limitations

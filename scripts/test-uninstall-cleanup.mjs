@@ -28,11 +28,35 @@ const quoteNsis = (value) => value.replaceAll("$", () => "$$").replaceAll('"', (
 const quoteNsisCompiler = (value) => value.replaceAll('"', () => '$\\"');
 const quotePowerShell = (value) => "'" + value.replaceAll("'", "''") + "'";
 
-for (const mode of ["keep", "remove", "locked-cookie", "locked-database"]) {
+function isolatedBuiltinCleanup(appData, roamingData) {
+  // Inspect the template embedded in the exact installed CLI, rather than a
+  // handwritten imitation that could miss a second deletion path.
+  const binary = readFileSync(resolve("node_modules/@tauri-apps/cli-win32-x64-msvc/cli.win32-x64-msvc.node"));
+  const template = binary.toString("utf8").replaceAll("\r", "");
+  const start = template.indexOf("; Delete app data if the checkbox is selected");
+  const end = template.indexOf("!ifmacrodef NSIS_HOOK_POSTUNINSTALL", start);
+  assert.ok(start >= 0 && end > start, "Review the installed CLI's changed uninstall template");
+  let cleanup = template.slice(start, end);
+  assert.match(cleanup, /\$DeleteAppDataCheckboxState = 1/);
+  assert.match(cleanup, /\$UpdateMode <> 1/);
+  assert.ok(cleanup.includes('RmDir /r "$LOCALAPPDATA\\${BUNDLEID}"'));
+  // Fixture execution must never touch the registry or either real app-data
+  // directory. Keep the template's decision/ordering and redirect deletion.
+  cleanup = cleanup.replace(/^\s*DeleteReg(?:Key|Value)[^\n]*$/gm, "; registry operation excluded from isolated fixture");
+  cleanup = cleanup.replaceAll('$LOCALAPPDATA\\${BUNDLEID}', () => quoteNsis(appData))
+    .replaceAll('$APPDATA\\${BUNDLEID}', () => quoteNsis(roamingData));
+  assert.doesNotMatch(cleanup, /DeleteReg|\$LOCALAPPDATA|\$APPDATA|\$\{BUNDLEID\}/);
+  return cleanup;
+}
+
+for (const mode of ["keep", "remove", "update", "unset", "locked-cookie", "locked-database"]) {
   test(`NSIS hook in isolated storage: ${mode}`, { skip: process.platform !== "win32" }, () => {
     const root = mkdtempSync(join(tmpdir(), "whispertube-$0-uninstall-test-"));
     try {
       const appData = join(root, "app-data");
+      const roamingData = join(root, "roaming-data");
+      mkdirSync(roamingData);
+      writeFileSync(join(roamingData, "keep.txt"), "roaming canary");
       for (const name of [...ownedDirectories, "WebView"]) mkdirSync(join(appData, name), { recursive: true });
       const cookie = join(appData, "cookie-jars", "crashed-operation", "cookies.txt");
       mkdirSync(resolve(cookie, ".."), { recursive: true });
@@ -56,9 +80,15 @@ Name "WhisperTube cleanup fixture"
 OutFile "${quoteNsisCompiler(executable)}"
 RequestExecutionLevel user
 SilentInstall silent
+!include LogicLib.nsh
+Var DeleteAppDataCheckboxState
+Var UpdateMode
 !include "${quoteNsisCompiler(join(root, "hooks.nsh"))}"
 Section
-  StrCpy $WhisperTubeRemoveUserData "${mode === "keep" ? "0" : "1"}"
+  StrCpy $DeleteAppDataCheckboxState "${mode === "unset" ? "" : mode === "keep" ? "0" : "1"}"
+  StrCpy $UpdateMode "${mode === "update" ? "1" : "0"}"
+  !insertmacro NSIS_HOOK_PREUNINSTALL
+  ${isolatedBuiltinCleanup(appData, roamingData)}
   !insertmacro NSIS_HOOK_POSTUNINSTALL
 SectionEnd
 `);
@@ -81,9 +111,11 @@ finally { $fixtureLock.Dispose() }
       assert.equal(readFileSync(join(root, "external-cookies.txt"), "utf8"), "original export");
       assert.equal(readFileSync(join(appData, "WebView", "keep.txt"), "utf8"), "webview");
       assert.equal(readFileSync(join(appData, "config.json"), "utf8"), "config");
-      assert.equal(existsSync(cookie), mode === "keep" || mode === "locked-cookie");
+      assert.equal(readFileSync(join(roamingData, "keep.txt"), "utf8"), "roaming canary");
+      const keep = ["keep", "update", "unset"].includes(mode);
+      assert.equal(existsSync(cookie), keep || mode === "locked-cookie");
       assert.equal(existsSync(join(root, "cleanup-warning.txt")), locked !== null);
-      for (const name of databaseFiles) assert.equal(existsSync(join(appData, name)), mode === "keep" || mode === "locked-database", name);
+      for (const name of databaseFiles) assert.equal(existsSync(join(appData, name)), keep || mode === "locked-database", name);
     } finally {
       const resolved = resolve(root);
       assert.ok(resolved.startsWith(resolve(tmpdir()) + "\\"));

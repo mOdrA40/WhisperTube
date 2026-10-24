@@ -79,6 +79,9 @@ function localizedMetadataError(cause: unknown, t: Translate) {
   if (code === "media_source_runtime") return t("error.sourceRuntime");
   if (code === "media_source_metadata") return t("error.sourceMetadata");
   if (code === "media_source_duration") return t("error.sourceDuration");
+  if (code === "media_source_duration_unknown") return t("error.sourceDurationUnknown");
+  if (code === "media_source_blocked") return t("error.sourceBlocked");
+  if (code === "media_source_extractor") return t("error.sourceExtractor");
   if (code === "media_source_input") {
     return friendlyError(cause).toLowerCase().includes("domain video")
       ? t("error.sourceUnsupported")
@@ -448,7 +451,9 @@ export function useWhisperTube() {
     const selectedCudaDevice = computeTargetId.startsWith("cuda:")
       ? system.computeDevices.find((device) => device.id === computeTargetId)
       : null;
-    const available = selectedCudaDevice?.freeMemoryMb ?? system.gpuFreeMemoryMb;
+    const available = computeTargetId.startsWith("cuda:")
+      ? selectedCudaDevice?.freeMemoryMb
+      : system.gpuFreeMemoryMb;
     if (available === null || available === undefined) {
       return t("error.vramUnreadable");
     }
@@ -482,7 +487,9 @@ export function useWhisperTube() {
     const selectedCudaDevice = computeTargetId.startsWith("cuda:")
       ? system.computeDevices.find((device) => device.id === computeTargetId)
       : null;
-    const available = selectedCudaDevice?.freeMemoryMb ?? system.gpuFreeMemoryMb;
+    const available = computeTargetId.startsWith("cuda:")
+      ? selectedCudaDevice?.freeMemoryMb
+      : system.gpuFreeMemoryMb;
     for (const model of models) {
       if (available === null || available === undefined) {
         reasons[model.id] = t("error.vramUnreadable");
@@ -762,6 +769,9 @@ export function useWhisperTube() {
       }
     } finally {
       stopTranscriptionTimer();
+      // Success commits a previously unfinished job; failure/cancel can also
+      // create or change retry data. Keep the cache panel lazy, but never stale.
+      setJobCache(null);
       setBusy(false);
       setResumeRevision((revision) => revision + 1);
     }

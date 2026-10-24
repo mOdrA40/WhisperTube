@@ -477,8 +477,13 @@ fn probe_node_cached(
     probe: impl FnOnce() -> Result<bool, String>,
 ) -> Result<bool, String> {
     crate::io_cancel::check(cancelled)?;
-    let metadata = std::fs::metadata(program)
-        .map_err(|e| format!("Runtime Node.js tidak dapat diperiksa: {e}"))?;
+    let metadata = match std::fs::metadata(program) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            eprintln!("WhisperTube: runtime Node.js tidak tersedia: {error}");
+            return Ok(false);
+        }
+    };
     let identity = NodeIdentity {
         path: program.into(),
         size: metadata.len(),
@@ -973,6 +978,35 @@ mod tests {
             .contains("dibatalkan")
         );
         fs::remove_file(program).unwrap();
+    }
+
+    #[test]
+    fn missing_optional_node_binary_is_unavailable_without_becoming_a_source_error() {
+        use std::{
+            cell::Cell,
+            sync::{atomic::AtomicBool, Mutex},
+        };
+        let program = std::env::temp_dir().join(format!(
+            "whispertube-node-missing-{}{}",
+            uuid::Uuid::new_v4(),
+            if cfg!(windows) { ".exe" } else { "" }
+        ));
+        let cache = Mutex::new(None);
+        let cancelled = AtomicBool::new(false);
+        let calls = Cell::new(0);
+        let available = super::probe_node_cached(&cache, &program, &cancelled, || {
+            calls.set(calls.get() + 1);
+            Ok(true)
+        })
+        .unwrap();
+
+        assert!(!available);
+        assert_eq!(calls.get(), 0);
+        assert!(
+            super::require_source_js_runtime("https://vimeo.com/123", vec![])
+                .unwrap()
+                .is_empty()
+        );
     }
     use super::{
         metadata_error_prefix, metadata_retry_reason, safe_thumbnail, source_for_host,

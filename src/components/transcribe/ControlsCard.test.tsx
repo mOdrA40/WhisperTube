@@ -3,19 +3,20 @@ import { useState } from "react";
 import { afterEach, describe, expect, it } from "vitest";
 import { I18nProvider } from "../../i18n";
 import { ControlsCard } from "./ControlsCard";
+import type { SystemStatus } from "../../types";
 
 const models = ["base", "large-v3-turbo-q5_0", "large-v3-q5_0"].map((id) => ({
   id, label: id, description: id, sizeMb: 100, vramRequiredMb: 2048, installed: true,
 }));
 afterEach(cleanup);
-function Fixture({ disabled = false, downloading = false, resumeStage = null, checkingResume = false, retryAvailable = false }: {
-  disabled?: boolean; downloading?: boolean; resumeStage?: "audio" | "download" | null; checkingResume?: boolean; retryAvailable?: boolean;
+function Fixture({ disabled = false, downloading = false, resumeStage = null, checkingResume = false, retryAvailable = false, system = null }: {
+  disabled?: boolean; downloading?: boolean; resumeStage?: "audio" | "download" | null; checkingResume?: boolean; retryAvailable?: boolean; system?: SystemStatus | null;
 }) {
   const [id, setId] = useState(models[1].id);
   const noop = () => undefined;
   return <I18nProvider><ControlsCard models={models} modelId={id} selectedModel={models.find((model) => model.id === id)}
     canStart={!checkingResume && !disabled} resumeStage={resumeStage} checkingResume={checkingResume} retryAvailable={retryAvailable} modelDownloadBlocked={false} computeTargetId="auto" language="auto" keepAudio={false}
-    system={null} busy={false} operationActive={disabled} runtimeReady={true}
+    system={system} busy={false} operationActive={disabled} runtimeReady={true}
     downloadingModel={downloading ? { base: { id: "base", downloadedBytes: 1, totalBytes: 2, percent: 50, bytesPerSecond: null } } : {}}
     accelerators={[]} installingCuda={false} cudaDownloadPercent={0} installingAccelerator={null} acceleratorDownloadPercent={0}
     networkSpeedBytesPerSecond={null} vramWarning={null} acceleratorWarning={null}
@@ -25,6 +26,16 @@ function Fixture({ disabled = false, downloading = false, resumeStage = null, ch
 }
 
 describe("model radio keyboard interaction", () => {
+  it("does not offer CUDA when the installed engine has no visible devices", () => {
+    const system = { nvidia: true, cudaSupported: true, cudaInstallable: true, cudaEngine: true,
+      computeDevices: [], accelerators: [], recommendedModelId: "base", cpuThreads: 8,
+      gpuName: "NVIDIA GPU", gpuFreeMemoryMb: 4096 } as unknown as SystemStatus;
+    render(<Fixture system={system} />);
+    const selectors = screen.getAllByRole("combobox");
+    fireEvent.click(selectors[selectors.length - 1]);
+    expect(screen.queryByRole("option", { name: "NVIDIA CUDA" })).toBeNull();
+    expect(screen.getAllByRole("option")).toHaveLength(2);
+  });
   it.each(["audio", "download"] as const)("labels an available %s cache as Continue", (resumeStage) => {
     render(<Fixture resumeStage={resumeStage} />);
     expect(screen.getByRole("button", { name: "Continue transcription" })).toBeTruthy();

@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useId, type ReactNode } from "react";
+import { useState, useRef, useEffect, useLayoutEffect, useId, type ReactNode } from "react";
 import { Check, ChevronDown } from "lucide-react";
 
 export type SelectOption = {
@@ -38,6 +38,9 @@ export function CustomSelect({
   const containerRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
   const shouldScrollHighlightedRef = useRef(false);
+  const wasOpenRef = useRef(false);
+  const previousOptionsRef = useRef(options);
+  const previousValueRef = useRef(value);
   const typeaheadRef = useRef("");
   const typeaheadTimerRef = useRef<number | null>(null);
   const selectId = useId();
@@ -61,15 +64,32 @@ export function CustomSelect({
     };
   }, [isOpen]);
 
-  // Keep highlighted index in sync when opening
-  useEffect(() => {
+  // Keep the active option stable across equivalent parent renders that
+  // recreate the options array while the user is navigating by keyboard.
+  useLayoutEffect(() => {
     if (isOpen) {
-      const idx = options.findIndex((opt) => opt.value === value);
-      shouldScrollHighlightedRef.current = true;
+      const selected = options.findIndex((option) => option.value === value && !option.disabled);
       const fallback = options.findIndex((option) => !option.disabled);
-      setHighlightedIndex(idx >= 0 && !options[idx].disabled ? idx : fallback);
+      if (!wasOpenRef.current || previousValueRef.current !== value) {
+        const nextIndex = selected >= 0 ? selected : fallback;
+        shouldScrollHighlightedRef.current = true;
+        setHighlightedIndex(nextIndex);
+      } else if (previousOptionsRef.current !== options) {
+        const highlightedValue = previousOptionsRef.current[highlightedIndex]?.value;
+        const preserved = options.findIndex(
+          (option) => option.value === highlightedValue && !option.disabled,
+        );
+        const nextIndex = preserved >= 0 ? preserved : selected >= 0 ? selected : fallback;
+        if (nextIndex !== highlightedIndex) {
+          shouldScrollHighlightedRef.current = true;
+          setHighlightedIndex(nextIndex);
+        }
+      }
     }
-  }, [isOpen, options, value]);
+    wasOpenRef.current = isOpen;
+    previousOptionsRef.current = options;
+    previousValueRef.current = value;
+  }, [highlightedIndex, isOpen, options, value]);
 
   // Scroll highlighted into view
   useEffect(() => {

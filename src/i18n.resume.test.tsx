@@ -4,6 +4,21 @@ import { I18nProvider, getProgressMessage, getRecommendation, useI18n } from "./
 import type { SystemStatus } from "./types";
 
 describe("resume progress copy", () => {
+  it.each(["en", "id", "zh"] as const)("requires a visible device before recommending CUDA in %s", (language) => {
+    const { result } = renderHook(useI18n, { wrapper: I18nProvider });
+    act(() => result.current.setLanguage(language));
+    const system = {
+      gpuName: "NVIDIA GPU", nvidia: true, cudaSupported: true, cudaInstallable: true,
+      cudaEngine: true, recommendedModelId: "base", gpuFreeMemoryMb: 4096,
+      computeDevices: [], accelerators: [], cpuThreads: 8,
+    } as unknown as SystemStatus;
+    expect(getRecommendation(system, result.current.t)).toBe(result.current.t("hardware.recommendation.cudaNoDevice"));
+    system.computeDevices = [{ id: "cuda:0", backend: "cuda", name: "NVIDIA GPU", vendor: "nvidia",
+      deviceIndex: 0, integrated: false, totalMemoryMb: 8192, freeMemoryMb: 4096 }];
+    expect(getRecommendation(system, result.current.t)).toBe(result.current.t("hardware.recommendation.cudaReady", {
+      gpu: "NVIDIA GPU", vram: "4.0 GB", model: result.current.t("model.fast.label"),
+    }));
+  });
   it.each(["en", "id", "zh"] as const)("distinguishes installed and available GPU accelerators in %s", (language) => {
     const { result } = renderHook(useI18n, { wrapper: I18nProvider });
     act(() => result.current.setLanguage(language));

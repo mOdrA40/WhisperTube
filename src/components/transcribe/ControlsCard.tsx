@@ -124,12 +124,10 @@ export function ControlsCard({
       computeTargetOptions.push({ value: "metal", label: getAcceleratorCopy(accelerator, t).label });
     }
   }
-  if (system?.cudaEngine && system.cudaInstallable && !computeTargetOptions.some((option) => option.value.startsWith("cuda:"))) {
-    computeTargetOptions.push({ value: "cuda", label: t("backend.cuda") });
-  }
   const memoryRequirementKey: "controls.cudaRequirement" | "controls.memoryEstimate" =
     computeTargetId.startsWith("cuda") ||
-    (computeTargetId === "auto" && system?.cudaInstallable && system.cudaEngine)
+    (computeTargetId === "auto" && system?.cudaInstallable && system.cudaEngine &&
+      system.computeDevices.some((device) => device.backend === "cuda"))
       ? "controls.cudaRequirement"
       : "controls.memoryEstimate";
   return (

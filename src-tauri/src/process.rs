@@ -86,7 +86,10 @@ pub fn probe_optional_runtime(
     let mut child = match ownership::spawn(command) {
         Ok(child) => child,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(format!("Runtime JavaScript tidak bisa diperiksa: {error}")),
+        Err(error) => {
+            eprintln!("WhisperTube: runtime JavaScript tidak tersedia: {error}");
+            return Ok(false);
+        }
     };
     let _active = ActiveProcessGuard::new(active_pid, child.id())?;
     let started = Instant::now();
@@ -864,6 +867,28 @@ mod tests {
         .unwrap());
         assert_eq!(*tracker.lock().unwrap(), None);
         assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn unusable_optional_runtime_is_reported_as_unavailable() {
+        let fixture = std::env::temp_dir().join(format!(
+            "whispertube-runtime-probe-invalid-{}{}",
+            uuid::Uuid::new_v4(),
+            if cfg!(windows) { ".exe" } else { "" }
+        ));
+        std::fs::write(&fixture, b"not an executable runtime").unwrap();
+        let tracker = Mutex::new(None);
+        let cancelled = AtomicBool::new(false);
+        let available = probe_optional_runtime(
+            &mut Command::new(&fixture),
+            Duration::from_secs(1),
+            &tracker,
+            &cancelled,
+        )
+        .unwrap();
+        std::fs::remove_file(fixture).unwrap();
+        assert!(!available);
+        assert_eq!(*tracker.lock().unwrap(), None);
     }
 
     #[test]

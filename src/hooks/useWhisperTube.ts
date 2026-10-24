@@ -38,6 +38,7 @@ import type {
   AppUpdateStatus,
   AppTab,
   BackendChoice,
+  ComputeDeviceInfo,
   HistoryItem,
   HistoryFileKind,
   HistoryFileScope,
@@ -127,6 +128,7 @@ export function useWhisperTube() {
   const [historyHasMore, setHistoryHasMore] = useState(false);
   const [loadingMoreHistory, setLoadingMoreHistory] = useState(false);
   const [result, setResult] = useState<TranscriptResult | null>(null);
+  const [copiedResult, setCopiedResult] = useState<TranscriptResult | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [progress, setProgress] = useState<ProgressPayload>(initialProgress);
   const [transcriptionElapsedMs, setTranscriptionElapsedMs] = useState<number | null>(null);
@@ -145,7 +147,6 @@ export function useWhisperTube() {
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [downloadingModel, setDownloadingModel] = useState<Record<string, ModelDownloadPayload>>({});
-  const [copied, setCopied] = useState(false);
   const [installingCuda, setInstallingCuda] = useState(false);
   const [cudaDownloadPercent, setCudaDownloadPercent] = useState(0);
   const [installingAccelerator, setInstallingAccelerator] = useState<Exclude<BackendChoice, "auto" | "cpu" | "cuda"> | null>(null);
@@ -164,6 +165,25 @@ export function useWhisperTube() {
   const appUpdateCheckRequest = useRef(0);
   const autoConfigured = useRef(false);
   const refreshingSystemRef = useRef(false);
+  const copyTimeoutRef = useRef<number | null>(null);
+  const copyRequestRef = useRef(0);
+
+  const copied = result !== null && copiedResult === result;
+
+  function setCurrentResult(nextResult: TranscriptResult | null) {
+    copyRequestRef.current += 1;
+    if (copyTimeoutRef.current !== null) {
+      window.clearTimeout(copyTimeoutRef.current);
+      copyTimeoutRef.current = null;
+    }
+    setResult(nextResult);
+    setCopiedResult(null);
+  }
+
+  useEffect(() => () => {
+    copyRequestRef.current += 1;
+    if (copyTimeoutRef.current !== null) window.clearTimeout(copyTimeoutRef.current);
+  }, []);
 
   useEffect(() => {
     if (!busy || !transcriptionTimerActive || transcriptionStartedAtRef.current === null) return;
@@ -177,19 +197,30 @@ export function useWhisperTube() {
   }, [busy, transcriptionTimerActive]);
 
   const selectedModel = models.find((model) => model.id === modelId);
+  const selectedCudaDevice = useMemo(() => {
+    const devices = system?.computeDevices.filter((device) => device.backend === "cuda") ?? [];
+    if (computeTargetId.startsWith("cuda:")) {
+      return devices.find((device) => device.id === computeTargetId);
+    }
+    return devices.reduce<ComputeDeviceInfo | undefined>((best, device) =>
+      !best || (device.freeMemoryMb ?? -1) > (best.freeMemoryMb ?? -1) ? device : best,
+    undefined);
+  }, [system, computeTargetId]);
+  const cudaReady = Boolean(system?.cudaInstallable && system.nvidia && system.cudaEngine &&
+    system.computeDevices.some((device) => device.backend === "cuda"));
   const runtimeReady = Boolean(
     system?.ytDlp &&
       system.ffmpeg &&
       (backend === "cpu"
         ? system.cpuEngine
         : backend === "cuda"
-          ? system.cudaInstallable && system.nvidia && system.cudaEngine
+          ? cudaReady && selectedCudaDevice !== undefined
           : backend === "metal"
             ? system.accelerators.some((accelerator) => accelerator.backend === "metal" && accelerator.installed)
             : backend === "vulkan"
               ? system.accelerators.some((accelerator) => accelerator.backend === "vulkan" && accelerator.installed)
               : system.cpuEngine ||
-                (system.cudaInstallable && system.nvidia && system.cudaEngine) ||
+                cudaReady ||
                 system.accelerators.some((accelerator) => accelerator.installed)),
   );
 
@@ -359,9 +390,8 @@ export function useWhisperTube() {
   function resetInspectedVideo() {
     setMetadata(null);
     setRetrySource(null);
-    setResult(null);
+    setCurrentResult(null);
     setSearchQuery("");
-    setCopied(false);
   }
 
   function clearTranscription() {
@@ -369,9 +399,8 @@ export function useWhisperTube() {
     setUrl("");
     setMetadata(null);
     setRetrySource(null);
-    setResult(null);
+    setCurrentResult(null);
     setSearchQuery("");
-    setCopied(false);
     setNetworkSpeedBytesPerSecond(null);
     setProgress(initialProgress);
     setError(null);
@@ -448,12 +477,8 @@ export function useWhisperTube() {
     }
     if (!system.nvidia || !system.cudaSupported) return null;
     if (!system.cudaEngine) return null;
-    const selectedCudaDevice = computeTargetId.startsWith("cuda:")
-      ? system.computeDevices.find((device) => device.id === computeTargetId)
-      : null;
-    const available = computeTargetId.startsWith("cuda:")
-      ? selectedCudaDevice?.freeMemoryMb
-      : system.gpuFreeMemoryMb;
+    if (!selectedCudaDevice) return t("error.cudaDeviceUnavailable");
+    const available = selectedCudaDevice.freeMemoryMb;
     if (available === null || available === undefined) {
       return t("error.vramUnreadable");
     }
@@ -465,7 +490,7 @@ export function useWhisperTube() {
       });
     }
     return null;
-  }, [backend, computeTargetId, selectedModel, system, t]);
+  }, [backend, selectedCudaDevice, selectedModel, system, t]);
   const acceleratorWarning = useMemo(() => {
     if (!system || backend === "auto" || backend === "cpu" || backend === "cuda") return null;
     if (backend === "vulkan" && !system.computeDevices.some((device) => device.backend === "vulkan")) {
@@ -484,14 +509,11 @@ export function useWhisperTube() {
     const reasons: Record<string, string> = {};
     const cudaTarget = backend === "cuda";
     if (!system || !cudaTarget) return reasons;
-    const selectedCudaDevice = computeTargetId.startsWith("cuda:")
-      ? system.computeDevices.find((device) => device.id === computeTargetId)
-      : null;
-    const available = computeTargetId.startsWith("cuda:")
-      ? selectedCudaDevice?.freeMemoryMb
-      : system.gpuFreeMemoryMb;
+    const available = selectedCudaDevice?.freeMemoryMb;
     for (const model of models) {
-      if (available === null || available === undefined) {
+      if (!selectedCudaDevice) {
+        reasons[model.id] = t("error.cudaDeviceUnavailable");
+      } else if (available === null || available === undefined) {
         reasons[model.id] = t("error.vramUnreadable");
       } else if (available < model.vramRequiredMb) {
         reasons[model.id] = t("error.vramTooLow", {
@@ -502,7 +524,7 @@ export function useWhisperTube() {
       }
     }
     return reasons;
-  }, [backend, computeTargetId, models, system, t]);
+  }, [backend, selectedCudaDevice, models, system, t]);
   const modelDownloadBlocked = Boolean(
     selectedModel && modelDownloadBlockReasons[selectedModel.id],
   );
@@ -538,7 +560,7 @@ export function useWhisperTube() {
     setInspecting(true);
     setCancellingInspection(false);
     setError(null);
-    setResult(null);
+    setCurrentResult(null);
     try {
       setMetadata(await inspectMedia(url.trim(), cookiesPath));
     } catch (cause) {
@@ -607,17 +629,15 @@ export function useWhisperTube() {
       setJobCache(null);
       setRetrySource(null);
       setMetadata(null);
-      setResult(null);
+      setCurrentResult(null);
       setSearchQuery("");
-      setCopied(false);
     } catch (cause) {
       const message = friendlyError(cause);
       if (!isOperationConflict(cause)) {
         // Reset is best-effort: a rejected reset may already have deleted the
         // history and files backing the currently displayed transcript/cache.
-        setResult(null);
+        setCurrentResult(null);
         setSearchQuery("");
-        setCopied(false);
         setJobCache(null);
         setRetrySource(null);
         setResumeRevision((revision) => revision + 1);
@@ -720,7 +740,7 @@ export function useWhisperTube() {
     setTranscriptionElapsedMs(null);
     setTranscriptionTimerActive(false);
     setError(null);
-    setResult(null);
+    setCurrentResult(null);
     setNetworkSpeedBytesPerSecond(null);
       setProgress({
         stage: "downloading",
@@ -748,7 +768,7 @@ export function useWhisperTube() {
         keepAudio,
       });
       stopTranscriptionTimer();
-      setResult(completedResult);
+      setCurrentResult(completedResult);
       setRetrySource(null);
       setSearchQuery("");
       await refreshAfterSuccessfulOperation();
@@ -791,7 +811,7 @@ export function useWhisperTube() {
     setError(null);
     try {
       const loadedResult = await loadHistory(id);
-      setResult(loadedResult);
+      setCurrentResult(loadedResult);
       setTranscriptionElapsedMs(null);
       setTab("transcribe");
       setSearchQuery("");
@@ -851,9 +871,8 @@ export function useWhisperTube() {
     try {
       const outcome = await deleteHistoryRequest(ids);
       if (result && outcome.deletedIds.includes(result.historyId)) {
-        setResult(null);
+        setCurrentResult(null);
         setSearchQuery("");
-        setCopied(false);
       }
       await refreshAfterSuccessfulOperation();
       if (outcome.cleanupWarnings.length > 0) {
@@ -892,10 +911,9 @@ export function useWhisperTube() {
       if (result && outcome.updatedIds.includes(result.historyId)) {
         // Drop stale transcript/audio immediately; a refresh error must never
         // leave deleted text available to copy or export in the WebView.
-        setResult(null);
+        setCurrentResult(null);
         setSearchQuery("");
-        setCopied(false);
-        try { setResult(await loadHistory(result.historyId)); }
+        try { setCurrentResult(await loadHistory(result.historyId)); }
         catch (cause) { setError(friendlyError(cause)); }
       }
       await refreshAfterSuccessfulOperation();
@@ -955,12 +973,19 @@ export function useWhisperTube() {
 
   async function copyTranscript() {
     if (operationActive || !result || result.transcriptAvailable === false) return;
+    const resultToCopy = result;
+    const request = ++copyRequestRef.current;
     try {
-      await navigator.clipboard.writeText(result.text);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1400);
+      await navigator.clipboard.writeText(resultToCopy.text);
+      if (request !== copyRequestRef.current) return;
+      if (copyTimeoutRef.current !== null) window.clearTimeout(copyTimeoutRef.current);
+      setCopiedResult(resultToCopy);
+      copyTimeoutRef.current = window.setTimeout(() => {
+        copyTimeoutRef.current = null;
+        setCopiedResult((current) => current === resultToCopy ? null : current);
+      }, 1400);
     } catch (cause) {
-      setError(friendlyError(cause));
+      if (request === copyRequestRef.current) setError(friendlyError(cause));
     }
   }
 

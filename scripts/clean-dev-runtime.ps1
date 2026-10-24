@@ -10,14 +10,17 @@ if (-not (Test-Path -LiteralPath $RuntimeRoot -PathType Container)) {
     exit 0
 }
 
-$entries = @(Get-ChildItem -LiteralPath $RuntimeRoot -Force)
+$entries = @(Get-ChildItem -LiteralPath $RuntimeRoot -Force -Recurse | Sort-Object { $_.FullName.Length } -Descending)
 $removed = 0
 foreach ($entry in $entries) {
     if ($entry.Name -eq ".gitkeep") {
         continue
     }
+    if ($entry.PSIsContainer -and @(Get-ChildItem -LiteralPath $entry.FullName -Force).Count -gt 0) {
+        continue
+    }
     if ($PSCmdlet.ShouldProcess($entry.FullName, "Hapus runtime developer Windows")) {
-        Remove-Item -LiteralPath $entry.FullName -Recurse -Force
+        Remove-Item -LiteralPath $entry.FullName -Force
         $removed++
     }
 }

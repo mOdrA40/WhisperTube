@@ -33,6 +33,8 @@ pub struct GpuInfo {
     pub name: String,
     pub total_memory_mb: Option<u64>,
     pub free_memory_mb: Option<u64>,
+    pub uuid: Option<String>,
+    /// Physical index reported by NVIDIA Management Library / nvidia-smi.
     pub device_index: Option<usize>,
 }
 
@@ -270,13 +272,19 @@ pub fn detect_nvidia() -> Option<GpuInfo> {
 }
 
 pub fn detect_nvidia_device(device_index: usize) -> Option<GpuInfo> {
-    detect_nvidia_devices()
-        .into_iter()
+    detect_nvidia_device_from(&detect_nvidia_devices(), device_index)
+}
+
+fn detect_nvidia_device_from(devices: &[GpuInfo], device_index: usize) -> Option<GpuInfo> {
+    devices
+        .iter()
         .find(|device| device.device_index == Some(device_index))
+        .cloned()
 }
 
 pub fn detect_nvidia_devices() -> Vec<GpuInfo> {
-    detect_nvidia_snapshot().0
+    let (devices, _) = detect_nvidia_snapshot();
+    cuda_visible_nvidia_devices(&devices)
 }
 
 fn detect_nvidia_snapshot() -> (Vec<GpuInfo>, Option<String>) {
@@ -287,7 +295,7 @@ fn detect_nvidia_snapshot() -> (Vec<GpuInfo>, Option<String>) {
         let mut command = Command::new(&program);
         crate::process::hide_console(&mut command);
         command.args([
-            "--query-gpu=index,name,memory.total,memory.free,driver_version",
+            "--query-gpu=index,name,uuid,memory.total,memory.free,driver_version",
             "--format=csv,noheader,nounits",
         ]);
         command_output_with_timeout(command, Duration::from_secs(2))
@@ -306,9 +314,13 @@ pub fn detect_nvidia_driver_version() -> Option<String> {
 }
 
 fn parse_nvidia_snapshot(output: &[u8]) -> (Vec<GpuInfo>, Option<String>) {
+    parse_nvidia_snapshot_output(output)
+}
+
+fn parse_nvidia_snapshot_output(output: &[u8]) -> (Vec<GpuInfo>, Option<String>) {
     let driver = String::from_utf8_lossy(output)
         .lines()
-        .filter_map(|line| line.split(',').nth(4).map(str::trim))
+        .filter_map(|line| line.split(',').nth(5).map(str::trim))
         .find(|value| parse_driver_version(value).is_some())
         .map(str::to_string);
     (parse_nvidia_devices(output), driver)
@@ -335,7 +347,7 @@ pub fn ensure_cuda_install_supported() -> Result<(), String> {
     if !cfg!(all(target_os = "windows", target_arch = "x86_64")) {
         return Err("Download CUDA otomatis saat ini hanya didukung di Windows x64.".into());
     }
-    if detect_nvidia().is_none() {
+    if detect_nvidia_snapshot().0.is_empty() {
         return Err("NVIDIA GPU/driver tidak terdeteksi. CUDA engine tidak perlu dipasang.".into());
     }
     let Some(driver_version) = detect_nvidia_driver_version() else {
@@ -353,21 +365,51 @@ pub fn ensure_cuda_install_supported() -> Result<(), String> {
 }
 
 fn select_nvidia_device(devices: &[GpuInfo]) -> Option<GpuInfo> {
-    devices.iter().cloned().fold(None, |best, candidate| {
-        let candidate_memory = candidate
-            .free_memory_mb
-            .or(candidate.total_memory_mb)
-            .unwrap_or(0);
-        let best_memory = best
-            .as_ref()
-            .and_then(|value: &GpuInfo| value.free_memory_mb.or(value.total_memory_mb))
-            .unwrap_or(0);
-        if best.is_none() || candidate_memory > best_memory {
-            Some(candidate)
-        } else {
-            best
-        }
+    ordered_nvidia_devices(devices).into_iter().next()
+}
+
+fn select_nvidia_display_device(devices: &[GpuInfo]) -> Option<GpuInfo> {
+    devices.iter().cloned().max_by_key(|device| {
+        (
+            device.free_memory_mb.is_some(),
+            device.free_memory_mb.unwrap_or(0),
+            device.total_memory_mb.unwrap_or(0),
+        )
     })
+}
+
+pub fn cuda_devices_by_preference() -> Vec<GpuInfo> {
+    ordered_nvidia_devices(&detect_nvidia_devices())
+}
+
+pub fn configure_cuda_command(command: &mut Command, gpu: &GpuInfo) -> Result<(), String> {
+    let uuid = gpu
+        .uuid
+        .as_deref()
+        .filter(|uuid| is_cuda_gpu_uuid(uuid))
+        .ok_or_else(|| format!("UUID NVIDIA untuk {} tidak dapat diverifikasi.", gpu.name))?;
+    // Restrict this child process to the selected physical GPU. Its CUDA
+    // ordinal is then always zero, regardless of CUDA_VISIBLE_DEVICES ordering.
+    command.env("CUDA_VISIBLE_DEVICES", uuid);
+    Ok(())
+}
+
+fn ordered_nvidia_devices(devices: &[GpuInfo]) -> Vec<GpuInfo> {
+    let mut visible = devices.to_vec();
+    visible.sort_by(|left, right| {
+        right
+            .free_memory_mb
+            .is_some()
+            .cmp(&left.free_memory_mb.is_some())
+            .then_with(|| {
+                right
+                    .free_memory_mb
+                    .unwrap_or(0)
+                    .cmp(&left.free_memory_mb.unwrap_or(0))
+            })
+            .then_with(|| left.device_index.cmp(&right.device_index))
+    });
+    visible
 }
 
 fn set_selected_nvidia_device(gpu: Option<&GpuInfo>) {
@@ -379,6 +421,150 @@ fn set_selected_nvidia_device(gpu: Option<&GpuInfo>) {
     }
 }
 
+fn cuda_visible_nvidia_devices(devices: &[GpuInfo]) -> Vec<GpuInfo> {
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    if let Some(mask) = std::env::var_os("CUDA_VISIBLE_DEVICES") {
+        // Some Windows drivers treat an empty value as unset. Preserve the
+        // documented empty-mask behavior before asking the driver to enumerate.
+        if mask.is_empty() {
+            return Vec::new();
+        }
+        // CUDA interprets numeric masks in its own enumeration order, including
+        // CUDA_DEVICE_ORDER. NVML indices cannot resolve these ordinals.
+        return match cuda_visible_device_uuids() {
+            Ok(uuids) => nvidia_devices_for_cuda_uuids(devices, Some(&uuids)),
+            Err(error) => {
+                eprintln!("WhisperTube: visibilitas perangkat CUDA tidak dapat diperiksa: {error}");
+                Vec::new()
+            }
+        };
+    }
+    nvidia_devices_for_cuda_uuids(devices, None)
+}
+
+fn nvidia_devices_for_cuda_uuids(
+    devices: &[GpuInfo],
+    visible_uuids: Option<&[String]>,
+) -> Vec<GpuInfo> {
+    let valid = |device: &&GpuInfo| {
+        device.device_index.is_some() && device.uuid.as_deref().is_some_and(is_cuda_gpu_uuid)
+    };
+    let Some(visible_uuids) = visible_uuids else {
+        return devices.iter().filter(valid).cloned().collect();
+    };
+    visible_uuids
+        .iter()
+        .filter_map(|uuid| {
+            let mut matches = devices.iter().filter(valid).filter(|device| {
+                device
+                    .uuid
+                    .as_deref()
+                    .is_some_and(|physical_uuid| physical_uuid.eq_ignore_ascii_case(uuid))
+            });
+            let device = matches.next()?;
+            matches.next().is_none().then(|| device.clone())
+        })
+        .collect()
+}
+
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+fn cuda_visible_device_uuids() -> Result<Vec<String>, String> {
+    use std::ffi::c_void;
+
+    type CuInit = unsafe extern "system" fn(u32) -> i32;
+    type CuDeviceGetCount = unsafe extern "system" fn(*mut i32) -> i32;
+    type CuDeviceGet = unsafe extern "system" fn(*mut i32, i32) -> i32;
+    type CuDeviceGetUuid = unsafe extern "system" fn(*mut [u8; 16], i32) -> i32;
+    type FarProc = unsafe extern "system" fn() -> isize;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn LoadLibraryExW(name: *const u16, file: *mut c_void, flags: u32) -> *mut c_void;
+        fn GetProcAddress(module: *mut c_void, name: *const u8) -> Option<FarProc>;
+        fn FreeLibrary(module: *mut c_void) -> i32;
+    }
+
+    struct DriverLibrary(*mut c_void);
+    impl Drop for DriverLibrary {
+        fn drop(&mut self) {
+            // SAFETY: this handle came from LoadLibraryExW and is released once.
+            unsafe { FreeLibrary(self.0) };
+        }
+    }
+
+    unsafe fn symbol<T: Copy>(module: *mut c_void, name: &'static [u8]) -> Result<T, String> {
+        // SAFETY: each caller supplies a NUL-terminated exported CUDA API name.
+        let address = unsafe { GetProcAddress(module, name.as_ptr()) }
+            .ok_or_else(|| "CUDA Driver API yang diperlukan tidak tersedia.".to_string())?;
+        // SAFETY: callers declare the documented CUDA signature for each symbol;
+        // all of these Windows function pointer types have the same size.
+        Ok(unsafe { std::mem::transmute_copy(&address) })
+    }
+
+    let name = "nvcuda.dll\0".encode_utf16().collect::<Vec<_>>();
+    // SAFETY: name is terminated UTF-16. LOAD_LIBRARY_SEARCH_SYSTEM32 prevents
+    // a writable application/PATH directory from supplying the driver DLL.
+    let handle = unsafe { LoadLibraryExW(name.as_ptr(), std::ptr::null_mut(), 0x0000_0800) };
+    if handle.is_null() {
+        return Err("Driver nvcuda.dll tidak tersedia di System32.".into());
+    }
+    let _library = DriverLibrary(handle);
+    // SAFETY: signatures match the CUDA Driver API, including the 16-byte CUuuid.
+    let (init, get_count, get_device, get_uuid) = unsafe {
+        (
+            symbol::<CuInit>(handle, b"cuInit\0")?,
+            symbol::<CuDeviceGetCount>(handle, b"cuDeviceGetCount\0")?,
+            symbol::<CuDeviceGet>(handle, b"cuDeviceGet\0")?,
+            symbol::<CuDeviceGetUuid>(handle, b"cuDeviceGetUuid_v2\0")?,
+        )
+    };
+    // SAFETY: initialization takes no pointers; flags must be zero.
+    let status = unsafe { init(0) };
+    if status == 100 {
+        return Ok(Vec::new()); // CUDA_ERROR_NO_DEVICE, including a masked device set.
+    }
+    if status != 0 {
+        return Err(format!("cuInit gagal (kode {status})."));
+    }
+    let mut count = 0;
+    // SAFETY: count is a writable i32 output.
+    let status = unsafe { get_count(&mut count) };
+    if status != 0 || count < 0 {
+        return Err(format!("cuDeviceGetCount gagal (kode {status})."));
+    }
+    let mut uuids = Vec::new();
+    for ordinal in 0..count {
+        let mut device = 0;
+        let mut uuid = [0u8; 16];
+        // SAFETY: both outputs have the documented sizes and remain valid.
+        let status = unsafe { get_device(&mut device, ordinal) };
+        if status != 0 {
+            return Err(format!("cuDeviceGet gagal (kode {status})."));
+        }
+        // SAFETY: uuid is writable for all 16 bytes of CUuuid.
+        let status = unsafe { get_uuid(&mut uuid, device) };
+        if status != 0 {
+            return Err(format!("cuDeviceGetUuid_v2 gagal (kode {status})."));
+        }
+        uuids.push(format!("GPU-{}", uuid::Uuid::from_bytes(uuid)));
+    }
+    Ok(uuids)
+}
+
+fn is_cuda_gpu_uuid(value: &str) -> bool {
+    cuda_gpu_uuid_suffix(value).is_some_and(|suffix| {
+        suffix.len() >= 8
+            && suffix
+                .chars()
+                .all(|character| character.is_ascii_hexdigit() || character == '-')
+    })
+}
+
+fn cuda_gpu_uuid_suffix(value: &str) -> Option<&str> {
+    let prefix = value.get(..4)?;
+    prefix.eq_ignore_ascii_case("GPU-").then(|| &value[4..])
+}
+
 fn parse_nvidia_devices(output: &[u8]) -> Vec<GpuInfo> {
     String::from_utf8_lossy(output)
         .lines()
@@ -386,10 +572,14 @@ fn parse_nvidia_devices(output: &[u8]) -> Vec<GpuInfo> {
             let mut fields = line.split(',').map(str::trim);
             let device_index = fields.next()?.parse().ok();
             let name = fields.next()?.to_string();
-            (!name.is_empty()).then(|| GpuInfo {
+            let uuid = fields.next().map(str::to_string);
+            let total_memory_mb = fields.next().and_then(|value| value.parse().ok());
+            let free_memory_mb = fields.next().and_then(|value| value.parse().ok());
+            (!name.is_empty()).then_some(GpuInfo {
                 name,
-                total_memory_mb: fields.next().and_then(|value| value.parse().ok()),
-                free_memory_mb: fields.next().and_then(|value| value.parse().ok()),
+                total_memory_mb,
+                free_memory_mb,
+                uuid,
                 device_index,
             })
         })
@@ -581,6 +771,7 @@ fn detect_generic_gpu() -> Option<GpuInfo> {
                 name,
                 total_memory_mb: None,
                 free_memory_mb: None,
+                uuid: None,
                 device_index: None,
             });
         }
@@ -607,6 +798,7 @@ fn detect_generic_gpu() -> Option<GpuInfo> {
         name,
         total_memory_mb: None,
         free_memory_mb: None,
+        uuid: None,
         device_index: None,
     })
 }
@@ -633,6 +825,7 @@ fn detect_generic_gpu() -> Option<GpuInfo> {
             name: name.into(),
             total_memory_mb: None,
             free_memory_mb: None,
+            uuid: None,
             device_index: None,
         });
     }
@@ -650,6 +843,7 @@ fn detect_generic_gpu() -> Option<GpuInfo> {
             name,
             total_memory_mb: None,
             free_memory_mb: None,
+            uuid: None,
             device_index: None,
         })
 }
@@ -883,9 +1077,14 @@ pub fn system_status(app: &AppHandle) -> Result<SystemStatus, String> {
     let cpu_engine = engine_available(app, "cpu")?;
     let cuda_engine = engine_available(app, "cuda")?;
     let (nvidia_devices, nvidia_driver_version) = detect_nvidia_snapshot();
-    let nvidia_gpu = select_nvidia_device(&nvidia_devices);
-    set_selected_nvidia_device(nvidia_gpu.as_ref());
-    let gpu = nvidia_gpu.clone().or_else(detect_generic_gpu);
+    let nvidia_gpu = select_nvidia_display_device(&nvidia_devices);
+    let cuda_devices = cuda_visible_nvidia_devices(&nvidia_devices);
+    let cuda_gpu = select_nvidia_device(&cuda_devices);
+    set_selected_nvidia_device(cuda_gpu.as_ref().or(nvidia_gpu.as_ref()));
+    let gpu = cuda_gpu
+        .clone()
+        .or_else(|| nvidia_gpu.clone())
+        .or_else(detect_generic_gpu);
     let nvidia = nvidia_gpu.is_some();
     let cuda_supported = cfg!(all(target_os = "windows", target_arch = "x86_64")) && nvidia;
     let nvidia_driver_version = nvidia.then_some(nvidia_driver_version).flatten();
@@ -897,7 +1096,10 @@ pub fn system_status(app: &AppHandle) -> Result<SystemStatus, String> {
     let gpu_memory_mb = gpu.as_ref().and_then(|info| info.total_memory_mb);
     let gpu_free_memory_mb = gpu.as_ref().and_then(|info| info.free_memory_mb);
     let available_memory_mb = crate::resources::available_memory_mb();
-    let available_vram_mb = gpu.as_ref().and_then(GpuInfo::available_memory_mb);
+    let available_vram_mb = cuda_gpu
+        .as_ref()
+        .or(gpu.as_ref())
+        .and_then(GpuInfo::available_memory_mb);
     let vulkan_engine = if gpu.is_some() && cfg!(any(target_os = "windows", target_os = "linux")) {
         Some(engine_path(app, "vulkan")?)
     } else {
@@ -910,7 +1112,7 @@ pub fn system_status(app: &AppHandle) -> Result<SystemStatus, String> {
         .any(|accelerator| accelerator.backend == "vulkan" && accelerator.installed);
     let mut compute_devices = Vec::new();
     if cuda_installable && cuda_engine {
-        compute_devices.extend(nvidia_devices.iter().filter_map(|device| {
+        compute_devices.extend(cuda_devices.iter().filter_map(|device| {
             let index = device.device_index?;
             Some(ComputeDeviceInfo {
                 id: format!("cuda:{index}"),
@@ -940,7 +1142,7 @@ pub fn system_status(app: &AppHandle) -> Result<SystemStatus, String> {
         .any(|accelerator| accelerator.backend == "metal" && accelerator.installed);
     let recommended_id = models::recommended_model_id_for_system(
         available_vram_mb,
-        nvidia && cuda_installable && cuda_engine,
+        nvidia && cuda_installable && cuda_engine && cuda_gpu.is_some(),
         has_discrete_vulkan,
         metal_installed,
         cpu_threads,
@@ -949,12 +1151,13 @@ pub fn system_status(app: &AppHandle) -> Result<SystemStatus, String> {
     let (recommendation, recommended_model_id, recommended_backend) = if nvidia
         && cuda_installable
         && cuda_engine
+        && cuda_gpu.is_some()
     {
         (
             format!(
-                "{} terdeteksi dengan {}. Auto akan memakai CUDA; {} direkomendasikan.",
+                "{} terdeteksi dengan {}. Auto akan mencoba CUDA; {} direkomendasikan.",
                 gpu_name.clone().unwrap_or_else(|| "NVIDIA GPU".into()),
-                format_vram(gpu_free_memory_mb),
+                format_vram(cuda_gpu.as_ref().and_then(GpuInfo::available_memory_mb)),
                 recommended_id,
             ),
             recommended_id,
@@ -976,6 +1179,12 @@ pub fn system_status(app: &AppHandle) -> Result<SystemStatus, String> {
                 "NVIDIA terdeteksi ({}). Auto akan mencoba Vulkan; pasang CUDA jika ingin backend CUDA.",
                 format_vram(gpu_free_memory_mb),
             ),
+            recommended_id,
+            "auto".to_string(),
+        )
+    } else if nvidia && cuda_supported && cuda_engine && cuda_gpu.is_none() {
+        (
+            "NVIDIA terdeteksi, tetapi CUDA tidak menampilkan perangkat yang dapat dipetakan ke engine. Auto akan mencoba Vulkan atau CPU.".into(),
             recommended_id,
             "auto".to_string(),
         )
@@ -1031,19 +1240,124 @@ pub fn system_status(app: &AppHandle) -> Result<SystemStatus, String> {
 mod tests {
     #[test]
     fn combined_nvidia_query_preserves_devices_and_driver_validation() {
-        let (devices, driver) = super::parse_nvidia_snapshot(
-            b"0, GPU A, 8192, 0, 528.33\n1, GPU B, 16384, 8192, 528.33\n",
-        );
+        let output = b"0, GPU A, GPU-aaaaaaaa, 8192, 0, 528.33\n1, GPU B, GPU-bbbbbbbb, 16384, 8192, 528.33\n";
+        let (devices, driver) = super::parse_nvidia_snapshot_output(output);
         assert_eq!(devices.len(), 2);
         assert_eq!(devices[0].free_memory_mb, Some(0));
         assert_eq!(
             super::select_nvidia_device(&devices).unwrap().device_index,
             Some(1)
         );
+        assert_eq!(devices[1].uuid.as_deref(), Some("GPU-bbbbbbbb"));
         assert_eq!(driver.as_deref(), Some("528.33"));
         assert!(super::cuda_driver_is_compatible(driver.as_deref().unwrap()));
-        let (_, driver) = super::parse_nvidia_snapshot(b"0, GPU, 8192, 4096, N/A\n");
+        let (_, driver) =
+            super::parse_nvidia_snapshot_output(b"0, GPU, GPU-aaaaaaaa, 8192, 4096, N/A\n");
         assert!(driver.is_none());
+    }
+
+    #[test]
+    fn cuda_uuid_visibility_preserves_physical_ids_when_cuda_ordinals_differ() {
+        let devices = super::parse_nvidia_devices(
+            b"0, GPU A, GPU-aaaaaaaa, 8192, 7000, 528.33\n1, GPU B, GPU-bbbbbbbb, 16384, 6000, 528.33\n",
+        );
+        // CUDA ordinal 0 is NVML index 1, e.g. under FASTEST_FIRST. The driver
+        // resolves the mask; only its returned UUIDs may identify physical GPUs.
+        let visible = super::nvidia_devices_for_cuda_uuids(
+            &devices,
+            Some(&["GPU-bbbbbbbb".into(), "GPU-aaaaaaaa".into()]),
+        );
+        assert_eq!(
+            visible
+                .iter()
+                .map(|device| device.device_index)
+                .collect::<Vec<_>>(),
+            vec![Some(1), Some(0)]
+        );
+        assert_eq!(
+            super::nvidia_devices_for_cuda_uuids(&devices, Some(&["GPU-bbbbbbbb".into()]))[0]
+                .device_index,
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn cuda_uuid_visibility_empty_or_unmappable_fails_closed() {
+        let devices = super::parse_nvidia_devices(
+            b"0, GPU A, GPU-aaaaaaaa, 8192, 7000, 528.33\n1, GPU B, GPU-bbbbbbbb, 16384, 6000, 528.33\n",
+        );
+        assert!(super::nvidia_devices_for_cuda_uuids(&devices, Some(&[])).is_empty());
+        assert!(
+            super::nvidia_devices_for_cuda_uuids(&devices, Some(&["GPU-cccccccc".into()]),)
+                .is_empty()
+        );
+    }
+
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    #[test]
+    fn native_cuda_driver_uuids_match_physical_inventory() {
+        let (devices, driver) = super::detect_nvidia_snapshot();
+        if devices.is_empty()
+            || !driver
+                .as_deref()
+                .is_some_and(super::cuda_driver_is_compatible)
+        {
+            return;
+        }
+        let uuids =
+            super::cuda_visible_device_uuids().expect("compatible CUDA driver should enumerate");
+        let matched = super::nvidia_devices_for_cuda_uuids(&devices, Some(&uuids));
+        assert_eq!(
+            matched.len(),
+            uuids.len(),
+            "CUDA UUID did not map to NVML inventory"
+        );
+        let visible = super::cuda_visible_nvidia_devices(&devices);
+        if std::env::var_os("CUDA_VISIBLE_DEVICES").is_some_and(|mask| mask.is_empty()) {
+            assert!(visible.is_empty());
+        }
+        eprintln!(
+            "Physical NVIDIA GPUs: {}; CUDA-visible GPUs: {}",
+            devices.len(),
+            visible.len()
+        );
+    }
+
+    #[test]
+    fn cuda_child_is_restricted_to_the_selected_gpu_uuid() {
+        let gpu = super::GpuInfo {
+            name: "Selected GPU".into(),
+            total_memory_mb: Some(8192),
+            free_memory_mb: Some(4096),
+            uuid: Some("GPU-aaaaaaaa".into()),
+            device_index: Some(3),
+        };
+        let mut command = std::process::Command::new("whisper-cli");
+
+        super::configure_cuda_command(&mut command, &gpu).unwrap();
+
+        let selected_uuid = command
+            .get_envs()
+            .find(|(key, _)| key == &std::ffi::OsStr::new("CUDA_VISIBLE_DEVICES"))
+            .and_then(|(_, value)| value)
+            .expect("CUDA child should receive the selected GPU UUID");
+        assert_eq!(selected_uuid, std::ffi::OsStr::new("GPU-aaaaaaaa"));
+    }
+
+    #[test]
+    fn known_free_vram_is_ranked_before_unknown_free_vram() {
+        let devices = super::parse_nvidia_devices(
+            b"0, Unknown-free GPU, GPU-aaaaaaaa, 24576, N/A, 528.33\n1, Usable GPU, GPU-bbbbbbbb, 12288, 8192, 528.33\n",
+        );
+        let ordered = super::ordered_nvidia_devices(&devices);
+        assert_eq!(ordered[0].name, "Usable GPU");
+        assert_eq!(ordered[1].name, "Unknown-free GPU");
+        assert_eq!(
+            super::select_nvidia_device(&devices)
+                .unwrap()
+                .free_memory_mb,
+            Some(8192)
+        );
     }
 
     #[cfg(windows)]
@@ -1175,7 +1489,7 @@ mod tests {
 
     #[test]
     fn selects_nvidia_device_with_the_most_free_memory() {
-        let output = b"0,Small GPU,4096,512\n1,Large GPU,12288,8192\n";
+        let output = b"0,Small GPU,GPU-aaaaaaaa,4096,512\n1,Large GPU,GPU-bbbbbbbb,12288,8192\n";
         let gpu = parse_nvidia_gpus(output).expect("GPU should be parsed");
         assert_eq!(gpu.name, "Large GPU");
         assert_eq!(gpu.device_index, Some(1));
@@ -1184,7 +1498,7 @@ mod tests {
 
     #[test]
     fn keeps_first_device_when_memory_is_unavailable_or_tied() {
-        let output = b"0,First GPU,N/A,N/A\n1,Second GPU,N/A,N/A\n";
+        let output = b"0,First GPU,GPU-aaaaaaaa,N/A,N/A\n1,Second GPU,GPU-bbbbbbbb,N/A,N/A\n";
         let gpu = parse_nvidia_gpus(output).expect("GPU should be parsed");
         assert_eq!(gpu.name, "First GPU");
         assert_eq!(gpu.device_index, Some(0));

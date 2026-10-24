@@ -47,7 +47,8 @@ const english = {
   "hardware.totalVram": "Total VRAM",
   "hardware.freeVram": "Free VRAM",
   "hardware.cudaEngine": "CUDA engine",
-  "hardware.recommendation.cudaReady": "{gpu} detected with {vram}. Auto will use CUDA; {model} is recommended.",
+  "hardware.recommendation.cudaReady": "{gpu} detected with {vram}. Auto will try CUDA; {model} is recommended.",
+  "hardware.recommendation.cudaNoDevice": "CUDA is installed, but no usable CUDA device is visible. Auto will try Vulkan or CPU.",
   "hardware.recommendation.cudaInstall": "NVIDIA detected ({vram}). Install CUDA acceleration for GPU speed; Auto can still use CPU.",
   "hardware.recommendation.cudaDriver": "NVIDIA detected, but the driver is too old or could not be verified for CUDA 12.x. Update the driver before installing CUDA.",
   "hardware.recommendation.cudaUnsupported": "NVIDIA detected, but this CUDA package is only available for Windows. Use Auto with Vulkan or CPU.",
@@ -315,6 +316,7 @@ const english = {
   "error.runtimeIncomplete": "The runtime is incomplete. Run the setup script first.",
   "error.cudaRequired": "CUDA acceleration is not installed. Install CUDA first so the job does not fall back to CPU.",
   "error.cudaUnavailable": "CUDA requires a detected NVIDIA GPU and is only available on supported Windows builds.",
+  "error.cudaDeviceUnavailable": "The selected CUDA device is unavailable. Select an available device, Auto, or CPU.",
   "error.vramUnreadable": "NVIDIA VRAM could not be read. Close other GPU-heavy apps and re-check components.",
   "error.vramTooLow": "{model} needs about {required} of free VRAM, but only {available} is available.",
   "error.acceleratorMissing": "{accelerator} is not installed. Install it from Settings first.",
@@ -374,7 +376,8 @@ const messages: Record<UiLanguage, Record<TranslationKey, string>> = {
     "hardware.totalVram": "Total VRAM",
     "hardware.freeVram": "VRAM bebas",
     "hardware.cudaEngine": "Engine CUDA",
-    "hardware.recommendation.cudaReady": "{gpu} terdeteksi dengan {vram}. Auto akan memakai CUDA; {model} direkomendasikan.",
+    "hardware.recommendation.cudaReady": "{gpu} terdeteksi dengan {vram}. Auto akan mencoba CUDA; {model} direkomendasikan.",
+    "hardware.recommendation.cudaNoDevice": "CUDA terpasang, tetapi tidak ada perangkat CUDA yang bisa digunakan. Auto akan mencoba Vulkan atau CPU.",
   "hardware.recommendation.cudaInstall": "NVIDIA terdeteksi ({vram}). Pasang akselerasi CUDA untuk performa GPU; Auto tetap dapat memakai CPU.",
   "hardware.recommendation.cudaDriver": "NVIDIA terdeteksi, tetapi driver terlalu lama atau tidak dapat diverifikasi untuk CUDA 12.x. Update driver sebelum memasang CUDA.",
     "hardware.recommendation.cudaUnsupported": "NVIDIA terdeteksi, tetapi paket CUDA ini hanya tersedia untuk Windows. Gunakan Auto dengan Vulkan atau CPU.",
@@ -642,6 +645,7 @@ const messages: Record<UiLanguage, Record<TranslationKey, string>> = {
     "error.runtimeIncomplete": "Runtime belum lengkap. Jalankan script setup terlebih dahulu.",
     "error.cudaRequired": "Akselerasi CUDA belum terpasang. Pasang CUDA terlebih dahulu agar job tidak kembali ke CPU.",
     "error.cudaUnavailable": "CUDA membutuhkan GPU NVIDIA yang terdeteksi dan hanya tersedia pada build Windows yang didukung.",
+    "error.cudaDeviceUnavailable": "Perangkat CUDA yang dipilih tidak tersedia. Pilih perangkat yang tersedia, Auto, atau CPU.",
     "error.vramUnreadable": "VRAM NVIDIA tidak terbaca. Tutup aplikasi yang memakai GPU lalu periksa ulang komponen.",
     "error.vramTooLow": "{model} membutuhkan sekitar {required} VRAM bebas, tetapi yang tersedia hanya {available}.",
     "error.acceleratorMissing": "{accelerator} belum terpasang. Pasang dari Pengaturan terlebih dahulu.",
@@ -692,7 +696,8 @@ const messages: Record<UiLanguage, Record<TranslationKey, string>> = {
     "hardware.totalVram": "总显存",
     "hardware.freeVram": "可用显存",
     "hardware.cudaEngine": "CUDA 引擎",
-    "hardware.recommendation.cudaReady": "检测到 {gpu}，可用显存为 {vram}。自动模式将使用 CUDA；推荐 {model}。",
+    "hardware.recommendation.cudaReady": "检测到 {gpu}，可用显存为 {vram}。自动模式将尝试 CUDA；推荐 {model}。",
+    "hardware.recommendation.cudaNoDevice": "CUDA 已安装，但没有可用的 CUDA 设备。自动模式将尝试 Vulkan 或 CPU。",
   "hardware.recommendation.cudaInstall": "检测到 NVIDIA（{vram}）。安装 CUDA 可获得 GPU 加速；自动模式仍可使用 CPU。",
   "hardware.recommendation.cudaDriver": "检测到 NVIDIA，但驱动过旧或无法验证是否兼容 CUDA 12.x。请先更新驱动再安装 CUDA。",
     "hardware.recommendation.cudaUnsupported": "检测到 NVIDIA，但此 CUDA 软件包仅适用于 Windows。请使用带 Vulkan 的自动模式或 CPU。",
@@ -960,6 +965,7 @@ const messages: Record<UiLanguage, Record<TranslationKey, string>> = {
     "error.runtimeIncomplete": "运行环境不完整。请先运行设置脚本。",
     "error.cudaRequired": "尚未安装 CUDA 加速。请先安装 CUDA，以免任务退回 CPU。",
     "error.cudaUnavailable": "CUDA 需要检测到 NVIDIA GPU，并且仅适用于受支持的 Windows 构建版本。",
+    "error.cudaDeviceUnavailable": "所选 CUDA 设备不可用。请选择可用的设备、自动或 CPU。",
     "error.vramUnreadable": "无法读取 NVIDIA 显存。请关闭其他高 GPU 占用应用，然后重新检查组件。",
     "error.vramTooLow": "{model} 需要约 {required} 可用显存，但当前只有 {available}。",
     "error.acceleratorMissing": "{accelerator} 尚未安装。请先从设置中安装。",
@@ -1072,7 +1078,8 @@ export function getRecommendation(system: SystemStatus | null, t: Translate) {
   if (!system) return t("hardware.detecting");
   const model = getModelLabel(system.recommendedModelId, t);
   const vram = formatMemoryText(system.gpuFreeMemoryMb ?? system.gpuMemoryMb, t("hardware.notDetected"));
-  if (system.nvidia && system.cudaSupported && system.cudaInstallable && system.cudaEngine) {
+  if (system.nvidia && system.cudaSupported && system.cudaInstallable && system.cudaEngine &&
+    system.computeDevices.some((device) => device.backend === "cuda")) {
     return t("hardware.recommendation.cudaReady", {
       gpu: system.gpuName ?? "NVIDIA GPU",
       vram,
@@ -1081,6 +1088,9 @@ export function getRecommendation(system: SystemStatus | null, t: Translate) {
   }
   if (system.accelerators.some((accelerator) => accelerator.supported && accelerator.installed)) {
     return t("hardware.recommendation.gpuInstalled", { model });
+  }
+  if (system.nvidia && system.cudaInstallable && system.cudaEngine) {
+    return t("hardware.recommendation.cudaNoDevice");
   }
   if (system.nvidia && system.cudaSupported && !system.cudaInstallable) {
     return t("hardware.recommendation.cudaDriver");

@@ -180,6 +180,12 @@ Add or update tests when behavior changes.
 
 Tests must verify behavior, not merely increase coverage.
 
+For GPU/backend changes, keep physical NVIDIA indices/UUIDs separate from
+CUDA and Whisper device ordinals. Verify device-selection and log contracts
+against the whisper.cpp commit pinned by the setup scripts and workflows.
+Cover success and failure logs for every affected shipping backend; a zero
+process exit status alone does not prove that the requested GPU was used.
+
 Do not:
 
 - delete a failing test without understanding the cause;

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 
@@ -9,6 +9,42 @@ const hook = readFileSync(resolve("src-tauri/windows/hooks.nsh"), "utf8");
 const applicationRoot = "$LOCALAPPDATA\\app.whispertube.local";
 const ownedDirectories = ["models", "jobs", "runtime", "cookie-jars"];
 const databaseFiles = ["whispertube.db", "whispertube.db-journal", "whispertube.db-wal", "whispertube.db-shm"];
+
+test("development runtime cleanup preserves nested tracked placeholders", { skip: process.platform !== "win32" }, () => {
+  const root = mkdtempSync(join(tmpdir(), "whispertube-dev-runtime-cleanup-"));
+  try {
+    const scripts = join(root, "scripts");
+    const cuda = join(root, "src-tauri", "runtime-dev", "windows", "cuda");
+    mkdirSync(scripts, { recursive: true });
+    mkdirSync(cuda, { recursive: true });
+    const cleaner = join(scripts, "clean-dev-runtime.ps1");
+    copyFileSync(resolve("scripts/clean-dev-runtime.ps1"), cleaner);
+    const nestedPlaceholder = join(cuda, ".gitkeep");
+    const nestedPayload = join(cuda, "whisper-cli.exe");
+    const rootPlaceholder = join(root, "src-tauri", "runtime-dev", "windows", ".gitkeep");
+    const rootPayload = join(root, "src-tauri", "runtime-dev", "windows", "ffmpeg.exe");
+    writeFileSync(nestedPlaceholder, "tracked scaffold");
+    writeFileSync(nestedPayload, "synthetic runtime payload");
+    writeFileSync(rootPlaceholder, "tracked scaffold");
+    writeFileSync(rootPayload, "synthetic runtime payload");
+
+    const run = spawnSync("pwsh", ["-NoProfile", "-NonInteractive", "-File", cleaner], {
+      encoding: "utf8",
+      timeout: 15_000,
+    });
+    assert.ifError(run.error);
+    assert.equal(run.status, 0, run.stderr);
+    assert.equal(existsSync(nestedPlaceholder), true);
+    assert.equal(existsSync(cuda), true);
+    assert.equal(existsSync(nestedPayload), false);
+    assert.equal(existsSync(rootPlaceholder), true);
+    assert.equal(existsSync(rootPayload), false);
+  } finally {
+    const resolved = resolve(root);
+    assert.ok(resolved.startsWith(resolve(tmpdir()) + sep));
+    rmSync(resolved, { recursive: true, force: true });
+  }
+});
 
 test("uninstall cleanup is opt-in and never removes the complete application data root", () => {
   assert.ok(hook.includes('StrCmp $WhisperTubeRemoveUserData "1" 0 whispertube_uninstall_done'));

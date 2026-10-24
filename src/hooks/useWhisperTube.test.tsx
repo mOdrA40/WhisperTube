@@ -73,6 +73,11 @@ const models: ModelInfo[] = [{
   installed: true,
 }];
 
+const cudaDevice = {
+  id: "cuda:0", backend: "cuda", name: "Visible NVIDIA", vendor: "nvidia",
+  deviceIndex: 0, integrated: false, totalMemoryMb: 8192, freeMemoryMb: 4096,
+};
+
 const metadata: VideoMetadata = {
   id: "video-id",
   title: "Test video",
@@ -153,10 +158,25 @@ describe("useWhisperTube", () => {
       expect(result.current.modelDownloadBlockReasons).toEqual({});
       expect(result.current.canStart).toBe(true);
     } else {
-      expect(result.current.vramWarning).toContain(free === 0 ? "but only 0.0 GB" : "VRAM could not be read");
+      expect(result.current.vramWarning).toContain(free === "missing" ? "CUDA device is unavailable" : free === 0 ? "but only 0.0 GB" : "VRAM could not be read");
       expect(result.current.modelDownloadBlockReasons.base).toBe(result.current.vramWarning);
       expect(result.current.canStart).toBe(false);
     }
+  });
+
+  it("blocks unavailable CUDA while keeping Auto usable on CPU", async () => {
+    services.getSystemStatus.mockResolvedValue({ ...system, nvidia: true, cudaSupported: true,
+      cudaInstallable: true, cudaEngine: true, gpuFreeMemoryMb: 8192, computeDevices: [] });
+    const { result } = renderHook(() => useWhisperTube(), { wrapper });
+    await waitFor(() => expect(result.current.system?.cudaEngine).toBe(true));
+    act(() => { result.current.setComputeTarget("cuda"); result.current.setUrl(metadata.webpageUrl); });
+    await act(async () => result.current.inspectVideo());
+    expect(result.current.runtimeReady).toBe(false);
+    expect(result.current.vramWarning).toContain("CUDA device is unavailable");
+    expect(result.current.canStart).toBe(false);
+    act(() => result.current.setComputeTarget("auto"));
+    expect(result.current.runtimeReady).toBe(true);
+    expect(result.current.canStart).toBe(true);
   });
 
   it.each(["success", "failure", "cancel"])("invalidates the lazy cache snapshot after transcription %s", async (outcome) => {
@@ -309,6 +329,74 @@ describe("useWhisperTube", () => {
     expect(result.current.error).toContain("History tidak tersedia");
   });
 
+  it("ties the copied indicator to the transcript that was copied", async () => {
+    const originalClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    try {
+      const first = { ...transcript, historyId: 1, text: "Transkrip pertama" };
+      const second = { ...transcript, historyId: 2, text: "Transkrip kedua" };
+      services.loadHistory.mockResolvedValueOnce(first).mockResolvedValueOnce(second);
+      const { result } = renderHook(() => useWhisperTube(), { wrapper });
+      await waitFor(() => expect(result.current.system).toEqual(system));
+
+      await act(async () => result.current.loadHistory(1));
+      vi.useFakeTimers();
+      await act(async () => result.current.copyTranscript());
+      expect(writeText).toHaveBeenCalledWith("Transkrip pertama");
+      expect(result.current.copied).toBe(true);
+      act(() => vi.advanceTimersByTime(1000));
+      await act(async () => result.current.copyTranscript());
+      act(() => vi.advanceTimersByTime(400));
+      expect(result.current.copied).toBe(true);
+      act(() => vi.advanceTimersByTime(1000));
+      expect(result.current.copied).toBe(false);
+      await act(async () => result.current.copyTranscript());
+      expect(result.current.copied).toBe(true);
+
+      await act(async () => result.current.loadHistory(2));
+      expect(result.current.result?.historyId).toBe(2);
+      expect(result.current.copied).toBe(false);
+    } finally {
+      vi.useRealTimers();
+      if (originalClipboard) {
+        Object.defineProperty(navigator, "clipboard", originalClipboard);
+      } else {
+        Reflect.deleteProperty(navigator, "clipboard");
+      }
+    }
+  });
+
+  it("ignores a late clipboard completion after another transcript was copied", async () => {
+    const originalClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+    let finishFirst!: () => void;
+    const writeText = vi.fn()
+      .mockReturnValueOnce(new Promise<void>((resolve) => { finishFirst = resolve; }))
+      .mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    try {
+      services.loadHistory.mockResolvedValueOnce({ ...transcript, historyId: 1 })
+        .mockResolvedValueOnce({ ...transcript, historyId: 2 });
+      const { result } = renderHook(() => useWhisperTube(), { wrapper });
+      await waitFor(() => expect(result.current.system).toEqual(system));
+      await act(async () => result.current.loadHistory(1));
+      let firstCopy!: Promise<void>;
+      act(() => { firstCopy = result.current.copyTranscript(); });
+      await act(async () => result.current.loadHistory(2));
+      await act(async () => result.current.copyTranscript());
+      expect(result.current.copied).toBe(true);
+      await act(async () => { finishFirst(); await firstCopy; });
+      expect(result.current.result?.historyId).toBe(2);
+      expect(result.current.copied).toBe(true);
+    } finally {
+      if (originalClipboard) Object.defineProperty(navigator, "clipboard", originalClipboard);
+      else Reflect.deleteProperty(navigator, "clipboard");
+    }
+  });
+
   it.each(["audio", "transcript"] as const)("updates an open result after deleting %s without deleting its history", async (scope) => {
     const { result } = renderHook(() => useWhisperTube(), { wrapper });
     await waitFor(() => expect(result.current.system).toEqual(system));
@@ -416,7 +504,8 @@ describe("useWhisperTube", () => {
 
   it.each([0, 1024, null])("lets Auto fall back when installable CUDA has insufficient or unknown VRAM (%s)", async (free) => {
     services.getSystemStatus.mockResolvedValue({ ...system, cudaEngine: true, cudaSupported: true,
-      cudaInstallable: true, nvidia: true, gpuFreeMemoryMb: free, gpuMemoryMb: free });
+      cudaInstallable: true, nvidia: true, gpuFreeMemoryMb: free, gpuMemoryMb: free,
+      computeDevices: [{ ...cudaDevice, freeMemoryMb: free }] });
     services.listModels.mockResolvedValue([{ ...models[0], vramRequiredMb: 4096 }]);
     const { result } = renderHook(() => useWhisperTube(), { wrapper });
     await waitFor(() => expect(result.current.system?.cudaInstallable).toBe(true));
@@ -429,7 +518,8 @@ describe("useWhisperTube", () => {
 
   it.each([0, null])("distinguishes exhausted CUDA VRAM from unreadable memory (%s)", async (free) => {
     services.getSystemStatus.mockResolvedValue({ ...system, recommendedBackend: "cuda", cudaEngine: true,
-      cudaSupported: true, cudaInstallable: true, nvidia: true, gpuFreeMemoryMb: free });
+      cudaSupported: true, cudaInstallable: true, nvidia: true, gpuFreeMemoryMb: 8192,
+      computeDevices: [{ ...cudaDevice, freeMemoryMb: free }] });
     services.listModels.mockResolvedValue([{ ...models[0], vramRequiredMb: 4096 }]);
     const { result } = renderHook(() => useWhisperTube(), { wrapper });
     await waitFor(() => expect(result.current.system?.cudaInstallable).toBe(true));

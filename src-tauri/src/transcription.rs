@@ -23,8 +23,9 @@ use crate::{
     process, resources,
     sources::{source_js_runtime_args, validate_media_duration, validate_media_url},
     system::{
-        cuda_driver_is_compatible, detect_gpu, detect_nvidia, detect_nvidia_device,
-        detect_nvidia_driver_version, ensure_cuda_install_supported, UsageMonitor,
+        configure_cuda_command, cuda_driver_is_compatible, detect_gpu, detect_nvidia,
+        detect_nvidia_device, detect_nvidia_driver_version, ensure_cuda_install_supported,
+        UsageMonitor,
     },
     types::{
         ComputeDeviceInfo, ProgressPayload, Segment, TranscriptRequest, TranscriptResult,
@@ -982,6 +983,17 @@ fn run_engine_probe(
         write_probe_wav(&wav)?;
         let mut command = Command::new(engine);
         process::hide_console(&mut command);
+        let probe_device_index = if backend == "cuda" {
+            let index = device_index.ok_or_else(|| {
+                "Capability probe CUDA tidak menerima indeks perangkat NVIDIA.".to_string()
+            })?;
+            let gpu = detect_nvidia_device(index)
+                .ok_or_else(|| format!("NVIDIA device {index} tidak lagi terdeteksi."))?;
+            configure_cuda_command(&mut command, &gpu)?;
+            Some(0)
+        } else {
+            device_index
+        };
         if backend == "vulkan" {
             configure_vulkan_command(&mut command);
         }
@@ -990,11 +1002,13 @@ fn run_engine_probe(
             .arg(model)
             .args(["-f"])
             .arg(&wav)
-            .args(["-l", "auto", "-t", "1", "-nt", "-np"]);
+            // Keep -np off: the pinned CLI disables the whisper log callback
+            // with that flag, including the GPU backend attestation we need.
+            .args(["-l", "auto", "-t", "1", "-nt"]);
         if backend == "vulkan" {
             command.arg("-nfa");
         }
-        if let Some(device_index) = device_index {
+        if let Some(device_index) = probe_device_index {
             command.arg("-dev").arg(device_index.to_string());
         }
         command
@@ -1018,10 +1032,46 @@ fn run_engine_probe(
                 &format!("Capability probe {backend}"),
             ));
         }
+        require_gpu_backend_attestation(&stderr, backend, probe_device_index)?;
         Ok(())
     })();
     let _ = fs::remove_dir_all(&probe_dir);
     result
+}
+
+fn require_gpu_backend_attestation(
+    stderr: &str,
+    backend: &str,
+    device_index: Option<usize>,
+) -> Result<(), String> {
+    let backend = backend.to_ascii_lowercase();
+    let backend_prefix = if backend == "metal" { "mtl" } else { &backend };
+    let expected_device = device_index.map(|index| format!("{backend_prefix}{index}"));
+    let backend_name = stderr.lines().find_map(|line| {
+        let (_, suffix) = line.split_once("whisper_backend_init_gpu: using ")?;
+        let (name, _) = suffix.split_once(" backend")?;
+        let name = name.trim();
+        let normalized = name.to_ascii_lowercase();
+        let matches_requested = expected_device.as_deref().map_or_else(
+            || normalized.starts_with(backend_prefix),
+            |expected| normalized == expected,
+        );
+        matches_requested.then(|| name.to_string())
+    });
+    let Some(backend_name) = backend_name else {
+        return Err(format!(
+            "Whisper {backend} selesai tanpa konfirmasi bahwa backend GPU {backend} dipakai."
+        ));
+    };
+    if stderr.to_ascii_lowercase().contains(&format!(
+        "failed to initialize {} backend",
+        backend_name.to_ascii_lowercase()
+    )) {
+        return Err(format!(
+            "Whisper {backend} gagal menginisialisasi perangkat GPU {backend_name}."
+        ));
+    }
+    Ok(())
 }
 
 fn ensure_vulkan_probe(
@@ -1188,6 +1238,31 @@ where
 
 type BackendSelection = (String, PathBuf, Option<String>, Option<usize>);
 
+fn try_cuda_devices<T>(
+    devices: &[crate::system::GpuInfo],
+    mut attempt: impl FnMut(&crate::system::GpuInfo) -> Result<T, String>,
+    mut is_cancelled: impl FnMut() -> bool,
+    failures: &mut Vec<String>,
+) -> Result<Option<T>, String> {
+    for gpu in devices {
+        if is_cancelled() {
+            return Err("Transkripsi dibatalkan.".into());
+        }
+        match attempt(gpu) {
+            Ok(selection) => return Ok(Some(selection)),
+            Err(error) if is_cancelled() => return Err(error),
+            Err(error) => failures.push(format!(
+                "cuda:{} ({}): {error}",
+                gpu.device_index
+                    .map(|index| index.to_string())
+                    .unwrap_or_else(|| "unknown".into()),
+                gpu.name
+            )),
+        }
+    }
+    Ok(None)
+}
+
 struct ResolvedEngine {
     selection: BackendSelection,
     runtime: crate::runtime_snapshot::RuntimeSnapshot,
@@ -1217,7 +1292,7 @@ fn choose_backend(
             if !cfg!(all(target_os = "windows", target_arch = "x86_64")) {
                 Err("CUDA hanya tersedia pada build Windows yang didukung.".into())
             } else if !nvidia {
-                Err("CUDA dipilih tetapi NVIDIA GPU/driver tidak terdeteksi.".into())
+                Err("CUDA tidak melihat perangkat NVIDIA yang dapat dipetakan. Periksa visibilitas GPU dan driver.".into())
             } else if let Err(error) = ensure_cuda_install_supported() {
                 Err(error)
             } else if !is_regular_file(&cuda) {
@@ -1230,10 +1305,16 @@ fn choose_backend(
                     None => detect_nvidia()
                         .ok_or_else(|| "NVIDIA GPU/driver tidak terdeteksi.".to_string())?,
                 };
-                run_cuda_probe_with_vram_guard(model_id, &gpu, || {
-                    ensure_backend_probe(context, "cuda", &cuda, model, gpu.device_index)
+                let device_index = gpu.device_index.ok_or_else(|| {
+                    format!(
+                        "NVIDIA device {} tidak memiliki indeks perangkat.",
+                        gpu.name
+                    )
                 })?;
-                Ok(("cuda".into(), cuda, None, gpu.device_index))
+                run_cuda_probe_with_vram_guard(model_id, &gpu, || {
+                    ensure_backend_probe(context, "cuda", &cuda, model, Some(device_index))
+                })?;
+                Ok(("cuda".into(), cuda, None, Some(device_index)))
             }
         }
         "metal" => {
@@ -1278,7 +1359,8 @@ fn choose_backend(
             }
         }
         "auto" => {
-            let nvidia = detect_nvidia().is_some();
+            let cuda_devices = crate::system::cuda_devices_by_preference();
+            let nvidia = !cuda_devices.is_empty();
             let gpu_detected = nvidia || detect_gpu().is_some();
             let mut candidates = Vec::new();
             if cfg!(all(target_os = "windows", target_arch = "x86_64"))
@@ -1300,6 +1382,37 @@ fn choose_backend(
             for backend in candidates {
                 if context.is_cancelled() {
                     return Err("Transkripsi dibatalkan.".into());
+                }
+                if backend == "cuda" {
+                    let selection = try_cuda_devices(
+                        &cuda_devices,
+                        |gpu| {
+                            let device_index = gpu.device_index.ok_or_else(|| {
+                                format!(
+                                    "NVIDIA device {} tidak memiliki indeks perangkat.",
+                                    gpu.name
+                                )
+                            })?;
+                            let device_id = format!("cuda:{device_index}");
+                            let (backend, engine, _, device) = choose_backend(
+                                context,
+                                "cuda",
+                                Some(&device_id),
+                                model,
+                                wav,
+                                model_id,
+                            )?;
+                            Ok((backend, engine, device))
+                        },
+                        || context.is_cancelled(),
+                        &mut failures,
+                    )?;
+                    if let Some((backend, engine, device)) = selection {
+                        let message = (!failures.is_empty())
+                            .then(|| format!("Auto beralih ke {backend}: {}", failures.join("; ")));
+                        return Ok((backend, engine, message, device));
+                    }
+                    continue;
                 }
                 // Resolve and hash only the candidate we are about to use.
                 // Explicit selection keeps its normal integrity/VRAM/probe guards.
@@ -1369,6 +1482,8 @@ fn run_whisper(
             network_bytes_per_second: None,
         });
     }
+    let mut usage_device_index = device_index;
+    let mut selected_cuda_gpu = None;
     if resolved_backend == "cuda" {
         let gpu = match device_index {
             Some(index) => detect_nvidia_device(index).ok_or_else(|| {
@@ -1381,8 +1496,12 @@ fn run_whisper(
             })?,
         };
         models::ensure_vram_available(config.model_id, gpu.available_memory_mb())?;
+        usage_device_index = gpu.device_index;
+        selected_cuda_gpu = Some(gpu);
     }
-    context.usage.set_target(&resolved_backend, device_index);
+    context
+        .usage
+        .set_target(&resolved_backend, usage_device_index);
     let available_threads = std::thread::available_parallelism()
         .map(|value| value.get())
         .unwrap_or(4);
@@ -1404,9 +1523,11 @@ fn run_whisper(
     if resolved_backend == "cpu" {
         command.arg("-ng");
     } else if resolved_backend == "cuda" {
-        if let Some(device_index) = device_index {
-            command.arg("-dev").arg(device_index.to_string());
-        }
+        let gpu = selected_cuda_gpu
+            .as_ref()
+            .ok_or_else(|| "CUDA tidak memiliki perangkat NVIDIA terpilih.".to_string())?;
+        configure_cuda_command(&mut command, gpu)?;
+        command.arg("-dev").arg("0");
     } else if resolved_backend == "vulkan" {
         configure_vulkan_command(&mut command);
         // Keep the actual job on the same conservative Vulkan path as the
@@ -1446,6 +1567,14 @@ fn run_whisper(
     )?;
     if !status.success() {
         return Err(process_failed(context.cancelled, stderr, "Whisper"));
+    }
+    if resolved_backend != "cpu" {
+        let engine_device_index = if resolved_backend == "cuda" {
+            Some(0)
+        } else {
+            device_index
+        };
+        require_gpu_backend_attestation(&stderr, &resolved_backend, engine_device_index)?;
     }
     Ok(resolved_backend)
 }
@@ -2315,6 +2444,7 @@ mod tests {
             name: "Test NVIDIA".into(),
             total_memory_mb: Some(8192),
             free_memory_mb: Some(1024),
+            uuid: Some("GPU-aaaaaaaa".into()),
             device_index: Some(0),
         };
 
@@ -2347,6 +2477,84 @@ mod tests {
         assert!(second.is_err());
         assert_eq!(attempts, 2);
         assert!(cache.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn capability_probe_requires_the_requested_gpu_backend_to_initialize() {
+        let cuda_zero = "whisper_backend_init_gpu: using CUDA0 backend\n";
+        let cuda_one = "whisper_backend_init_gpu: using CUDA1 backend\n";
+        assert!(super::require_gpu_backend_attestation(cuda_zero, "cuda", Some(0)).is_ok());
+        assert!(super::require_gpu_backend_attestation(cuda_one, "cuda", Some(1)).is_ok());
+        assert!(super::require_gpu_backend_attestation(cuda_zero, "cuda", Some(1)).is_err());
+        assert!(super::require_gpu_backend_attestation(
+            "whisper_backend_init_gpu: no GPU found\n",
+            "cuda",
+            Some(0)
+        )
+        .is_err());
+        assert!(super::require_gpu_backend_attestation(
+            "whisper_backend_init_gpu: using CUDA0 backend\nwhisper_backend_init_gpu: failed to initialize CUDA0 backend\n",
+            "cuda",
+            Some(0)
+        )
+        .is_err());
+        assert!(super::require_gpu_backend_attestation(cuda_zero, "vulkan", Some(0)).is_err());
+        assert!(super::require_gpu_backend_attestation(
+            "whisper_backend_init_gpu: using MTL0 backend\n",
+            "metal",
+            None,
+        )
+        .is_ok());
+        assert!(super::require_gpu_backend_attestation(
+            "whisper_backend_init_gpu: using MTL0 backend\nwhisper_backend_init_gpu: failed to initialize MTL0 backend\n", "metal", None,
+        ).is_err());
+        let vulkan_one = "whisper_backend_init_gpu: using Vulkan1 backend\n";
+        assert!(super::require_gpu_backend_attestation(vulkan_one, "vulkan", Some(1)).is_ok());
+        assert!(super::require_gpu_backend_attestation(vulkan_one, "vulkan", Some(0)).is_err());
+    }
+
+    #[test]
+    fn auto_continues_to_another_cuda_device_after_a_probe_failure() {
+        let devices = vec![
+            crate::system::GpuInfo {
+                name: "First GPU".into(),
+                total_memory_mb: Some(8192),
+                free_memory_mb: Some(4096),
+                uuid: Some("GPU-aaaaaaaa".into()),
+                device_index: Some(2),
+            },
+            crate::system::GpuInfo {
+                name: "Second GPU".into(),
+                total_memory_mb: Some(12288),
+                free_memory_mb: Some(8192),
+                uuid: Some("GPU-bbbbbbbb".into()),
+                device_index: Some(0),
+            },
+        ];
+        let mut attempts = Vec::new();
+        let mut failures = Vec::new();
+        let selected = super::try_cuda_devices(
+            &devices,
+            |gpu| {
+                let index = gpu.device_index.unwrap();
+                attempts.push(index);
+                if index == 2 {
+                    Err("capability probe failed".into())
+                } else {
+                    Ok(gpu.name.clone())
+                }
+            },
+            || false,
+            &mut failures,
+        )
+        .unwrap();
+
+        assert_eq!(attempts, vec![2, 0]);
+        assert_eq!(selected.as_deref(), Some("Second GPU"));
+        assert_eq!(
+            failures,
+            vec!["cuda:2 (First GPU): capability probe failed"]
+        );
     }
 
     #[test]

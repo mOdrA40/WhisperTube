@@ -100,7 +100,9 @@ export async function installAppUpdate(onProgress: (progress: AppUpdateProgress)
     update = pendingAppUpdate;
     pendingAppUpdate = null;
     activeAppUpdate = update;
-    if (!update) throw new Error("NO_UPDATE_AVAILABLE");
+    // A retry can perform a fresh check after the previous handle was closed.
+    // No longer available is a normal outcome; the hook clears the stale offer.
+    if (!update) return;
 
     await invoke("begin_app_update");
     try {

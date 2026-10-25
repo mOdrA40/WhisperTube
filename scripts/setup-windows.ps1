@@ -6,7 +6,10 @@ $Runtime = Join-Path $Root "src-tauri\runtime\windows"
 $CpuDir = Join-Path $Runtime "cpu"
 $Temp = Join-Path $env:TEMP ("whispertube-setup-" + [guid]::NewGuid().ToString("N"))
 $Staging = Join-Path $Temp "staging"
-$StagingCpu = Join-Path $Staging "cpu"
+$CpuTransactionId = [guid]::NewGuid().ToString("N")
+# Directory activation/rollback must be renames on the runtime volume.
+$StagingCpu = Join-Path $Runtime (".cpu-staging-" + $CpuTransactionId)
+$CpuBackup = Join-Path $Runtime (".cpu-backup-" + $CpuTransactionId)
 
 $YtDlpVersion = "2026.08.19"
 $YtDlpSha256 = "66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c0562af101dd3e7a"
@@ -125,28 +128,31 @@ try {
     if (-not (Test-Path $StagedWhisperCli)) { throw "CPU whisper engine gagal dipasang ke staging." }
     Assert-Process $StagedWhisperCli @("--version") "whisper.cpp CPU"
 
-    $CpuBackup = Join-Path $Temp "cpu-backup"
-    $HadExistingCpu = Test-Path $CpuDir
+    $HadExistingCpu = Test-Path -LiteralPath $CpuDir
     $CpuBackupCreated = $false
     try {
         if ($HadExistingCpu) {
-            Move-Item -LiteralPath $CpuDir -Destination $CpuBackup
+            Rename-Item -LiteralPath $CpuDir -NewName (Split-Path -Leaf $CpuBackup)
             $CpuBackupCreated = $true
         }
-        Move-Item -LiteralPath $StagingCpu -Destination $CpuDir
+        Rename-Item -LiteralPath $StagingCpu -NewName (Split-Path -Leaf $CpuDir)
     } catch {
-        if ($CpuBackupCreated -and (Test-Path $CpuDir)) {
-            Remove-Item -LiteralPath $CpuDir -Recurse -Force
-        }
-        if ($CpuBackupCreated -and (Test-Path $CpuBackup)) {
-            Move-Item -LiteralPath $CpuBackup -Destination $CpuDir
-        } elseif (-not $HadExistingCpu -and (Test-Path $CpuDir)) {
-            Remove-Item -LiteralPath $CpuDir -Recurse -Force
+        $activationError = $_
+        if ($CpuBackupCreated) {
+            try {
+                Rename-Item -LiteralPath $CpuBackup -NewName (Split-Path -Leaf $CpuDir)
+            } catch {
+                throw "Aktivasi CPU gagal: $($activationError.Exception.Message). Pemulihan gagal: $($_.Exception.Message). Runtime lama tetap tersedia di $CpuBackup."
+            }
         }
         throw
     }
-    if (Test-Path $CpuBackup) {
-        Remove-Item -LiteralPath $CpuBackup -Recurse -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $CpuBackup) {
+        try {
+            Remove-Item -LiteralPath $CpuBackup -Recurse -Force
+        } catch {
+            Write-Warning "CPU aktif, tetapi backup lama belum dapat dihapus di ${CpuBackup}: $($_.Exception.Message)"
+        }
     }
 
     Write-Step "Installing JavaScript dependencies"
@@ -169,7 +175,14 @@ try {
     Write-Host "`nModel Whisper diunduh dari UI aplikasi saat pertama dipilih." -ForegroundColor DarkGray
     Write-Host "Jika ada NVIDIA GPU, gunakan installer CUDA dari Settings atau .\scripts\install-cuda-engine.ps1." -ForegroundColor DarkGray
 } finally {
-    if (Test-Path $Temp) {
-        Remove-Item -LiteralPath $Temp -Recurse -Force
+    # Never remove the backup here: a failed rollback must remain recoverable.
+    foreach ($cleanupPath in @($Temp, $StagingCpu)) {
+        if (Test-Path -LiteralPath $cleanupPath) {
+            try {
+                Remove-Item -LiteralPath $cleanupPath -Recurse -Force
+            } catch {
+                Write-Warning "Cleanup setup belum selesai di ${cleanupPath}: $($_.Exception.Message)"
+            }
+        }
     }
 }

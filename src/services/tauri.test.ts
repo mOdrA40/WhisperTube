@@ -276,7 +276,7 @@ describe("update resource ownership", () => {
 
   it("handles no-update and failed fallback checks without leaving installation busy", async () => {
     vi.mocked(check).mockResolvedValueOnce(null).mockRejectedValueOnce(new Error("offline")).mockResolvedValueOnce(null);
-    await expect(installAppUpdate(vi.fn())).rejects.toThrow("NO_UPDATE_AVAILABLE");
+    await expect(installAppUpdate(vi.fn())).resolves.toBeUndefined();
     await expect(installAppUpdate(vi.fn())).rejects.toThrow("offline");
     expect(await checkForAppUpdate()).toBeNull();
     expect(invoke).not.toHaveBeenCalled();

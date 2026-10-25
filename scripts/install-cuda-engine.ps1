@@ -6,7 +6,10 @@ $Runtime = Join-Path $Root "src-tauri\runtime-dev\windows"
 $CudaDir = Join-Path $Runtime "cuda"
 $Temp = Join-Path $env:TEMP ("whispertube-cuda-" + [guid]::NewGuid().ToString("N"))
 $Extract = Join-Path $Temp "extract"
-$Staging = Join-Path $Temp "staging"
+$CudaTransactionId = [guid]::NewGuid().ToString("N")
+# Keep activation and rollback on the runtime volume, even when TEMP is elsewhere.
+$Staging = Join-Path $Runtime (".cuda-staging-" + $CudaTransactionId)
+$Backup = Join-Path $Runtime (".cuda-backup-" + $CudaTransactionId)
 $WhisperVersion = "v1.9.2"
 $CudaBuild = "12.4.0"
 $CudaSha256 = "443110ddaad70d4290ab2e77179e31cf712035bbc4fad56bb4519a90c917b39c"
@@ -61,33 +64,43 @@ try {
     & $StagedCli --version | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "CUDA engine gagal melakukan self-check." }
 
-    $Backup = Join-Path $Temp "cuda-backup"
-    $HadExistingCuda = Test-Path $CudaDir
+    $HadExistingCuda = Test-Path -LiteralPath $CudaDir
     $BackupCreated = $false
     try {
         if ($HadExistingCuda) {
-            Move-Item -LiteralPath $CudaDir -Destination $Backup
+            Rename-Item -LiteralPath $CudaDir -NewName (Split-Path -Leaf $Backup)
             $BackupCreated = $true
         }
-        Move-Item -LiteralPath $Staging -Destination $CudaDir
+        Rename-Item -LiteralPath $Staging -NewName (Split-Path -Leaf $CudaDir)
     } catch {
-        if ($BackupCreated -and (Test-Path $CudaDir)) {
-            Remove-Item -LiteralPath $CudaDir -Recurse -Force
-        }
-        if ($BackupCreated -and (Test-Path $Backup)) {
-            Move-Item -LiteralPath $Backup -Destination $CudaDir
-        } elseif (-not $HadExistingCuda -and (Test-Path $CudaDir)) {
-            Remove-Item -LiteralPath $CudaDir -Recurse -Force
+        $activationError = $_
+        if ($BackupCreated) {
+            try {
+                Rename-Item -LiteralPath $Backup -NewName (Split-Path -Leaf $CudaDir)
+            } catch {
+                throw "Aktivasi CUDA gagal: $($activationError.Exception.Message). Pemulihan gagal: $($_.Exception.Message). Runtime lama tetap tersedia di $Backup."
+            }
         }
         throw
     }
-    if (Test-Path $Backup) {
-        Remove-Item -LiteralPath $Backup -Recurse -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $Backup) {
+        try {
+            Remove-Item -LiteralPath $Backup -Recurse -Force
+        } catch {
+            Write-Warning "CUDA aktif, tetapi backup lama belum dapat dihapus di ${Backup}: $($_.Exception.Message)"
+        }
     }
 
     Write-Host "`nCUDA engine installed. Restart WhisperTube agar status diperbarui." -ForegroundColor Green
 } finally {
-    if (Test-Path $Temp) {
-        Remove-Item -LiteralPath $Temp -Recurse -Force
+    # A backup left by a failed rollback is intentionally preserved.
+    foreach ($cleanupPath in @($Temp, $Staging)) {
+        if (Test-Path -LiteralPath $cleanupPath) {
+            try {
+                Remove-Item -LiteralPath $cleanupPath -Recurse -Force
+            } catch {
+                Write-Warning "Cleanup CUDA belum selesai di ${cleanupPath}: $($_.Exception.Message)"
+            }
+        }
     }
 }

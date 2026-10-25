@@ -65,6 +65,16 @@ On macOS or Linux, run the corresponding setup-macos.sh or setup-linux.sh
 script from a terminal that has Bash. The setup scripts verify downloaded
 runtime files and run a version self-check before activation.
 
+Windows CPU/CUDA development setup activates verified staging with directory
+renames on the runtime volume. If activation fails, it restores the old runtime.
+If restoration is blocked, the error reports a retained `.cpu-backup-*` or
+`.cuda-backup-*` directory beside the runtime. Preserve that backup until the
+old runtime has been recovered; temporary-download cleanup does not delete it.
+Cleanup warnings also report any staging/backup directory that needs attention.
+Resolve CPU leftovers in the bundled runtime tree before packaging: the bundle
+allowlist rejects them. CUDA helper backups stay in the separate runtime-dev
+tree and are not bundled.
+
 ## Tauri linker or MSVC errors on Windows
 
 Install Visual Studio Build Tools 2022 with the Desktop development with C++

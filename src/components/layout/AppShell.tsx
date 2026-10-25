@@ -137,7 +137,7 @@ type NavItemProps = {
   icon: ReactNode;
   badge?: number;
   onClick: () => void;
-  children: ReactNode;
+  children: string;
 };
 
 function NavItem({ active, icon, badge, onClick, children }: NavItemProps) {
@@ -146,6 +146,7 @@ function NavItem({ active, icon, badge, onClick, children }: NavItemProps) {
       type="button"
       className={`nav-item ${active ? "active" : ""}`}
       onClick={onClick}
+      aria-label={children}
       aria-current={active ? "page" : undefined}
     >
       <div className="nav-item-icon">{icon}</div>

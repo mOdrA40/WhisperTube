@@ -2630,11 +2630,12 @@ body:has(.window-titlebar) .history-modal-backdrop {
     top: 34px;
   }
   .app-shell-with-window-titlebar {
+    min-height: calc(100vh - 34px) !important;
     margin-top: 34px;
   }
   .app-shell-with-window-titlebar .sidebar {
-    top: 34px;
-    height: calc(100vh - 34px);
+    top: auto;
+    height: auto;
   }
   .window-titlebar {
     height: 34px;
@@ -2647,6 +2648,7 @@ body:has(.window-titlebar) .history-modal-backdrop {
   }
   .app-shell {
     grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr;
   }
   .sidebar {
     position: static;

@@ -16,7 +16,7 @@ serde_json = "1"
 sha2 = "0.10"
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
@@ -27,6 +27,9 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
 regex = "1"
+libloading = "0.8"
+flate2 = "1"
+tar = "0.4"
 sha2 = "0.10"
 url = "2"
 tokio = { version = "1.53.3", features = ["fs", "io-util", "macros", "rt-multi-thread", "time"] }
@@ -38,8 +41,15 @@ tauri-plugin-updater = { version = "2.11.0", default-features = false, features 
 tauri-plugin-process = "2.3.1"
 tauri-plugin-single-instance = "2"
 sysinfo = "0.33"
+tauri-plugin-notification = "2"
 
 [target.'cfg(unix)'.dependencies]
 # Already in the dependency graph. Use the platform's siginfo_t/WAIT constants
 # instead of duplicating incompatible Linux/macOS FFI layouts.
 libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+# Reuse the notification plugin's Windows implementation, but register and use
+# our own identity for unpackaged builds instead of the PowerShell fallback.
+tauri-winrt-notification = "0.8.1"
+windows-registry = "0.6"

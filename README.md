@@ -1,8 +1,12 @@
 # WhisperTube 0.2.0
 
-WhisperTube is a local-first desktop app that turns videos from supported platforms into transcripts using `yt-dlp`, FFmpeg, and whisper.cpp. Audio and transcript processing stay on the user's device.
+WhisperTube is a local-first desktop app that turns videos from supported platforms into transcripts using `yt-dlp`, FFmpeg, and local Whisper/Qwen engines. Audio and transcript processing stay on the user's device.
 
 Other languages: [Bahasa Indonesia](README_ID.md) · [中文（普通话）](README_CN.md)
+
+## Model providers
+
+Choose **OpenAI · Whisper** or **Alibaba · Qwen** in the provider dropdown; only that provider’s models are displayed. Qwen3-ASR-1.7B Q8 runs locally through a separately downloaded native runtime, without Python or cloud credentials. Its subtitle timestamps follow audio sections and are approximate; use Whisper for aligned subtitles. See [Qwen setup, hardware, and limitations](docs/TROUBLESHOOTING.md#qwen-installation-cuda-or-subtitle-timing).
 
 ## Current scope
 
@@ -48,6 +52,7 @@ YouTube prerequisite for installed applications: install [Node.js 22+](https://n
 - Clear the current URL, preview, and transcript from the workspace; permanently delete one, multiple, or all visible history items.
 - Failed/cancelled jobs automatically retain temporary progress. Retry the same source and settings to resume unfinished sections.
 - After success, the WAV is removed unless `Keep audio after completion` is enabled.
+- Native notifications distinguish successful transcription, completion with a duration note, failure, and cancellation when the main window is not focused, for both Whisper and Qwen. Cancellation is silent on Windows. Messages follow the interface language without video titles or transcript content. OS notification settings or Do Not Disturb can suppress banners; delivery failure never changes the job result.
 
 ### Resuming transcription
 

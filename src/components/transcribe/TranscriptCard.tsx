@@ -7,6 +7,7 @@ import { TimerIcon } from "@phosphor-icons/react/dist/csr/Timer";
 import { Virtuoso } from "react-virtuoso";
 import type { Segment, TranscriptResult } from "../../types";
 import { getModelLabel, useI18n } from "../../i18n";
+import { isQwenModel } from "../../lib/models";
 import { formatElapsedDuration } from "../../lib/format";
 
 type TranscriptCardProps = {
@@ -75,6 +76,7 @@ export function TranscriptCard({
         </div>
       </div>
 
+      {transcriptAvailable && isQwenModel(result.model) && <p className="warning-inline" role="note">{t("controls.qwenTiming")}</p>}
       {durationMismatch && (
         <p role="status" className="warning-inline">
           {t("transcript.durationMismatch", {

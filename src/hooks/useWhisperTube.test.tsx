@@ -2,7 +2,7 @@ import { act, configure, getConfig, renderHook, waitFor } from "@testing-library
 import { type ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../i18n";
-import type { ModelInfo, SystemStatus, TranscriptResult, VideoMetadata } from "../types";
+import type { ModelInfo, SystemStatus, TranscriptResult, TranscriptionNotifications, VideoMetadata } from "../types";
 import { useWhisperTube } from "./useWhisperTube";
 
 const services = vi.hoisted(() => ({
@@ -42,6 +42,7 @@ vi.mock("../services/tauri", () => ({
 }));
 
 const system: SystemStatus = {
+  qwenBackends: ["auto", "cpu", "cuda"],
   ytDlp: true,
   ffmpeg: true,
   cpuEngine: true,
@@ -110,6 +111,64 @@ function wrapper({ children }: { children: ReactNode }) {
 }
 
 describe("useWhisperTube", () => {
+  it("runs Qwen on its own runtime without requiring a Whisper CPU engine", async () => {
+    services.getSystemStatus.mockResolvedValue({ ...system, cpuEngine: false });
+    services.listModels.mockResolvedValue([...models, { ...models[0], id: "qwen3-asr-1.7b-q8_0" }]);
+    const { result } = renderHook(() => useWhisperTube(), { wrapper });
+    await waitFor(() => expect(result.current.models).toHaveLength(2));
+    act(() => result.current.setModelId("qwen3-asr-1.7b-q8_0"));
+    expect(result.current.runtimeReady).toBe(true);
+    act(() => result.current.setUrl(metadata.webpageUrl));
+    await act(async () => result.current.inspectVideo());
+    await waitFor(() => expect(result.current.checkingResume).toBe(false));
+    expect(result.current.canStart).toBe(true);
+    await act(async () => result.current.startTranscription());
+    expect(services.startTranscription).toHaveBeenCalledWith(expect.objectContaining({ modelId: "qwen3-asr-1.7b-q8_0", backend: "auto" }), expect.objectContaining({ success: expect.any(Object), failed: expect.any(Object), cancelled: expect.any(Object) }));
+  });
+  it("resets an unsupported Vulkan selection when switching to Qwen", async () => {
+    const { result } = renderHook(() => useWhisperTube(), { wrapper });
+    await waitFor(() => expect(result.current.system).toEqual(system));
+    act(() => result.current.setComputeTarget("vulkan:0"));
+    act(() => result.current.setModelId("qwen3-asr-1.7b-q8_0"));
+    expect(result.current.backend).toBe("auto");
+    expect(result.current.computeTargetId).toBe("auto");
+  });
+  it.each([false, true])("uses Qwen architecture capabilities when switching from Whisper Metal (Apple Silicon: %s)", async (appleSilicon) => {
+    services.getSystemStatus.mockResolvedValue({ ...system,
+      qwenBackends: appleSilicon ? ["auto", "cpu", "metal"] : ["auto", "cpu"],
+    });
+    const { result } = renderHook(() => useWhisperTube(), { wrapper });
+    await waitFor(() => expect(result.current.system).not.toBeNull());
+    act(() => result.current.setComputeTarget("metal"));
+    act(() => result.current.setModelId("qwen3-asr-1.7b-q8_0"));
+    expect(result.current.backend).toBe(appleSilicon ? "metal" : "auto");
+    expect(result.current.computeTargetId).toBe(appleSilicon ? "metal" : "auto");
+  });
+
+  it.each([
+    { appleSilicon: false, whisperMetalInstalled: true },
+    { appleSilicon: true, whisperMetalInstalled: false },
+    { appleSilicon: true, whisperMetalInstalled: true },
+  ])("gates Qwen Metal independently of Whisper's accelerator: %j", async ({ appleSilicon, whisperMetalInstalled }) => {
+    services.getSystemStatus.mockResolvedValue({ ...system, cpuEngine: false,
+      qwenBackends: appleSilicon ? ["auto", "cpu", "metal"] : ["auto", "cpu"],
+      accelerators: [{ backend: "metal", installed: whisperMetalInstalled }],
+    });
+    services.listModels.mockResolvedValue([...models, { ...models[0], id: "qwen3-asr-1.7b-q8_0" }]);
+    const { result } = renderHook(() => useWhisperTube(), { wrapper });
+    await waitFor(() => expect(result.current.models).toHaveLength(2));
+    act(() => result.current.setModelId("qwen3-asr-1.7b-q8_0"));
+    // Also defend against a stale/programmatic target, beyond hiding the option.
+    act(() => result.current.setComputeTarget("metal"));
+    expect(result.current.runtimeReady).toBe(appleSilicon);
+    expect(result.current.acceleratorWarning).toBeNull();
+    act(() => result.current.setUrl(metadata.webpageUrl));
+    await act(async () => result.current.inspectVideo());
+    await waitFor(() => expect(result.current.checkingResume).toBe(false));
+    expect(result.current.canStart).toBe(appleSilicon);
+    await act(async () => result.current.startTranscription());
+    expect(services.startTranscription).toHaveBeenCalledTimes(appleSilicon ? 1 : 0);
+  });
   beforeEach(() => {
     window.localStorage.clear();
     vi.clearAllMocks();
@@ -141,6 +200,32 @@ describe("useWhisperTube", () => {
     expect(services.disposeAppUpdate).not.toHaveBeenCalled();
     unmount();
     expect(services.disposeAppUpdate).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["en", "Transcription complete. Your transcript is ready in WhisperTube."],
+    ["id", "Transkripsi selesai. Hasilnya siap dibuka di WhisperTube."],
+    ["zh", "转录已完成。请在 WhisperTube 中查看结果。"],
+  ])("passes generic %s notification copy without leaking video metadata", async (language, message) => {
+    window.localStorage.setItem("whispertube.ui-language", language);
+    const { result } = renderHook(() => useWhisperTube(), { wrapper });
+    await waitFor(() => expect(result.current.system).toEqual(system));
+    act(() => result.current.setUrl(metadata.webpageUrl));
+    await act(async () => result.current.inspectVideo());
+    await act(async () => result.current.startTranscription());
+    expect(services.startTranscription).toHaveBeenCalledOnce();
+    const notifications = services.startTranscription.mock.calls[0][1];
+    expect(notifications).toEqual({
+      success: { title: expect.any(String), body: message },
+      completedWithNote: { title: expect.any(String), body: expect.any(String) },
+      failed: { title: expect.any(String), body: expect.any(String) },
+      cancelled: { title: expect.any(String), body: expect.any(String) },
+    });
+    expect(JSON.stringify(notifications)).not.toContain(metadata.title);
+    expect(JSON.stringify(notifications)).not.toContain(metadata.webpageUrl);
+    const copies = Object.values(notifications as TranscriptionNotifications);
+    expect(new Set(copies.map(copy => copy.title)).size).toBe(4);
+    expect(result.current.result).toEqual(transcript);
   });
 
   it("reports subscription failure without an unhandled rejection", async () => {

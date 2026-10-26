@@ -22,6 +22,7 @@ import type {
   ProgressPayload,
   SystemStatus,
   TranscriptRequest,
+  TranscriptionNotifications,
   TranscriptionResumeStage,
   TranscriptResult,
   VideoMetadata,
@@ -201,8 +202,12 @@ export function resetUserData() {
   return invoke("reset_user_data");
 }
 
-export function startTranscription(request: TranscriptRequest) {
-  return invoke<TranscriptResult>("start_transcription", { request });
+export function startTranscription(request: TranscriptRequest, notifications?: TranscriptionNotifications | string) {
+  return invoke<TranscriptResult>("start_transcription", {
+    request,
+    ...(notifications === undefined ? {} : typeof notifications === "string"
+      ? { completionMessage: notifications } : { notifications }),
+  });
 }
 
 export function getTranscriptionResumeStage(url: string, duration: number) {

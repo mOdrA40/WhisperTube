@@ -1,8 +1,12 @@
 # WhisperTube 0.1
 
-WhisperTube adalah aplikasi desktop local-first untuk mengubah video dari platform yang didukung menjadi transkrip menggunakan `yt-dlp`, FFmpeg, dan whisper.cpp. Audio serta proses transkripsi tetap berada di perangkat pengguna.
+WhisperTube adalah aplikasi desktop local-first untuk mengubah video dari platform yang didukung menjadi transkrip menggunakan `yt-dlp`, FFmpeg, dan mesin lokal Whisper/Qwen. Audio serta proses transkripsi tetap berada di perangkat pengguna.
 
 Dokumentasi utama: [README.md](README.md) (English). Dokumentasi Mandarin: [README_CN.md](README_CN.md).
+
+## Penyedia model
+
+Pilih **OpenAI · Whisper** atau **Alibaba · Qwen** melalui dropdown penyedia; daftar hanya menampilkan model dari penyedia tersebut. Qwen3-ASR-1.7B Q8 berjalan lokal melalui runtime native yang diunduh terpisah, tanpa Python atau kredensial cloud. Timestamp subtitle Qwen mengikuti potongan audio dan berupa perkiraan; gunakan Whisper untuk subtitle yang selaras dengan ucapan. Lihat [setup, perangkat, dan batasan Qwen](docs/TROUBLESHOOTING.md#qwen-installation-cuda-or-subtitle-timing).
 
 ## Cakupan saat ini
 
@@ -37,6 +41,7 @@ Prasyarat YouTube untuk aplikasi yang sudah diinstal: pasang [Node.js 22+](https
 - Verifikasi checksum model, progress, cancel, timestamp, export TXT/SRT/VTT, dan history SQLite lokal.
 - Progress model dan download video menampilkan byte yang sudah dipindahkan; download model dapat dibatalkan.
 - Saat transkripsi, penggunaan CPU/GPU ditampilkan jika tersedia di platform, dan speed jaringan tampil saat download.
+- Notifikasi sistem membedakan transkripsi berhasil, selesai dengan catatan durasi, gagal, dan dibatalkan saat jendela utama tidak aktif, untuk Whisper maupun Qwen. Pembatalan tanpa suara di Windows. Pesan mengikuti bahasa antarmuka tanpa judul video atau isi transkrip. Pengaturan OS atau Jangan Ganggu dapat menahan banner; kegagalan notifikasi tidak mengubah hasil pekerjaan.
 - Workspace dapat dibersihkan dari URL, preview, dan transkrip; history bisa dihapus permanen satuan, beberapa, atau semua item yang tampil.
 - Job gagal/dibatalkan menyimpan progres sementara secara otomatis. Coba transkripsi lagi dengan sumber dan pengaturan yang sama untuk melanjutkan bagian yang belum selesai.
 - Setelah berhasil, WAV dihapus kecuali opsi `Simpan audio setelah selesai` dinyalakan.

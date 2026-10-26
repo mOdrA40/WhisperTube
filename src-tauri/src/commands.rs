@@ -1,7 +1,7 @@
 use tauri::{AppHandle, State};
 
 use crate::{
-    accelerators, history, job_cache, models, sources,
+    accelerators, completion_notifications, history, job_cache, models, sources,
     state::{AppState, JobGuard, OperationGuard},
     system, transcription,
     types::{
@@ -243,14 +243,35 @@ pub async fn start_transcription(
     app: AppHandle,
     state: State<'_, AppState>,
     request: TranscriptRequest,
+    completion_message: Option<String>,
+    notifications: Option<completion_notifications::TranscriptionNotifications>,
 ) -> CommandResult<TranscriptResult> {
     let job_guard = JobGuard::reserve(&state)?;
     let active_pid = state.active_pid.clone();
     let cancelled = state.cancelled.clone();
     let capability_probe = state.capability_probe.clone();
     Ok(tokio::task::spawn_blocking(move || {
-        job_guard.mark_running()?;
-        transcription::pipeline(app, active_pid, cancelled, capability_probe, request)
+        let cancellation = cancelled.clone();
+        let result = completion_notifications::run_worker(|| {
+            job_guard.mark_running()?;
+            transcription::pipeline(
+                app.clone(),
+                active_pid,
+                cancelled,
+                capability_probe,
+                request,
+            )
+        });
+        let result = completion_notifications::finish(
+            &app,
+            result,
+            cancellation.load(std::sync::atomic::Ordering::SeqCst),
+            notifications.as_ref(),
+            completion_message.as_deref(),
+        );
+        // Keep the reservation until classification and delivery have finished.
+        drop(job_guard);
+        result
     })
     .await
     .map_err(|e| format!("Transcription task gagal: {e}"))??)

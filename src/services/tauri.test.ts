@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { save } from "@tauri-apps/plugin-dialog";
-import type { TranscriptResult } from "../types";
+import type { TranscriptRequest, TranscriptResult } from "../types";
 import { checkForAppUpdate, disposeAppUpdate, deleteModel, discardJobCache, downloadModel, exportTranscriptFile, getTranscriptionResumeStage, inspectMedia, installAppUpdate, listHistory, listJobCache, startTranscription, deleteHistoryFiles, listHistoryFiles, revealHistoryFile } from "./tauri";
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -68,6 +68,23 @@ describe("Tauri IPC contracts", () => {
       cookiesPath: null,
     });
     expect(invoke).toHaveBeenNthCalledWith(5, "start_transcription", { request });
+  });
+
+  it("passes optional localized completion copy alongside the unchanged transcription request", async () => {
+    const request: TranscriptRequest = {
+      url: "https://www.youtube.com/watch?v=test", title: "Test", channel: "Channel", duration: 60,
+      cookiesPath: "", backend: "cpu", computeDeviceId: null, language: "id", modelId: "base", keepAudio: false,
+    };
+    await startTranscription(request, "Transkripsi selesai.");
+    expect(invoke).toHaveBeenCalledWith("start_transcription", { request, completionMessage: "Transkripsi selesai." });
+    const notifications = {
+      success: { title: "Selesai", body: "Hasil siap." },
+      completedWithNote: { title: "Catatan", body: "Periksa durasi." },
+      failed: { title: "Gagal", body: "Buka aplikasi." },
+      cancelled: { title: "Dibatalkan", body: "Proses berhenti." },
+    };
+    await startTranscription(request, notifications);
+    expect(invoke).toHaveBeenLastCalledWith("start_transcription", { request, notifications });
   });
 
   it("reserves and releases the shared operation around app updates", async () => {

@@ -32,3 +32,11 @@ it("keeps saved audio accessible while disabling deleted transcript actions", ()
   fireEvent.click(screen.getByRole("button", { name: "Show saved audio" }));
   expect(onRevealAudio).toHaveBeenCalledOnce();
 });
+
+it("discloses approximate Qwen timing when opening a saved transcript", () => {
+  render(<I18nProvider><TranscriptCard result={{ historyId: 1, title: "Saved Qwen", channel: "", language: "id", duration: 20,
+    model: "qwen3-asr-1.7b-q8_0", backend: "cuda", segments: [], text: "", txtPath: "", srtPath: "", vttPath: "", audioPath: null }}
+    operationActive={false} copied={false} searchQuery="" filteredSegments={[]} onCopy={vi.fn()} onExport={vi.fn()}
+    onRevealAudio={vi.fn()} onSearchChange={vi.fn()} transcriptionElapsedMs={null} /></I18nProvider>);
+  expect(screen.getByRole("note").textContent).toContain("not speech alignment");
+});

@@ -6,6 +6,7 @@ import { DownloadSimpleIcon } from "@phosphor-icons/react/dist/csr/DownloadSimpl
 import { GaugeIcon } from "@phosphor-icons/react/dist/csr/Gauge";
 import { CircleNotchIcon } from "@phosphor-icons/react/dist/csr/CircleNotch";
 import { InfoIcon } from "@phosphor-icons/react/dist/csr/Info";
+import { isQwenModel, modelProvider, QWEN_MODEL_ID, supportsModelBackend } from "../../lib/models";
 import { formatBytes, formatMemory } from "../../lib/format";
 import type { AcceleratorInfo, BackendChoice, ModelDownloadPayload, ModelInfo, SystemStatus, TranscriptionResumeStage } from "../../types";
 import { getAcceleratorCopy, getModelCopy, getRecommendation, useI18n } from "../../i18n";
@@ -88,6 +89,9 @@ export function ControlsCard({
 }: ControlsCardProps) {
   const { t } = useI18n();
   const controlsDisabled = busy || operationActive;
+  const provider = modelProvider(modelId);
+  const providerAccelerators = isQwenModel(modelId) ? [] : accelerators;
+  const providerModels = models.filter((model) => modelProvider(model.id) === provider);
   const selectedDownload = selectedModel && downloadingModel[selectedModel.id];
   const modelDownloadActive = Object.keys(downloadingModel).length > 0;
   const languageOptions: SelectOption[] = [
@@ -110,15 +114,19 @@ export function ControlsCard({
     },
   ];
   computeTargetOptions.push(
-    ...(system?.computeDevices ?? []).map((device) => ({
+    ...(system?.computeDevices ?? []).filter((device) => supportsModelBackend(modelId, device.backend, system)).map((device) => ({
       value: device.id,
       label: `${device.backend.toUpperCase()} · ${device.name}${device.integrated ? " (iGPU)" : ""}`,
     })),
   );
-  for (const accelerator of accelerators.filter((item) => item.supported && item.installed)) {
+  for (const accelerator of providerAccelerators.filter((item) => item.supported && item.installed)) {
     if (accelerator.backend === "metal" && !computeTargetOptions.some((option) => option.value === "metal")) {
       computeTargetOptions.push({ value: "metal", label: getAcceleratorCopy(accelerator, t).label });
     }
+  }
+  if (isQwenModel(modelId) && supportsModelBackend(modelId, "metal", system) &&
+      !computeTargetOptions.some((option) => option.value === "metal")) {
+    computeTargetOptions.push({ value: "metal", label: "Apple Metal" });
   }
   const memoryRequirementKey: "controls.cudaRequirement" | "controls.memoryEstimate" =
     computeTargetId.startsWith("cuda") ||
@@ -137,9 +145,20 @@ export function ControlsCard({
       </div>
 
       <div className="control-scroll-body">
+      <label className="field-label">{t("controls.provider")}</label>
+      <CustomSelect
+        value={provider}
+        options={[
+          { value: "openai", label: "OpenAI · Whisper" },
+          { value: "alibaba", label: "Alibaba · Qwen" },
+        ]}
+        onChange={(value) => onModelChange(value === "alibaba" ? QWEN_MODEL_ID : "large-v3-turbo-q5_0")}
+        disabled={controlsDisabled || modelDownloadActive}
+        ariaLabel={t("controls.provider")}
+      />
       <label className="field-label">{t("controls.model")}</label>
       <div className="model-options" role="radiogroup" aria-label={t("controls.model")}>
-        {models.map((model) => {
+        {providerModels.map((model) => {
           const isSelected = modelId === model.id;
 
           return (
@@ -148,7 +167,7 @@ export function ControlsCard({
               type="button"
               role="radio"
               aria-checked={isSelected}
-              tabIndex={isSelected || (!models.some((item) => item.id === modelId) && model === models[0]) ? 0 : -1}
+              tabIndex={isSelected || (!providerModels.some((item) => item.id === modelId) && model === providerModels[0]) ? 0 : -1}
               className={isSelected ? "model-option selected" : "model-option"}
               onClick={() => onModelChange(model.id)}
               onKeyDown={(event) => {
@@ -184,6 +203,7 @@ export function ControlsCard({
         })}
       </div>
 
+      {isQwenModel(modelId) && <p className="settings-note" role="note">{t("controls.qwenTiming")}</p>}
       {selectedModel && !selectedModel.installed && (
         <button
           type="button"
@@ -195,7 +215,7 @@ export function ControlsCard({
           {selectedDownload !== undefined
             ? (
               <span className="download-progress-copy">
-                <span>{t("controls.downloadingModel", { percent: Math.round(selectedDownload.percent) })}</span>
+                <span>{t(selectedDownload.phase === "runtime" ? "controls.downloadingQwenRuntime" : "controls.downloadingModel", { percent: Math.round(selectedDownload.percent) })}</span>
                 <small>
                   {formatBytes(selectedDownload.downloadedBytes, t("progress.unknownSize"))} / {selectedDownload.totalBytes > 0
                     ? formatBytes(selectedDownload.totalBytes)
@@ -233,7 +253,7 @@ export function ControlsCard({
         ariaLabel={t("controls.computeBackend")}
       />
       <div className="recommendation">
-        <InfoIcon aria-hidden="true" size={14} /> {getRecommendation(system, t)}
+        <InfoIcon aria-hidden="true" size={14} /> {isQwenModel(modelId) ? t("controls.qwenCompute") : getRecommendation(system, t)}
       </div>
 
       <label className="toggle-row" htmlFor="keep-audio-toggle">
@@ -251,11 +271,11 @@ export function ControlsCard({
       </label>
 
       {((system?.cudaSupported && system.nvidia && !system.cudaEngine) ||
-        accelerators.some((item) => item.supported && item.downloadable && !item.installed)) && (
+        providerAccelerators.some((item) => item.supported && item.downloadable && !item.installed)) && (
       <details className="accelerator-disclosure" open={installingCuda || installingAccelerator !== null || undefined}>
         <summary>{t("workspace.acceleration")}
           {((system?.cudaSupported && system.nvidia && !system.cudaEngine && !system.cudaInstallable) ||
-            accelerators.some((item) => item.supported && item.downloadable && !item.installed && item.backend === "vulkan" && !item.memorySufficient)) &&
+            providerAccelerators.some((item) => item.supported && item.downloadable && !item.installed && item.backend === "vulkan" && !item.memorySufficient)) &&
             <span>{t("workspace.attention")}</span>}
         </summary>
         <div className="accelerator-disclosure-body">
@@ -296,7 +316,7 @@ export function ControlsCard({
         </>
       )}
 
-      {accelerators
+      {providerAccelerators
         .filter((accelerator) => accelerator.supported && accelerator.downloadable && !accelerator.installed)
         .map((accelerator) => {
           const memoryBlocked = accelerator.backend === "vulkan" && !accelerator.memorySufficient;

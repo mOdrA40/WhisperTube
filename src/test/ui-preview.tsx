@@ -35,6 +35,7 @@ const models = [
   { id: "large-v3-q5_0", label: "Accurate", description: "", sizeMb: 1100, vramRequiredMb: 7168, installed: false },
 ];
 const system: SystemStatus = {
+  qwenBackends: ["auto", "cpu", "cuda"],
   ytDlp: true, ffmpeg: scene !== "runtime-missing", cpuEngine: true, cudaEngine: scene !== "driver-warning" && !cudaDownloading, cudaSupported: true,
   nvidia: true, gpuName: "NVIDIA GeForce — intentionally long compute-device fixture name",
   gpuMemoryMb: 8192, gpuFreeMemoryMb: 6144, availableMemoryMb: 16384, nvidiaDriverVersion: "fixture",

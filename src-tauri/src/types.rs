@@ -112,6 +112,7 @@ pub struct ComputeDeviceInfo {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SystemStatus {
+    pub qwen_backends: Vec<&'static str>,
     pub yt_dlp: bool,
     pub ffmpeg: bool,
     pub cpu_engine: bool,
@@ -177,6 +178,7 @@ pub struct ProgressPayload {
 #[serde(rename_all = "camelCase")]
 pub struct ModelDownloadPayload {
     pub id: String,
+    pub phase: String,
     pub downloaded_bytes: u64,
     pub total_bytes: u64,
     pub percent: f64,

@@ -14,6 +14,14 @@ pub fn check(cancelled: &AtomicBool) -> Result<(), String> {
     }
 }
 
+/// Match only cancellation errors emitted by our workers, never arbitrary logs.
+pub fn is_cancellation_error(error: &str) -> bool {
+    matches!(
+        error.trim(),
+        "Job dibatalkan." | "Transkripsi dibatalkan." | "Proses dibatalkan."
+    )
+}
+
 pub fn copy(
     input: &mut impl Read,
     output: &mut impl Write,

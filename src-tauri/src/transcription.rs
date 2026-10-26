@@ -464,6 +464,11 @@ fn validate_transcript_request(request: &TranscriptRequest) -> Result<(), String
     {
         return Err("Path cookies.txt terlalu panjang.".into());
     }
+    if crate::qwen::is_qwen(&request.model_id)
+        && !crate::qwen::supported_backends().contains(&request.backend.as_str())
+    {
+        return Err("Backend Qwen tidak tersedia pada platform ini. Pilih backend yang didukung runtime Qwen.".into());
+    }
     Ok(())
 }
 
@@ -584,6 +589,27 @@ fn configure_vulkan_command(command: &mut Command) {
     command.env("GGML_VK_DISABLE_COOPMAT", "1");
 }
 
+fn media_command_error(
+    error: String,
+    program: &std::ffi::OsStr,
+    stderr: &[u8],
+    cancelled: bool,
+) -> String {
+    if crate::io_cancel::is_cancellation_error(&error) {
+        return error;
+    }
+    let detail = String::from_utf8_lossy(stderr);
+    let label = Path::new(program)
+        .file_name()
+        .unwrap_or(program)
+        .to_string_lossy();
+    if cancelled || detail.trim().is_empty() {
+        format!("{label}: {error}")
+    } else {
+        format!("{label}: {error} Detail: {}", detail.trim())
+    }
+}
+
 fn run_media_command(
     context: &JobContext,
     command: &mut Command,
@@ -639,16 +665,12 @@ fn run_media_command(
     );
     drop(active);
     let status = outcome.map_err(|error| {
-        let detail = String::from_utf8_lossy(&stderr);
-        let label = Path::new(command.get_program())
-            .file_name()
-            .unwrap_or(command.get_program())
-            .to_string_lossy();
-        if context.is_cancelled() || detail.trim().is_empty() {
-            format!("{label}: {error}")
-        } else {
-            format!("{label}: {error} Detail: {}", detail.trim())
-        }
+        media_command_error(
+            error,
+            command.get_program(),
+            &stderr,
+            context.is_cancelled(),
+        )
     })?;
     if let Some(line) = lines.finish() {
         on_line(&line)?;
@@ -1357,7 +1379,11 @@ fn choose_backend(
                     requested_device_index,
                 )
                 .map_err(|error| {
-                    format!("Vulkan dipilih tetapi capability probe gagal: {error}")
+                    if crate::io_cancel::is_cancellation_error(&error) {
+                        error
+                    } else {
+                        format!("Vulkan dipilih tetapi capability probe gagal: {error}")
+                    }
                 })?;
                 Ok(("vulkan".into(), vulkan, None, Some(device_index)))
             }
@@ -1583,6 +1609,151 @@ fn run_whisper(
     Ok(resolved_backend)
 }
 
+fn run_qwen(
+    context: &JobContext,
+    wav: &Path,
+    prefix: &Path,
+    model: &Path,
+    config: WhisperConfig<'_>,
+    runtime: &crate::runtime_snapshot::RuntimeSnapshot,
+) -> Result<checkpoint::ChunkOutput, String> {
+    runtime.validate(context.cancelled)?;
+    if config.backend == "vulkan" {
+        return Err(
+            "Qwen belum mendukung pilihan Vulkan di WhisperTube. Pilih Auto, CUDA, atau CPU."
+                .into(),
+        );
+    }
+    let mut gpu = None;
+    let mut cuda_runtime = None;
+    let mut cuda_engine = None;
+    let qwen_backends = crate::qwen::supported_backends();
+    if qwen_backends.contains(&"cuda")
+        && matches!(config.backend, "cuda" | "auto")
+        && detect_nvidia_driver_version()
+            .as_deref()
+            .is_some_and(cuda_driver_is_compatible)
+    {
+        let index = if config.backend == "cuda" {
+            requested_device_index(config.compute_device_id, "cuda")?
+        } else {
+            None
+        };
+        let candidate = match index {
+            Some(index) => detect_nvidia_device(index),
+            None => detect_nvidia(),
+        };
+        let engine = engine_path_cancelable(context.app, "cuda", context.cancelled)?;
+        let candidate = candidate.filter(|candidate| {
+            is_regular_file(&engine)
+                && models::ensure_vram_available(config.model_id, candidate.available_memory_mb())
+                    .is_ok()
+        });
+        if let Some(candidate) = crate::qwen::select_cuda_candidate(
+            config.backend,
+            candidate,
+            crate::system::nvidia_compute_capability,
+        )? {
+            cuda_runtime = Some(crate::paths::snapshot_runtime(
+                context.app,
+                "cuda",
+                &engine,
+                context.cancelled,
+            )?);
+            cuda_engine = Some(engine);
+            gpu = Some(candidate);
+        }
+    }
+    let backend = match config.backend {
+        "cuda" if gpu.is_none() => return Err("CUDA Qwen belum siap atau VRAM bebas kurang. Pasang akselerasi NVIDIA, tutup aplikasi GPU lain, atau pilih CPU.".into()),
+        "cuda" => "cuda",
+        "auto" if gpu.is_some() => "cuda",
+        "metal" if qwen_backends.contains(&"metal") => "metal",
+        "auto" if qwen_backends.contains(&"metal") => "metal",
+        "auto" | "cpu" => "cpu",
+        _ => return Err("Backend Qwen tidak tersedia pada platform ini.".into()),
+    };
+    let library = crate::qwen::library_path(context.app)?;
+    let folder = library.parent().ok_or("Folder runtime Qwen invalid.")?;
+    let mut command =
+        Command::new(std::env::current_exe().map_err(|e| format!("Executable worker Qwen: {e}"))?);
+    command
+        .arg("--qwen-worker")
+        .arg(&library)
+        .arg(model)
+        .arg(wav)
+        .arg(prefix.with_extension("json"))
+        .arg(backend)
+        .arg(config.language)
+        .current_dir(folder);
+    let mut search = vec![folder.to_path_buf()];
+    if let Some(engine) = &cuda_engine {
+        search.push(engine.parent().ok_or("Folder CUDA invalid.")?.to_path_buf());
+    }
+    search.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    command.env(
+        "PATH",
+        std::env::join_paths(search).map_err(|e| format!("Path worker Qwen: {e}"))?,
+    );
+    // Dynamic modules must come only from the verified runtime, never from a
+    // developer's global GGML override or an arbitrary working directory.
+    command.env_remove("GGML_BACKEND_PATH");
+    command.env_remove("TRANSCRIBE_BACKENDS");
+    if let Some(gpu) = &gpu {
+        configure_cuda_command(&mut command, gpu)?;
+    }
+    context
+        .usage
+        .set_target(backend, gpu.as_ref().and_then(|gpu| gpu.device_index));
+    let (status, stderr) = run_media_command(
+        context,
+        &mut command,
+        process::OutputStream::Stderr,
+        whisper_inactivity_timeout(backend),
+        None,
+        |line| {
+            if let Some(percent) = line
+                .strip_prefix("QWEN_PROGRESS ")
+                .and_then(|s| s.parse::<f64>().ok())
+            {
+                context.emit(ProgressUpdate {
+                    stage: "transcribing",
+                    message_code: "checkpoint_progress",
+                    percent,
+                    message: format!("Qwen sedang bekerja via {}…", backend.to_uppercase()),
+                    backend: Some(backend),
+                    downloaded_bytes: None,
+                    total_bytes: None,
+                    network_bytes_per_second: None,
+                });
+            }
+            Ok(())
+        },
+    )?;
+    // Retain dependency file handles until the child and its pipes have exited.
+    drop(cuda_runtime);
+    if !status.success() {
+        return Err(process_failed(context.cancelled, stderr, "Qwen"));
+    }
+    let bytes = read_bounded_file(
+        &prefix.with_extension("json"),
+        checkpoint::MAX_CHECKPOINT_BYTES,
+        "hasil Qwen",
+    )?;
+    let output: crate::qwen::WorkerOutput =
+        serde_json::from_slice(&bytes).map_err(|e| format!("Hasil worker Qwen invalid: {e}"))?;
+    if output.backend != backend {
+        return Err("Backend hasil Qwen berbeda dari perangkat yang diminta.".into());
+    }
+    Ok(checkpoint::ChunkOutput {
+        language: output.language,
+        backend: output.backend,
+        segments: output.segments,
+    })
+}
+
 #[derive(Deserialize)]
 struct WhisperOutput {
     #[serde(default)]
@@ -1680,6 +1851,14 @@ fn parse_whisper_result(path: &Path) -> Result<(String, Vec<Segment>, String), S
     Ok((language, segments, text))
 }
 
+fn inference_error(error: String) -> String {
+    if crate::io_cancel::is_cancellation_error(&error) {
+        error
+    } else {
+        format!("{error} Audio dan checkpoint yang berhasil disimpan tetap tersedia. Percobaan dengan sumber dan pengaturan yang sama dapat memakai ulang progres tersebut.")
+    }
+}
+
 pub fn pipeline(
     app: AppHandle,
     active_pid: Arc<Mutex<Option<u32>>>,
@@ -1703,6 +1882,11 @@ pub fn pipeline(
         return Err("Model belum diunduh. Unduh model dari UI terlebih dahulu.".into());
     }
     models::verify_model_file(&model, &request.model_id, &cancelled)?;
+    let qwen_runtime = if crate::qwen::is_qwen(&request.model_id) {
+        Some(crate::qwen::snapshot(&app, &cancelled)?)
+    } else {
+        None
+    };
     let jobs_dir = jobs_dir(&app)?;
     let duration_seconds = request.duration.max(0.0).ceil() as u64;
     let inference_bytes = duration_seconds
@@ -1807,7 +1991,7 @@ pub fn pipeline(
             stage: "converting",
             message_code: "normalizing_audio",
             percent: 0.0,
-            message: "Menormalisasi audio untuk Whisper…".into(),
+            message: "Menormalisasi audio untuk transkripsi…".into(),
             backend: None,
             downloaded_bytes: None,
             total_bytes: None,
@@ -1832,7 +2016,7 @@ pub fn pipeline(
         stage: "transcribing",
         message_code: "loading_model",
         percent: 0.0,
-        message: "Memuat model Whisper…".into(),
+        message: "Memuat model transkripsi…".into(),
         backend: None,
         downloaded_bytes: None,
         total_bytes: None,
@@ -1847,32 +2031,79 @@ pub fn pipeline(
         &request,
         |chunk_wav, prefix, language, span| {
             let required = fs::metadata(chunk_wav)
-                .map_err(|e| format!("Gagal membaca potongan audio: {e}"))?.len()
-                .saturating_mul(2).saturating_add(model_bytes).saturating_add(512 * 1024 * 1024);
-            resources::require_memory(required, "inference potongan Whisper")?;
-            let chunk_context = JobContext { progress_start: span.0, progress_end: span.1, ..context };
+                .map_err(|e| format!("Gagal membaca potongan audio: {e}"))?
+                .len()
+                .saturating_mul(2)
+                .saturating_add(model_bytes)
+                .saturating_add(512 * 1024 * 1024);
+            resources::require_memory(required, "inference potongan transkripsi")?;
+            let chunk_context = JobContext {
+                progress_start: span.0,
+                progress_end: span.1,
+                ..context
+            };
+            if let Some(runtime) = &qwen_runtime {
+                return run_qwen(
+                    &chunk_context,
+                    chunk_wav,
+                    prefix,
+                    &model,
+                    WhisperConfig {
+                        language,
+                        backend: &request.backend,
+                        compute_device_id: request.compute_device_id.as_deref(),
+                        model_id: &request.model_id,
+                    },
+                    runtime,
+                );
+            }
             let backend = run_whisper(
-                &chunk_context, chunk_wav, prefix, &model,
-                WhisperConfig { language, backend: &request.backend,
-                    compute_device_id: request.compute_device_id.as_deref(), model_id: &request.model_id },
+                &chunk_context,
+                chunk_wav,
+                prefix,
+                &model,
+                WhisperConfig {
+                    language,
+                    backend: &request.backend,
+                    compute_device_id: request.compute_device_id.as_deref(),
+                    model_id: &request.model_id,
+                },
                 &mut resolved_engine,
             )?;
-            normalize_output_utf8(&prefix.with_extension("json"), checkpoint::MAX_CHECKPOINT_BYTES)?;
+            normalize_output_utf8(
+                &prefix.with_extension("json"),
+                checkpoint::MAX_CHECKPOINT_BYTES,
+            )?;
             let (language, segments, _) = parse_whisper_result(&prefix.with_extension("json"))?;
-            Ok(checkpoint::ChunkOutput { language, backend, segments })
+            Ok(checkpoint::ChunkOutput {
+                language,
+                backend,
+                segments,
+            })
         },
         || context.is_cancelled(),
         |percent, reused| {
             context.emit(ProgressUpdate {
                 stage: "transcribing",
-                message_code: if reused { "resuming_transcription" } else { "checkpoint_progress" },
+                message_code: if reused {
+                    "resuming_transcription"
+                } else {
+                    "checkpoint_progress"
+                },
                 percent,
-                message: if reused { "Melanjutkan hasil bagian yang sudah tersimpan.".into() }
-                    else { "Memproses audio per bagian; progres selesai disimpan otomatis.".into() },
-                backend: None, downloaded_bytes: None, total_bytes: None, network_bytes_per_second: None,
+                message: if reused {
+                    "Melanjutkan hasil bagian yang sudah tersimpan.".into()
+                } else {
+                    "Memproses audio per bagian; progres selesai disimpan otomatis.".into()
+                },
+                backend: None,
+                downloaded_bytes: None,
+                total_bytes: None,
+                network_bytes_per_second: None,
             });
         },
-    ).map_err(|error| format!("{error} Audio dan checkpoint yang berhasil disimpan tetap tersedia. Percobaan dengan sumber dan pengaturan yang sama dapat memakai ulang progres tersebut."))?;
+    )
+    .map_err(inference_error)?;
     if context.is_cancelled() {
         return Err("Job dibatalkan.".into());
     }
@@ -1966,6 +2197,58 @@ pub fn pipeline(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn media_command_cancellation_remains_recognizable_for_every_pipeline_worker() {
+        for program in [
+            "yt-dlp.exe",
+            "ffmpeg.exe",
+            "whisper-cli.exe",
+            "whispertube.exe",
+        ] {
+            let program = std::ffi::OsStr::new(program);
+            let cancelled = super::media_command_error(
+                "Proses dibatalkan.".into(),
+                program,
+                b"native log",
+                true,
+            );
+            assert_eq!(super::inference_error(cancelled), "Proses dibatalkan.");
+            for token in [false, true] {
+                let failure = super::media_command_error(
+                    "watchdog timeout".into(),
+                    program,
+                    b"native log",
+                    token,
+                );
+                assert!(!crate::io_cancel::is_cancellation_error(&failure));
+                assert!(failure.contains("watchdog timeout"));
+                assert!(failure.contains(program.to_str().unwrap()));
+                assert_eq!(failure.contains("native log"), !token);
+            }
+        }
+    }
+
+    #[test]
+    fn cancellation_keeps_its_identity_while_inference_failures_keep_resume_context() {
+        for error in [
+            "Job dibatalkan.",
+            "Transkripsi dibatalkan.",
+            "Proses dibatalkan.",
+        ] {
+            assert_eq!(super::inference_error(error.into()), error);
+        }
+        let error = super::inference_error("Qwen: output repetition".into());
+        assert!(error.starts_with("Qwen: output repetition"));
+        assert!(error.contains("checkpoint"));
+        for error in [
+            "disk full",
+            "log: Proses dibatalkan.",
+            "Proses dibatalkan. Detail: failure",
+        ] {
+            assert!(!crate::io_cancel::is_cancellation_error(error));
+        }
+    }
+
     #[test]
     fn downloaded_duration_preserves_known_long_vod_and_verifies_unknown_or_changed_sources() {
         assert!(!super::download_needs_duration_probe("7200.25", 7200.0).unwrap());
@@ -2466,6 +2749,37 @@ mod tests {
         invalid_language.title = "title".into();
         invalid_language.language = "shell-command".into();
         assert!(validate_transcript_request(&invalid_language).is_err());
+    }
+
+    #[test]
+    fn qwen_request_validation_rejects_unsupported_backends_before_pipeline_work() {
+        let mut request = TranscriptRequest {
+            url: "https://youtube.com/watch?v=test".into(),
+            title: "title".into(),
+            channel: "channel".into(),
+            duration: 60.0,
+            cookies_path: None,
+            backend: "auto".into(),
+            compute_device_id: None,
+            language: "auto".into(),
+            model_id: crate::qwen::MODEL_ID.into(),
+            keep_audio: false,
+        };
+        let supported = crate::qwen::supported_backends();
+        for backend in ["auto", "cpu", "cuda", "metal", "vulkan"] {
+            request.backend = backend.into();
+            assert_eq!(
+                validate_transcript_request(&request).is_ok(),
+                supported.contains(&backend),
+                "{backend}"
+            );
+        }
+        request.model_id = "base".into();
+        // General Whisper validation must not inherit the Qwen-only restriction.
+        for backend in ["auto", "cpu", "cuda", "metal", "vulkan"] {
+            request.backend = backend.into();
+            assert!(validate_transcript_request(&request).is_ok(), "{backend}");
+        }
     }
 
     #[test]

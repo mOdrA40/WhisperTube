@@ -1,8 +1,12 @@
 # WhisperTube 0.1
 
-WhisperTube 是一款 local-first 桌面应用，使用 `yt-dlp`、FFmpeg 和 whisper.cpp 将受支持平台的视频转换为转录文本。音频和转录过程都保留在用户设备上。
+WhisperTube 是一款 local-first 桌面应用，使用 `yt-dlp`、FFmpeg 和本地 Whisper/Qwen 引擎 将受支持平台的视频转换为转录文本。音频和转录过程都保留在用户设备上。
 
 主文档：[README.md](README.md)（English）。印度尼西亚语文档：[README_ID.md](README_ID.md)。
+
+## 模型提供方
+
+在下拉框选择 **OpenAI · Whisper** 或 **Alibaba · Qwen**，仅显示对应提供方的模型。Qwen3-ASR-1.7B Q8 通过单独下载的原生运行环境在本地运行，无需 Python 或云端凭据。其字幕时间戳采用音频分块边界，仅供参考；需要语音对齐的字幕请使用 Whisper。详见 [Qwen 安装、硬件与限制](docs/TROUBLESHOOTING.md#qwen-installation-cuda-or-subtitle-timing)。
 
 ## 当前范围
 
@@ -34,6 +38,7 @@ cookies。临时文件会被清理，转录时会再次下载音频；登录、�
 - 模型 checksum 校验、进度显示、取消、时间戳、TXT/SRT/VTT 导出和本地 SQLite 历史记录。
 - 模型和视频下载会显示已传输的字节数，模型下载可以取消。
 - 转录期间会在平台支持时显示 CPU/GPU 使用率，下载时会显示网络速度。
+- Whisper 和 Qwen 均在主窗口未获得焦点时发送结果通知，区分转录成功、完成但有时长差异、失败和取消。Windows 上取消通知为静音。通知使用界面语言，不包含视频标题或转录内容。系统设置或勿扰模式可能阻止横幅；通知发送失败不会改变任务结果。
 - 可以清除当前 URL、预览和转录文本，也可以永久删除单条、多条或当前列表中的全部历史记录。
 - 失败或取消的任务会自动保留临时下载、已完成的 WAV 和有效转录进度，以便重试；这不受“完成后保留音频”选项影响。
 - 转录成功后会清理临时下载和检查点；仅在启用“完成后保留音频”时保留 WAV。

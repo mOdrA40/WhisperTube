@@ -394,6 +394,58 @@ pub fn configure_cuda_command(command: &mut Command, gpu: &GpuInfo) -> Result<()
     Ok(())
 }
 
+fn nvidia_compute_capability_command(program: &str, gpu: &GpuInfo) -> Result<Command, String> {
+    let uuid = gpu
+        .uuid
+        .as_deref()
+        .filter(|uuid| is_cuda_gpu_uuid(uuid))
+        .ok_or("UUID NVIDIA tidak valid untuk pemeriksaan compute capability.")?;
+    let mut command = Command::new(program);
+    crate::process::hide_console(&mut command);
+    // NVML physical indices and CUDA ordinals can differ. Query the same UUID
+    // that configure_cuda_command exposes to the inference child.
+    command.arg(format!("--id={uuid}")).args([
+        "--query-gpu=uuid,compute_cap",
+        "--format=csv,noheader,nounits",
+    ]);
+    Ok(command)
+}
+
+fn parse_nvidia_compute_capability(output: &[u8], uuid: &str) -> Option<(u32, u32)> {
+    let output = std::str::from_utf8(output).ok()?;
+    let mut lines = output.trim().lines();
+    let (actual_uuid, capability) = lines.next()?.split_once(',')?;
+    if lines.next().is_some() || !actual_uuid.trim().eq_ignore_ascii_case(uuid) {
+        return None;
+    }
+    let (major, minor) = capability.trim().split_once('.')?;
+    if [major, minor]
+        .iter()
+        .any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return None;
+    }
+    let (major, minor) = (major.parse().ok()?, minor.parse().ok()?);
+    (major > 0 && minor < 10).then_some((major, minor))
+}
+
+pub fn nvidia_compute_capability(gpu: &GpuInfo) -> Result<(u32, u32), String> {
+    let program = nvidia_smi_program().ok_or("nvidia-smi tidak tersedia.")?;
+    let command = nvidia_compute_capability_command(&program, gpu)?;
+    let output = command_output_with_timeout(command, Duration::from_secs(2)).ok_or_else(|| {
+        format!(
+            "Gagal membaca compute capability NVIDIA untuk {}.",
+            gpu.name
+        )
+    })?;
+    parse_nvidia_compute_capability(&output.stdout, gpu.uuid.as_deref().unwrap()).ok_or_else(|| {
+        format!(
+            "Compute capability NVIDIA untuk {} tidak dapat diverifikasi.",
+            gpu.name
+        )
+    })
+}
+
 fn ordered_nvidia_devices(devices: &[GpuInfo]) -> Vec<GpuInfo> {
     let mut visible = devices.to_vec();
     visible.sort_by(|left, right| {
@@ -1213,6 +1265,7 @@ pub fn system_status(app: &AppHandle) -> Result<SystemStatus, String> {
 
     let _ = runtime;
     Ok(SystemStatus {
+        qwen_backends: crate::qwen::supported_backends(),
         yt_dlp,
         ffmpeg,
         cpu_engine,
@@ -1238,6 +1291,65 @@ pub fn system_status(app: &AppHandle) -> Result<SystemStatus, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn compute_capability_query_uses_physical_uuid_instead_of_a_cuda_ordinal() {
+        let gpu = super::GpuInfo {
+            name: "Selected GPU".into(),
+            total_memory_mb: Some(8192),
+            free_memory_mb: Some(6144),
+            uuid: Some("GPU-aaaaaaaa".into()),
+            device_index: Some(3),
+        };
+        let command = super::nvidia_compute_capability_command("nvidia-smi", &gpu).unwrap();
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            vec![
+                "--id=GPU-aaaaaaaa",
+                "--query-gpu=uuid,compute_cap",
+                "--format=csv,noheader,nounits",
+            ]
+        );
+        for uuid in [None, Some("3"), Some("--query-gpu=name")] {
+            let mut invalid = gpu.clone();
+            invalid.uuid = uuid.map(str::to_owned);
+            assert!(super::nvidia_compute_capability_command("nvidia-smi", &invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn compute_capability_requires_one_valid_result_for_the_selected_uuid() {
+        for (output, expected) in [
+            ("GPU-aaaaaaaa, 6.1\n", (6, 1)),
+            ("GPU-AAAAAAAA, 7.5\r\n", (7, 5)),
+            ("GPU-aaaaaaaa, 8.9\n", (8, 9)),
+            ("GPU-aaaaaaaa, 12.0\n", (12, 0)),
+        ] {
+            assert_eq!(
+                super::parse_nvidia_compute_capability(output.as_bytes(), "GPU-aaaaaaaa"),
+                Some(expected)
+            );
+        }
+        for output in [
+            "",
+            "GPU-bbbbbbbb, 8.9",
+            "GPU-aaaaaaaa, N/A",
+            "GPU-aaaaaaaa, 8",
+            "GPU-aaaaaaaa, 0.0",
+            "GPU-aaaaaaaa, 8.10",
+            "GPU-aaaaaaaa, 8.9.0",
+            "GPU-aaaaaaaa, 8.9, extra",
+            "GPU-aaaaaaaa, -8.9",
+            "GPU-aaaaaaaa, 8.+9",
+            "GPU-aaaaaaaa, 8.9\nGPU-bbbbbbbb, 9.0",
+        ] {
+            assert_eq!(
+                super::parse_nvidia_compute_capability(output.as_bytes(), "GPU-aaaaaaaa"),
+                None,
+                "{output}"
+            );
+        }
+    }
+
     #[test]
     fn combined_nvidia_query_preserves_devices_and_driver_validation() {
         let output = b"0, GPU A, GPU-aaaaaaaa, 8192, 0, 528.33\n1, GPU B, GPU-bbbbbbbb, 16384, 8192, 528.33\n";
@@ -1312,6 +1424,14 @@ mod tests {
             uuids.len(),
             "CUDA UUID did not map to NVML inventory"
         );
+        for gpu in &matched {
+            let capability = super::nvidia_compute_capability(gpu)
+                .expect("compatible NVIDIA driver should report compute capability by UUID");
+            eprintln!(
+                "{}: compute capability {}.{}",
+                gpu.name, capability.0, capability.1
+            );
+        }
         let visible = super::cuda_visible_nvidia_devices(&devices);
         if std::env::var_os("CUDA_VISIBLE_DEVICES").is_some_and(|mask| mask.is_empty()) {
             assert!(visible.is_empty());

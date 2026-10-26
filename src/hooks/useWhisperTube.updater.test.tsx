@@ -20,7 +20,7 @@ beforeEach(async () => {
   vi.mocked(invoke).mockImplementation(async (command) => {
     switch (command) {
       case "system_status":
-        return { ytDlp: true, ffmpeg: true, cpuEngine: true, cudaEngine: false,
+        return { qwenBackends: ["auto", "cpu", "cuda"], ytDlp: true, ffmpeg: true, cpuEngine: true, cudaEngine: false,
           cudaSupported: false, nvidia: false, gpuName: null, gpuMemoryMb: null,
           gpuFreeMemoryMb: null, availableMemoryMb: 8192, nvidiaDriverVersion: null,
           cudaInstallable: false, cpuThreads: 8, recommendation: "CPU",

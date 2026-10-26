@@ -3,11 +3,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AppErrorBoundary } from "./AppErrorBoundary";
 
 const relaunch = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+const exit = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 
-vi.mock("@tauri-apps/plugin-process", () => ({ relaunch }));
-vi.mock("@tauri-apps/api/window", () => ({
-  getCurrentWindow: () => ({ close: vi.fn().mockResolvedValue(undefined) }),
-}));
+vi.mock("@tauri-apps/plugin-process", () => ({ relaunch, exit }));
 
 function BrokenChild(): never {
   throw new Error("render failure");
@@ -17,6 +15,7 @@ describe("AppErrorBoundary", () => {
   afterEach(() => {
     cleanup();
     relaunch.mockClear();
+    exit.mockClear();
     vi.restoreAllMocks();
     window.localStorage.clear();
   });
@@ -65,6 +64,16 @@ describe("AppErrorBoundary", () => {
 
     screen.getByRole("button", { name: "Restart application" }).click();
     await vi.waitFor(() => expect(relaunch).toHaveBeenCalledOnce());
+    expect(exit).not.toHaveBeenCalled();
     errorSpy.mockRestore();
+  });
+
+  it("exits on failed crash recovery instead of hiding a broken window to the tray", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    relaunch.mockRejectedValueOnce(new Error("restart unavailable"));
+    render(<AppErrorBoundary><BrokenChild /></AppErrorBoundary>);
+    screen.getByRole("button", { name: "Restart application" }).click();
+    await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(1));
+    expect(relaunch).toHaveBeenCalledOnce();
   });
 });

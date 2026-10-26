@@ -109,10 +109,18 @@ pub struct ModelSpec {
     pub sha256: &'static str,
 }
 
-// SHA-256 values are the pinned Git LFS object IDs for the matching files in
-// ggerganov/whisper.cpp on Hugging Face. The URL remains pinned to the model ID
-// and the content hash is verified before the model can be used.
-const MODELS: [ModelSpec; 3] = [
+// SHA-256 values are pinned Git LFS object IDs from the matching Hugging Face
+// repositories. Qwen additionally pins the conversion repository revision.
+// Every model is hash-verified before use.
+const MODELS: [ModelSpec; 4] = [
+    ModelSpec {
+        id: crate::qwen::MODEL_ID,
+        label: "Qwen3-ASR 1.7B Q8",
+        description: "Alibaba multilingual ASR; subtitle timing follows audio chunks",
+        size_mb: 2084,
+        vram_required_mb: 4096,
+        sha256: "9a0d81792dfea2d5f278b8a63deb3ea6e02139ce42c2301f32ea19c4f77526b7",
+    },
     ModelSpec {
         id: "base",
         label: "Fast",
@@ -147,6 +155,14 @@ pub fn model_spec(id: &str) -> Result<ModelSpec, String> {
         .ok_or_else(|| format!("Model tidak dikenal: {id}"))
 }
 
+pub fn model_filename(id: &str) -> String {
+    if crate::qwen::is_qwen(id) {
+        crate::qwen::MODEL_FILE.into()
+    } else {
+        format!("ggml-{id}.bin")
+    }
+}
+
 pub fn list_models(app: &AppHandle) -> Result<Vec<ModelInfo>, String> {
     let dir = models_dir(app)?;
     Ok(MODELS
@@ -157,7 +173,8 @@ pub fn list_models(app: &AppHandle) -> Result<Vec<ModelInfo>, String> {
             description: model.description.into(),
             size_mb: model.size_mb,
             vram_required_mb: model.vram_required_mb,
-            installed: crate::paths::is_regular_file(&dir.join(format!("ggml-{}.bin", model.id))),
+            installed: crate::paths::is_regular_file(&dir.join(model_filename(model.id)))
+                && (!crate::qwen::is_qwen(model.id) || crate::qwen::installed(app)),
         })
         .collect())
 }
@@ -167,9 +184,9 @@ pub fn recommended_model_id(available_vram_mb: Option<u64>) -> String {
     MODELS
         .iter()
         .rev()
-        .find(|model| available >= model.vram_required_mb)
+        .find(|model| !crate::qwen::is_qwen(model.id) && available >= model.vram_required_mb)
         .map(|model| model.id)
-        .unwrap_or(MODELS[0].id)
+        .unwrap_or("base")
         .to_string()
 }
 
@@ -304,12 +321,13 @@ pub fn verify_model_file(
     Ok(())
 }
 
-fn emit_model_progress(
+pub(crate) fn emit_model_progress(
     app: &AppHandle,
     id: &str,
     downloaded_bytes: u64,
     total_bytes: u64,
     bytes_per_second: Option<u64>,
+    phase: &str,
 ) {
     let percent = if total_bytes > 0 {
         downloaded_bytes as f64 / total_bytes as f64 * 100.0
@@ -320,6 +338,7 @@ fn emit_model_progress(
         "model-download",
         ModelDownloadPayload {
             id: id.into(),
+            phase: phase.into(),
             downloaded_bytes,
             total_bytes,
             percent: percent.clamp(0.0, 100.0),
@@ -334,6 +353,9 @@ pub async fn download_model(
     cancelled: Arc<AtomicBool>,
 ) -> Result<(), String> {
     let spec = model_spec(&model_id)?;
+    if crate::qwen::is_qwen(&model_id) {
+        crate::qwen::ensure_runtime(&app, cancelled.clone()).await?;
+    }
     let dest = model_path(&app, &model_id)?;
     let temp = dest.with_extension("bin.download");
     let temp_guard = TemporaryFileGuard::new(temp.clone());
@@ -358,10 +380,14 @@ pub async fn download_model(
             .await
             .map_err(|e| format!("Pembersihan model invalid gagal dijalankan: {e}"))??;
     }
-    let url = format!(
-        "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-{}.bin?download=true",
-        spec.id
-    );
+    let url = if crate::qwen::is_qwen(spec.id) {
+        crate::qwen::MODEL_URL.to_owned()
+    } else {
+        format!(
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-{}.bin?download=true",
+            spec.id
+        )
+    };
     let client = AsyncClient::builder()
         .user_agent(concat!("WhisperTube/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(30))
@@ -398,7 +424,7 @@ pub async fn download_model(
     let mut downloaded = 0u64;
     let download_started_at = Instant::now();
     let mut last_progress = Duration::ZERO;
-    emit_model_progress(&app, spec.id, 0, total, None);
+    emit_model_progress(&app, spec.id, 0, total, None, "model");
     loop {
         if cancelled.load(Ordering::SeqCst) {
             return Err("Download model dibatalkan.".into());
@@ -426,10 +452,10 @@ pub async fn download_model(
         let elapsed = download_started_at.elapsed().as_secs_f64();
         let bytes_per_second = (elapsed > 0.0).then(|| (downloaded as f64 / elapsed) as u64);
         if network::download_progress_due(download_started_at.elapsed(), &mut last_progress) {
-            emit_model_progress(&app, spec.id, downloaded, total, bytes_per_second);
+            emit_model_progress(&app, spec.id, downloaded, total, bytes_per_second, "model");
         }
     }
-    emit_model_progress(&app, spec.id, downloaded, total, None);
+    emit_model_progress(&app, spec.id, downloaded, total, None, "model");
     file.flush()
         .await
         .map_err(|e| format!("Gagal menyelesaikan file model: {e}"))?;
@@ -449,7 +475,7 @@ pub async fn download_model(
         .await
         .map_err(|e| format!("Gagal memasang model: {e}"))?;
     temp_guard.commit();
-    emit_model_progress(&app, spec.id, downloaded, downloaded, None);
+    emit_model_progress(&app, spec.id, downloaded, downloaded, None, "model");
     Ok(())
 }
 

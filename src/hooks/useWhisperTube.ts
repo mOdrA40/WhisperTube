@@ -1,3 +1,4 @@
+import { isQwenModel, supportsModelBackend } from "../lib/models";
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import {
   cancelJob as cancelJobRequest,
@@ -213,7 +214,9 @@ export function useWhisperTube() {
   const runtimeReady = Boolean(
     system?.ytDlp &&
       system.ffmpeg &&
-      (backend === "cpu"
+      (isQwenModel(modelId)
+        ? (supportsModelBackend(modelId, backend, system) && (backend !== "cuda" || cudaReady))
+        : backend === "cpu"
         ? system.cpuEngine
         : backend === "cuda"
           ? cudaReady && selectedCudaDevice !== undefined
@@ -511,7 +514,7 @@ export function useWhisperTube() {
     return null;
   }, [backend, selectedCudaDevice, selectedModel, system, t]);
   const acceleratorWarning = useMemo(() => {
-    if (!system || backend === "auto" || backend === "cpu" || backend === "cuda") return null;
+    if (!system || isQwenModel(modelId) || backend === "auto" || backend === "cpu" || backend === "cuda") return null;
     if (backend === "vulkan" && !system.computeDevices.some((device) => device.backend === "vulkan")) {
       return t("error.vulkanDeviceUnavailable");
     }
@@ -522,7 +525,7 @@ export function useWhisperTube() {
       });
     }
     return null;
-  }, [backend, system, t]);
+  }, [backend, modelId, system, t]);
   const canStart = Boolean(!operationActive && !checkingResume && metadata && selectedModel?.installed && runtimeReady && !vramWarning && !acceleratorWarning);
   const modelDownloadBlockReasons = useMemo<Record<string, string>>(() => {
     const reasons: Record<string, string> = {};
@@ -785,6 +788,11 @@ export function useWhisperTube() {
         language,
         modelId,
         keepAudio,
+      }, {
+        success: { title: t("notification.successTitle"), body: t("notification.transcriptionComplete") },
+        completedWithNote: { title: t("notification.noteTitle"), body: t("notification.noteBody") },
+        failed: { title: t("notification.failedTitle"), body: t("notification.failedBody") },
+        cancelled: { title: t("notification.cancelledTitle"), body: t("notification.cancelledBody") },
       });
       stopTranscriptionTimer();
       setCurrentResult(completedResult);
@@ -1026,7 +1034,12 @@ export function useWhisperTube() {
     language,
     setLanguage,
     modelId,
-    setModelId,
+    setModelId: (id: string) => {
+      setModelId(id);
+      if (!supportsModelBackend(id, backend, system)) {
+        setBackend("auto"); setComputeTargetId("auto");
+      }
+    },
     keepAudio,
     setKeepAudio,
     metadata,

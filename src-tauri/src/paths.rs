@@ -398,7 +398,12 @@ pub fn cleanup_stale_transient_storage(app: &AppHandle) -> Result<(), String> {
     let mut errors = cleanup_stale_entries(&runtime_root, true, |name| {
         owned_uuid_name(
             name,
-            &[".cuda-staging-", ".vulkan-staging-", ".metal-staging-"],
+            &[
+                ".cuda-staging-",
+                ".vulkan-staging-",
+                ".metal-staging-",
+                ".qwen-staging-",
+            ],
         )
     });
     let temp_root = std::env::temp_dir();
@@ -551,7 +556,7 @@ pub fn engine_available(app: &AppHandle, backend: &str) -> Result<bool, String> 
 
 pub fn model_path(app: &AppHandle, id: &str) -> Result<PathBuf, String> {
     let _ = model_spec(id)?;
-    Ok(models_dir(app)?.join(format!("ggml-{id}.bin")))
+    Ok(models_dir(app)?.join(crate::models::model_filename(id)))
 }
 
 #[cfg(test)]

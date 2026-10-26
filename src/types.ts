@@ -36,6 +36,7 @@ export type AcceleratorInfo = {
 };
 
 export type SystemStatus = {
+  qwenBackends: BackendChoice[];
   ytDlp: boolean;
   ffmpeg: boolean;
   cpuEngine: boolean;
@@ -113,6 +114,7 @@ export type ProgressPayload = {
 
 export type ModelDownloadPayload = {
   id: string;
+  phase?: "model" | "runtime";
   downloadedBytes: number;
   totalBytes: number;
   percent: number;
@@ -208,3 +210,15 @@ export type TranscriptRequest = {
   modelId: string;
   keepAudio: boolean;
 };
+
+export interface TranscriptionNotificationCopy {
+  title: string;
+  body: string;
+}
+
+export interface TranscriptionNotifications {
+  success: TranscriptionNotificationCopy;
+  completedWithNote: TranscriptionNotificationCopy;
+  failed: TranscriptionNotificationCopy;
+  cancelled: TranscriptionNotificationCopy;
+}

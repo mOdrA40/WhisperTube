@@ -1,7 +1,6 @@
 import type { ErrorInfo, ReactNode } from "react";
 import { Component } from "react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
-import { relaunch } from "@tauri-apps/plugin-process";
+import { exit, relaunch } from "@tauri-apps/plugin-process";
 
 // This fallback must also work when the context provider itself failed.
 const recoveryMessages = {
@@ -58,9 +57,11 @@ export class AppErrorBoundary extends Component<AppErrorBoundaryProps, AppErrorB
     } catch (cause) {
       console.error("WhisperTube gagal melakukan relaunch setelah crash UI.", cause);
       try {
-        await getCurrentWindow().close();
-      } catch (closeCause) {
-        console.error("WhisperTube gagal menutup window setelah crash UI.", closeCause);
+        // Window close may now hide an active job to the tray. Recovery must
+        // really exit so it cannot strand a crashed interface in the background.
+        await exit(1);
+      } catch (exitCause) {
+        console.error("WhisperTube gagal keluar setelah crash UI.", exitCause);
         window.location.reload();
       }
     }

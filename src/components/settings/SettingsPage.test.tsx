@@ -62,6 +62,19 @@ function renderSettingsPage(overrides: Partial<SettingsPageProps> = {}) {
 }
 
 describe("SettingsPage local data reset", () => {
+  it("separates provider models when downloading Qwen", () => {
+    const onDownloadModel = vi.fn();
+    const model = { label: "", description: "", sizeMb: 100, vramRequiredMb: 4096, installed: false };
+    renderSettingsPage({ models: [{ ...model, id: "base" }, { ...model, id: "qwen3-asr-1.7b-q8_0" }], onDownloadModel });
+    expect(screen.getByText("Fast")).toBeTruthy();
+    expect(screen.queryByText("Qwen3-ASR 1.7B · Q8")).toBeNull();
+    fireEvent.click(screen.getByRole("combobox", { name: "Model provider" }));
+    fireEvent.click(screen.getByRole("option", { name: "Alibaba · Qwen" }));
+    expect(screen.queryByText("Fast")).toBeNull();
+    expect(screen.getByText("Qwen3-ASR 1.7B · Q8")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Download" }));
+    expect(onDownloadModel).toHaveBeenCalledWith("qwen3-asr-1.7b-q8_0");
+  });
   it("clears its reset notification timer on unmount", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
@@ -131,6 +144,7 @@ describe("SettingsPage local data reset", () => {
 
   it("renders complete compute-device names for long names and multiple vendors", () => {
     const system: SystemStatus = {
+      qwenBackends: ["auto", "cpu", "cuda"],
       ytDlp: false,
       ffmpeg: false,
       cpuEngine: true,
@@ -194,6 +208,7 @@ describe("SettingsPage local data reset", () => {
 
   it("disables Vulkan installation when available RAM is below the preflight floor", () => {
     const system: SystemStatus = {
+      qwenBackends: ["auto", "cpu", "cuda"],
       ytDlp: true,
       ffmpeg: true,
       cpuEngine: true,

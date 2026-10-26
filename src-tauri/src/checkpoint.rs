@@ -409,7 +409,7 @@ where
     P: FnMut(f64, bool),
 {
     let chunks = audio.plan(&cancelled)?;
-    let identity = serde_json::to_vec(&(
+    let mut identity = serde_json::to_vec(&(
         CHECKPOINT_VERSION,
         env!("CARGO_PKG_VERSION"),
         &audio.digest,
@@ -423,6 +423,13 @@ where
         CHUNK_SECONDS,
     ))
     .map_err(|e| format!("Gagal membuat identitas checkpoint: {e}"))?;
+    if crate::qwen::is_qwen(&request.model_id) {
+        identity.extend_from_slice(b"qwen/transcribe-0.4.1/quiet-20s/ctx2048/v1");
+        if request.language == "auto" {
+            // Old Qwen Auto checkpoints forced one language into later audio.
+            identity.extend_from_slice(b"/auto-per-section/v2");
+        }
+    }
     let key = format!("{:x}", Sha256::digest(identity));
     let root = job_dir.join(".checkpoints");
     owned_directory(&root)?;
@@ -438,11 +445,12 @@ where
         if cancelled() {
             return Err("Job dibatalkan.".into());
         }
-        let inference_language = if request.language == "auto" {
-            detected_language.as_deref().unwrap_or("auto")
-        } else {
-            &request.language
-        };
+        let inference_language =
+            if request.language == "auto" && !crate::qwen::is_qwen(&request.model_id) {
+                detected_language.as_deref().unwrap_or("auto")
+            } else {
+                &request.language
+            };
         let path = directory.join(format!("{:04}.json", chunk.index));
         let saved = match fs::symlink_metadata(&path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -820,6 +828,7 @@ mod tests {
         .unwrap();
         for (model, language, backend) in [
             ("large-v3-turbo-q5_0", "id", "cpu"),
+            (crate::qwen::MODEL_ID, "id", "cpu"),
             ("base", "en", "cpu"),
             ("base", "id", "auto"),
         ] {
@@ -865,6 +874,43 @@ mod tests {
     }
 
     #[test]
+    fn qwen_sections_resume_and_export_through_the_shared_pipeline() {
+        let mut fixture = Fixture::new(2);
+        fixture.request.model_id = crate::qwen::MODEL_ID.into();
+        let audio = fixture.audio();
+        transcribe(
+            &audio,
+            &fixture.root,
+            &fixture.request,
+            |_, _, _, _| Ok(output("Teks Qwen")),
+            || false,
+            |_, _| {},
+        )
+        .unwrap();
+        let resumed = transcribe(
+            &audio,
+            &fixture.root,
+            &fixture.request,
+            |_, _, _, _| panic!("a completed Qwen section must be reused"),
+            || false,
+            |_, _| {},
+        )
+        .unwrap();
+        let prefix = fixture.root.join("qwen-export");
+        write_exports(&prefix, &resumed).unwrap();
+        assert_eq!(
+            fs::read_to_string(prefix.with_extension("txt")).unwrap(),
+            "Teks Qwen"
+        );
+        assert!(fs::read_to_string(prefix.with_extension("srt"))
+            .unwrap()
+            .contains("00:00:00,000 --> 00:00:01,000\nTeks Qwen"));
+        assert!(fs::read_to_string(prefix.with_extension("vtt"))
+            .unwrap()
+            .contains("00:00:00.000 --> 00:00:01.000\nTeks Qwen"));
+    }
+
+    #[test]
     fn auto_language_is_carried_across_chunks_and_resume() {
         let mut fixture = Fixture::new(620);
         fixture.request.language = "auto".into();
@@ -901,6 +947,45 @@ mod tests {
         )
         .unwrap();
         assert_eq!(languages, ["id", "id"]);
+    }
+
+    #[test]
+    fn qwen_auto_is_not_locked_to_the_first_language_even_after_resume() {
+        let mut fixture = Fixture::new(620);
+        fixture.request.language = "auto".into();
+        fixture.request.model_id = crate::qwen::MODEL_ID.into();
+        let mut languages = Vec::new();
+        assert!(transcribe(
+            &fixture.audio(),
+            &fixture.root,
+            &fixture.request,
+            |_, _, language, _| {
+                languages.push(language.to_owned());
+                if languages.len() == 2 {
+                    Err("interrupted".into())
+                } else {
+                    Ok(output("saved"))
+                }
+            },
+            || false,
+            |_, _| {}
+        )
+        .is_err());
+        assert_eq!(languages, ["auto", "auto"]);
+        let mut languages = Vec::new();
+        transcribe(
+            &fixture.audio(),
+            &fixture.root,
+            &fixture.request,
+            |_, _, language, _| {
+                languages.push(language.to_owned());
+                Ok(output("resumed"))
+            },
+            || false,
+            |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(languages, ["auto", "auto"]);
     }
 
     #[test]

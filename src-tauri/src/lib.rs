@@ -1,7 +1,9 @@
 mod accelerators;
 mod archive;
+mod background_tray;
 mod checkpoint;
 mod commands;
+mod completion_notifications;
 mod cookies;
 mod durable;
 #[cfg(unix)]
@@ -14,6 +16,8 @@ mod models;
 mod network;
 mod paths;
 mod process;
+mod qwen;
+pub use qwen::worker_entry as run_qwen_worker;
 mod resources;
 mod runtime_snapshot;
 mod sources;
@@ -40,14 +44,17 @@ fn stop_active_work(app: &tauri::AppHandle) {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
+            background_tray::restore_or_log(app);
         }))
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                background_tray::on_close(window, api);
+            }
+        })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(state::AppState::default())
         .setup(|app| {

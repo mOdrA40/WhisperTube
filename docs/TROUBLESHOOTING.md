@@ -261,3 +261,97 @@ one manual installation of a build that includes the updater.
 During installation, WhisperTube reserves the application operation so that
 transcription, downloads, history mutation, and data reset cannot overlap with
 the update.
+
+## Closing the window during audio download or transcription
+
+While a transcription job is active (including its audio download, conversion,
+inference, and finalization), closing the main window or using Alt+F4 hides it to
+the system tray instead of cancelling the job. The hidden window leaves the
+taskbar. Click the WhisperTube tray icon to restore it; alternatively, open the
+tray icon menu and select **WhisperTube**, or launch WhisperTube again.
+
+When the job finishes, fails, or is cancelled, the window stays in the tray until
+you restore it. Background outcome notifications still follow the rules below.
+To stop an active job, restore the window and use **Cancel**. After the job has
+settled, closing the window exits normally. Ordinary minimize behavior is
+unchanged. Model/runtime downloads, video inspection, history operations, and an
+idle window do not use close-to-tray.
+
+The tray uses the application icon and is created only when needed. Windows may
+put it in the hidden-icons overflow next to the clock. If tray creation fails,
+WhisperTube keeps the window open so an active job is not lost. No installer,
+startup entry, or permanent background service is added.
+
+## No transcription outcome notification appears
+
+One notification is sent when an accepted transcription (including a resumed job)
+ends while the main WhisperTube window is not focused. Distinct localized titles
+identify success, completion with an audio/source duration discrepancy, failure,
+and cancellation. Cancellation notifications are silent on Windows. A late cancel
+cannot turn a saved success into cancellation or conceal an unrelated failure.
+Opening history, progress updates, and rejected concurrent start requests do not
+notify. This policy applies to both Whisper and Qwen; downloads and other settings
+operations do not produce transcription notifications.
+The message is generic, follows the interface language, and omits video titles,
+URLs, file paths, and transcript content.
+
+Enable notifications for WhisperTube in the operating system and check Do Not
+Disturb/Focus settings. On Windows, WhisperTube registers its own per-user
+notification identity and uses it directly, including development and no-bundle
+executables. The sender name is WhisperTube and the icon follows the current
+application branding. This does not require administrator access or an installer.
+The icon is stored under app-local-data `branding` with a content-derived filename
+so a new build does not reuse an old icon path. Registry/filesystem failures are
+reported to the application log; there is no silent PowerShell fallback.
+OS policies may suppress or delay delivery even when dispatch succeeds. A notification failure never changes
+the original success, failure, or cancellation result.
+
+Notification dispatch runs in Rust after the pipeline returns its terminal result. It does
+not require a foreground WebView timer or new JavaScript notification permissions.
+
+## Qwen installation, CUDA, or subtitle timing
+
+Qwen backend options follow its own platform-specific runtime, independently of
+the installed Whisper Metal/Vulkan packs. Intel Macs support Qwen Auto/CPU;
+Apple Silicon Macs also support Qwen Metal without installing Whisper's Metal
+pack. Switching from Whisper Metal to Qwen on Intel resets the target to Auto.
+Unsupported Qwen backends are rejected before audio download or conversion.
+
+Select Alibaba in the provider dropdown and download Qwen3-ASR-1.7B Q8. The
+cancellable download installs its hash-verified native runtime before the GGUF.
+CUDA needs the existing NVIDIA acceleration component; CPU remains available.
+The pinned Qwen CUDA runtime requires compute capability 7.5 or newer. A GPU
+that works with Whisper CUDA (for example, a Pascal GTX 1080) may not support
+Qwen CUDA. Auto uses CPU when the selected GPU is too old or its compute
+capability cannot be verified; explicit CUDA reports the reason instead.
+Qwen subtitle timestamps follow audio section boundaries and are approximate.
+Whisper remains available through its own provider for aligned subtitles.
+Qwen requires a rebuilt native application; a frontend-only preview does not
+provide its worker.
+
+When Qwen language is Auto, every section keeps automatic language detection.
+It must not inherit a forced language from the first section: on the reported
+outro audio, forcing Indonesian triggered native repetition status 19, while Auto
+completed successfully without recognized words in the final portion. The full
+previously failing 293.64-second section also completed with Auto on the same GPU.
+Explicit language choices remain explicit. The native repetition guard is still
+active; a failed or truncated decode is never silently accepted as complete.
+
+Old Qwen Auto checkpoints use a different policy and are not reused after this
+fix. Existing converted audio can still be reused without downloading the video
+again. Whisper checkpoint identities and explicit-language Qwen identities are
+unchanged. A truly undecodable section can still fail; this is not a guarantee
+that Qwen recognizes every audio source correctly.
+
+For a corrupt Qwen runtime, close active jobs, remove only
+`runtime/<platform>/qwen-transcribe-0.4.1` under application-local data, then
+redownload Qwen. Its model weights can be reused if their checksum is valid.
+
+## EXE or taskbar still shows the old icon
+
+The native PNG, ICO, and ICNS assets are generated from `public/logo.svg`, which
+matches the current teal waveform UI mark. Rebuild and restart the native app;
+a Vite-only refresh cannot replace an executable resource or a running window's
+icon. Confirm the shortcut points to the rebuilt EXE. Windows may retain a pinned
+shortcut icon; unpin and repin that application if needed. Do not delete global
+Windows icon caches just to refresh this app.

@@ -1,3 +1,4 @@
+import { modelProvider } from "../../lib/models";
 import { WarningIcon } from "@phosphor-icons/react/dist/csr/Warning";
 import { CheckIcon } from "@phosphor-icons/react/dist/csr/Check";
 import { StopCircleIcon } from "@phosphor-icons/react/dist/csr/StopCircle";
@@ -104,6 +105,7 @@ export function SettingsPage({
   onInstallAppUpdate,
 }: SettingsPageProps) {
   const { language: uiLanguage, setLanguage: setUiLanguage, t } = useI18n();
+  const [modelManagerProvider, setModelManagerProvider] = useState("openai");
   const [cookiesDialogOpen, setCookiesDialogOpen] = useState(false);
   const [resetDialogOpen, setResetDialogOpen] = useState(false);
   const [pendingModelDelete, setPendingModelDelete] = useState<ModelInfo | null>(null);
@@ -624,8 +626,11 @@ export function SettingsPage({
           </div>
           <DownloadSimpleIcon aria-hidden="true" size={20} />
         </div>
+        <CustomSelect value={modelManagerProvider}
+          options={[{ value: "openai", label: "OpenAI · Whisper" }, { value: "alibaba", label: "Alibaba · Qwen" }]}
+          onChange={setModelManagerProvider} ariaLabel={t("controls.provider")} />
         <div className="model-manager">
-          {models.map((model) => (
+          {models.filter((model) => modelProvider(model.id) === modelManagerProvider).map((model) => (
             <div className="model-manage-row" key={model.id}>
               <div>
                 <strong>{getModelCopy(model, t).label}</strong>
@@ -639,7 +644,7 @@ export function SettingsPage({
               {downloadingModel[model.id] ? (
                 <div className="model-download-status">
                   <span>
-                    {t("controls.downloadingModel", {
+                    {t(downloadingModel[model.id].phase === "runtime" ? "controls.downloadingQwenRuntime" : "controls.downloadingModel", {
                       percent: Math.round(downloadingModel[model.id].percent),
                     })}
                   </span>

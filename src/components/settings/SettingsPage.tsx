@@ -96,6 +96,19 @@ export function SettingsPage({
   const [resetComplete, setResetComplete] = useState(false);
   const [resetError, setResetError] = useState<string | null>(null);
   const [modelDeleteError, setModelDeleteError] = useState<string | null>(null);
+  const mountedRef = useRef(true);
+  const copyRequestRef = useRef(0);
+  const copyTimeoutRef = useRef<number | null>(null);
+  const resetTimeoutRef = useRef<number | null>(null);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      copyRequestRef.current += 1;
+      if (copyTimeoutRef.current !== null) window.clearTimeout(copyTimeoutRef.current);
+      if (resetTimeoutRef.current !== null) window.clearTimeout(resetTimeoutRef.current);
+    };
+  }, []);
   const cookiesDialogRef = useRef<HTMLDivElement>(null);
   const cookiesTriggerRef = useRef<HTMLButtonElement>(null);
   const cookiesContinueRef = useRef<HTMLButtonElement>(null);
@@ -115,12 +128,16 @@ export function SettingsPage({
   }));
 
   async function copyLink(url: string) {
+    const request = ++copyRequestRef.current;
+    if (copyTimeoutRef.current !== null) window.clearTimeout(copyTimeoutRef.current);
     try {
       await navigator.clipboard.writeText(url);
+      if (!mountedRef.current || request !== copyRequestRef.current) return;
       setCopyFailedUrl(null);
       setCopiedUrl(url);
-      window.setTimeout(() => setCopiedUrl((current) => (current === url ? null : current)), 1600);
+      copyTimeoutRef.current = window.setTimeout(() => setCopiedUrl((current) => (current === url ? null : current)), 1600);
     } catch {
+      if (!mountedRef.current || request !== copyRequestRef.current) return;
       setCopiedUrl(null);
       setCopyFailedUrl(url);
     }
@@ -135,14 +152,17 @@ export function SettingsPage({
   const hasSavedAccessPreference = Boolean(cookiesPath);
 
   async function handleResetUserData() {
+    if (resetTimeoutRef.current !== null) window.clearTimeout(resetTimeoutRef.current);
     setResetComplete(false);
     setResetError(null);
     try {
       await onResetUserData();
+      if (!mountedRef.current) return;
       setResetDialogOpen(false);
       setResetComplete(true);
-      window.setTimeout(() => setResetComplete(false), 2400);
+      resetTimeoutRef.current = window.setTimeout(() => setResetComplete(false), 2400);
     } catch (cause) {
+      if (!mountedRef.current) return;
       setResetError(friendlyError(cause));
     }
   }

@@ -1,5 +1,6 @@
 import { lstatSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join, relative, sep } from "node:path";
+import { verifyPinnedYtDlp } from "./runtime-integrity.mjs";
 
 const root = join(process.cwd(), "src-tauri", "runtime", process.platform === "win32" ? "windows" : process.platform === "darwin" ? "macos" : "linux");
 
@@ -119,4 +120,10 @@ if (unexpected.length > 0) {
   process.exit(1);
 }
 
-console.log(`Runtime ${process.platform} bundle allowlist OK.`);
+try {
+  verifyPinnedYtDlp(root, process.platform === "win32" ? "windows" : process.platform === "darwin" ? "macos" : "linux");
+} catch (error) {
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exit(1);
+}
+console.log(`Runtime ${process.platform} bundle allowlist dan pinned yt-dlp SHA-256 OK.`);

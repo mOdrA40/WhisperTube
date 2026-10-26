@@ -838,6 +838,8 @@ fn ffmpeg_command(ffmpeg: &Path, input: &Path, output: &Path, duration: f64) -> 
             "error",
             "-progress",
             "pipe:1",
+            "-protocol_whitelist",
+            "file",
             "-i",
         ])
         .arg(input)
@@ -1035,11 +1037,13 @@ fn run_engine_probe(
         require_gpu_backend_attestation(&stderr, backend, probe_device_index)?;
         Ok(())
     })();
-    let _ = fs::remove_dir_all(&probe_dir);
+    if let Err(error) = fs::remove_dir_all(&probe_dir) {
+        eprintln!("WhisperTube backend probe cleanup warning: {error}");
+    }
     result
 }
 
-fn require_gpu_backend_attestation(
+pub(crate) fn require_gpu_backend_attestation(
     stderr: &str,
     backend: &str,
     device_index: Option<usize>,
@@ -2030,13 +2034,41 @@ mod tests {
         assert!(checkpoint::PcmAudio::inspect(&wav, 0.25, || false).is_err());
     }
 
-    #[cfg(windows)]
     #[test]
-    #[ignore = "Requires installed Windows FFmpeg runtime; run explicitly with --ignored"]
+    fn conversion_restricts_input_protocols_before_opening_the_local_media() {
+        use std::path::Path;
+        let command = super::ffmpeg_command(
+            Path::new("ffmpeg"),
+            Path::new("source with spaces.wav"),
+            Path::new("audio.wav"),
+            1.0,
+        );
+        let args = command.get_args().collect::<Vec<_>>();
+        let policy = args
+            .iter()
+            .position(|arg| *arg == "-protocol_whitelist")
+            .unwrap();
+        let input = args.iter().position(|arg| *arg == "-i").unwrap();
+        assert_eq!(args[policy + 1], "file");
+        assert!(policy < input);
+        assert_eq!(args[input + 1], "source with spaces.wav");
+    }
+
+    #[test]
+    #[ignore = "Requires prepared platform FFmpeg runtime; run explicitly with --ignored"]
     fn native_ffmpeg_accepts_short_track_but_rejects_corrupt_partial_decode() {
         use std::io::Write;
-        let ffmpeg =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("runtime/windows/ffmpeg.exe");
+        let platform = if cfg!(target_os = "windows") {
+            "windows"
+        } else if cfg!(target_os = "macos") {
+            "macos"
+        } else {
+            "linux"
+        };
+        let ffmpeg = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("runtime")
+            .join(platform)
+            .join(crate::paths::exe_name("ffmpeg"));
         assert!(
             ffmpeg.is_file(),
             "Install the runtime before this native QA test"
@@ -2511,6 +2543,17 @@ mod tests {
         let vulkan_one = "whisper_backend_init_gpu: using Vulkan1 backend\n";
         assert!(super::require_gpu_backend_attestation(vulkan_one, "vulkan", Some(1)).is_ok());
         assert!(super::require_gpu_backend_attestation(vulkan_one, "vulkan", Some(0)).is_err());
+        assert!(super::require_gpu_backend_attestation(
+            "whisper_backend_init_gpu: using Vulkan1 backend\nwhisper_backend_init_gpu: failed to initialize Vulkan1 backend\n", "vulkan", Some(1),
+        ).is_err());
+        for backend in ["metal", "vulkan"] {
+            assert!(super::require_gpu_backend_attestation(
+                "whisper_backend_init_gpu: no GPU found\n",
+                backend,
+                None,
+            )
+            .is_err());
+        }
     }
 
     #[test]

@@ -15,7 +15,6 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       TAURI_CREATE_UPDATER_ARTIFACTS: ${{ startsWith(github.ref, 'refs/tags/v') && 'true' || 'false' }}
-      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
       UPDATE_ARCH: ${{ matrix.architecture }}
     strategy:
       fail-fast: false
@@ -79,11 +78,19 @@ jobs:
       - name: Build native application bundle
         shell: bash
         env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           BUILD_SCRIPT: ${{ matrix.build_script }}
         run: |
           set -euo pipefail
           chmod +x "scripts/$BUILD_SCRIPT"
           "scripts/$BUILD_SCRIPT"
+
+      - name: Verify real CPU inference before distributing artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 --connect-timeout 30 --max-time 600 --output "$RUNNER_TEMP/ggml-base.bin" https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin
+          node scripts/verify-native-inference.mjs "$RUNNER_TEMP/ggml-base.bin"
 
       - name: Verify FFmpeg dependency boundary
         shell: bash
@@ -103,6 +110,9 @@ jobs:
               exit 1
             fi
           fi
+
+      - name: Verify native decoder success and partial-input failure
+        run: cargo test --release --manifest-path src-tauri/Cargo.toml --lib transcription::tests::native_ffmpeg_accepts_short_track_but_rejects_corrupt_partial_decode -- --ignored --exact
 
       - name: Collect native installers and checksums
         shell: bash
@@ -175,7 +185,6 @@ jobs:
     runs-on: windows-2025
     env:
       TAURI_CREATE_UPDATER_ARTIFACTS: ${{ startsWith(github.ref, 'refs/tags/v') && 'true' || 'false' }}
-      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
     steps:
       - name: Checkout source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -188,11 +197,24 @@ jobs:
 
       - name: Build Windows NSIS installer
         shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: .\scripts\build-windows.ps1
 
       - name: Verify isolated NSIS data cleanup
         shell: pwsh
         run: npm run test:uninstall-cleanup
+
+      - name: Verify native decoder success and partial-input failure
+        run: cargo test --release --manifest-path src-tauri/Cargo.toml --lib transcription::tests::native_ffmpeg_accepts_short_track_but_rejects_corrupt_partial_decode -- --ignored --exact
+
+      - name: Verify real CPU inference before distributing artifacts
+        shell: pwsh
+        run: |
+          $model = Join-Path $env:RUNNER_TEMP 'ggml-base.bin'
+          Invoke-WebRequest -Uri 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin' -OutFile $model -TimeoutSec 600
+          node scripts/verify-native-inference.mjs $model
+          if ($LASTEXITCODE -ne 0) { throw 'Native CPU inference check failed.' }
 
       - name: Collect Windows installer and checksum
         shell: pwsh

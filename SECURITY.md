@@ -77,11 +77,11 @@ RUSTSEC-2026-0386. No exception was added for this advisory. The stricter gate
 again reports only the five upstream residuals described below.
 
 Dependency status is a dated observation, not a permanent assurance. Run
-`npm audit --audit-level=high` and `cargo audit --file src-tauri/Cargo.lock`
+`npm audit --audit-level=moderate` and `cargo audit --file src-tauri/Cargo.lock`
 against the checked-in lockfiles and a current advisory database. Run both
-locally before pushing release changes. The dependency-audit.yml workflow also
-runs npm and Cargo audits for dependency-file changes. Release workflows do not
-wait for a separate test/lint quality gate. Do not suppress audit failures to publish a release.
+locally before pushing release changes. Dependency audits and frontend/Rust
+quality checks are local responsibilities; no separate GitHub Actions audit or
+quality-gate workflow runs them. Do not suppress audit failures to publish a release.
 Check the resolved versions and enabled features as well as the advisory count.
 
 The remediation baseline checked on 2026-10-23 reports zero npm vulnerabilities
@@ -97,8 +97,8 @@ has been applied here. This residual requires upstream tracking and native
 Linux validation; a passing audit exit code does not mean Linux is fully
 hardened or that the application is free of vulnerabilities.
 
-Run `node scripts/check-cargo-advisories.mjs` for the stricter regression gate
-also used in dependency CI. It prints every tracked residual, fails for any
+Run `node scripts/check-cargo-advisories.mjs` for the stricter local regression
+gate. It prints every tracked residual, fails for any
 vulnerability or unavailable audit, and rejects new advisories or changes to
 their package version/kind. `scripts/cargo-advisory-policy.json` records the
 exact residuals, owner, upstream dependency path and resolution requirements.
@@ -118,3 +118,13 @@ Prefer compatible patched versions. Any exception must be specific, reviewed,
 and explain its residual risk; neither a scanner warning nor its absence alone
 establishes exploitability. Native runtime binaries, OS distribution trust,
 and untested platforms require separate verification from npm/Cargo audits.
+
+The 2026-10-25 downloader update pins official yt-dlp 2026.10.21 executables for
+Windows, Linux and macOS in `src-tauri/runtime-pins.json`. The Tauri pre-build
+and pre-bundle hooks and non-debug Cargo build verify the executable hash,
+so a stale cached downloader is rejected before distribution. The Windows
+executable was passively inspected: the affected retired emSign ECC G3 root
+is absent; the unaffected emSign roots are not indiscriminately removed.
+See the [upstream release advisory](https://github.com/yt-dlp/yt-dlp/releases/tag/2026.10.21).
+This validates the artifact update and packaging controls, not a reproduced
+MITM attack or a guarantee about every platform's runtime TLS behavior.

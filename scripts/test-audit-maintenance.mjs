@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, copyFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, copyFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -17,6 +17,17 @@ test("stable application publication is Latest and prereleases are excluded", ()
   assert.match(source, /prerelease_args=\(--latest=true\)/);
   assert.match(source, /if \[\[ "\$GITHUB_REF_NAME" == \*-\* \]\]; then\s+prerelease_args=\(--prerelease --latest=false\)/);
   assert.match(source, /gh release create[^]*?"\$\{prerelease_args\[@\]\}"/);
+});
+
+test("application build has no separate CI audit gates and publication still waits for native builds", () => {
+  const application = workflow("build-application-bundles");
+  for (const name of ["quality-gates", "dependency-audit"]) {
+    assert.equal(existsSync(resolve(`.github/workflows/${name}.yml`)), false);
+    assert.ok(!application.includes(`${name}.yml`));
+  }
+  assert.doesNotMatch(application, /needs:\s*quality/);
+  assert.match(application, /release:[^]*?needs:\s+- build-unix\s+- build-windows/);
+  assert.match(application, /node scripts\/verify-native-inference\.mjs/);
 });
 
 test("Windows diagnostic finds development-only CUDA without executing the binary", () => {

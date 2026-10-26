@@ -134,6 +134,7 @@ const THUMBNAIL_HOSTS: &[&str] = &[
     "bilibili.com",
     "b23.tv",
     "vk.com",
+    "static-cdn.jtvnw.net",
 ];
 const TIKTOK_REHYDRATION_ERROR: &str = "unable to extract universal data for rehydration";
 const TIKTOK_TRANSIENT_ERROR_PREFIX: &str = "media_tiktok_transient:";
@@ -530,7 +531,23 @@ fn node_program_in(directories: impl IntoIterator<Item = PathBuf>) -> Option<Pat
         // PATH entries may be symlinks (Homebrew and version managers). Resolve
         // each candidate before validating it, preserving executable precedence.
         .filter_map(|directory| std::fs::canonicalize(directory.join(&name)).ok())
-        .find(|candidate| is_regular_file(candidate))
+        .find(|candidate| {
+            if !is_regular_file(candidate) {
+                return false;
+            }
+            #[cfg(unix)]
+            {
+                use std::{ffi::CString, os::unix::ffi::OsStrExt};
+                // Check effective-user execute access (including ACLs), not just
+                // mode bits. Spawn errors still propagate through the probe.
+                CString::new(candidate.as_os_str().as_bytes()).is_ok_and(|path| unsafe {
+                    libc::faccessat(libc::AT_FDCWD, path.as_ptr(), libc::X_OK, libc::AT_EACCESS)
+                        == 0
+                })
+            }
+            #[cfg(not(unix))]
+            true
+        })
 }
 
 pub fn js_runtime_args(
@@ -919,7 +936,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn node_lookup_preserves_path_precedence_for_symlinks_and_skips_broken_links() {
-        use std::{fs, os::unix::fs::symlink};
+        use std::{
+            fs,
+            os::unix::fs::{symlink, PermissionsExt},
+        };
         let root =
             std::env::temp_dir().join(format!("whispertube-node-path-{}", uuid::Uuid::new_v4()));
         let first = root.join("first");
@@ -929,6 +949,8 @@ mod tests {
         let managed = root.join("managed-node");
         fs::write(&managed, b"managed runtime").unwrap();
         fs::write(second.join("node"), b"system runtime").unwrap();
+        fs::set_permissions(&managed, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(second.join("node"), fs::Permissions::from_mode(0o755)).unwrap();
         symlink(&managed, first.join("node")).unwrap();
         assert_eq!(
             super::node_program_in([first.clone(), second.clone()]),
@@ -938,6 +960,31 @@ mod tests {
         assert_eq!(
             super::node_program_in([first, second.clone()]),
             Some(fs::canonicalize(second.join("node")).unwrap())
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn node_lookup_skips_non_executable_candidates_before_a_valid_runtime() {
+        use std::{fs, os::unix::fs::PermissionsExt};
+        let root = std::env::temp_dir().join(format!("node-execute-{}", uuid::Uuid::new_v4()));
+        let first = root.join("first");
+        let second = root.join("second");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        for (directory, mode) in [(&first, 0o644), (&second, 0o755)] {
+            fs::write(directory.join("node"), b"runtime fixture").unwrap();
+            fs::set_permissions(directory.join("node"), fs::Permissions::from_mode(mode)).unwrap();
+        }
+        assert_eq!(
+            super::node_program_in([first.clone(), second.clone()]),
+            Some(fs::canonicalize(second.join("node")).unwrap())
+        );
+        fs::set_permissions(first.join("node"), fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            super::node_program_in([first.clone(), second]),
+            Some(fs::canonicalize(first.join("node")).unwrap())
         );
         fs::remove_dir_all(root).unwrap();
     }
@@ -1297,6 +1344,21 @@ mod tests {
             "thumbnail": "https://tracking.example.test/thumb.jpg"
         }))
         .is_none());
+        assert!(safe_thumbnail(&json!({
+            "thumbnail": "https://static-cdn.jtvnw.net/cf_vods/preview.jpg"
+        }))
+        .is_some());
+        for thumbnail in [
+            "https://static-cdn.jtvnw.net.evil.example/preview.jpg",
+            "https://evil.jtvnw.net/preview.jpg",
+            "http://static-cdn.jtvnw.net/preview.jpg",
+            "https://user:password@static-cdn.jtvnw.net/preview.jpg",
+        ] {
+            assert!(
+                safe_thumbnail(&json!({"thumbnail": thumbnail})).is_none(),
+                "{thumbnail}"
+            );
+        }
     }
 
     #[test]

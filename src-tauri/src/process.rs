@@ -487,6 +487,73 @@ mod tests {
                 // registered helper already, without waiting for its worker.
                 std::process::exit(0);
             }
+            "shutdown-inflight" => {
+                use std::sync::{mpsc, Barrier};
+                let mut active = ownership::spawn(&mut capture_child("sleeper")).unwrap();
+                let ready = Arc::new(Barrier::new(2));
+                let release = Arc::new(Barrier::new(2));
+                let worker_ready = ready.clone();
+                let worker_release = release.clone();
+                let pending = std::thread::spawn(move || {
+                    let mut child = ownership::spawn_paused_for_test(
+                        &mut capture_child("sleeper"),
+                        &worker_ready,
+                        &worker_release,
+                    )
+                    .unwrap();
+                    assert!(!child.wait().unwrap().success());
+                });
+                ready.wait();
+
+                let (cancelled_tx, cancelled_rx) = mpsc::channel();
+                let cancellation = std::thread::spawn(move || {
+                    active.terminate();
+                    cancelled_tx
+                        .send(active.wait().is_ok_and(|status| !status.success()))
+                        .unwrap();
+                });
+                // A pending OS spawn must not own the registry mutex needed
+                // to reap/cancel an unrelated already-owned child.
+                let cancelled_while_pending = cancelled_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .unwrap_or(false);
+                let (stopped_tx, stopped_rx) = mpsc::channel();
+                let stopping = std::thread::spawn(move || {
+                    shutdown();
+                    stopped_tx.send(()).unwrap();
+                });
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while !ownership::admission_closed_for_test() && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                let admission_closed = ownership::admission_closed_for_test();
+                let late_rejected = admission_closed
+                    && ownership::spawn(&mut capture_child("sleeper"))
+                        .err()
+                        .is_some_and(|error| error.to_string().contains("sedang ditutup"));
+                let stopped_before_registration =
+                    stopped_rx.recv_timeout(Duration::from_millis(100)).is_ok();
+
+                // Release before asserting so a failing test never strands
+                // its deliberately paused worker or shutdown thread.
+                release.wait();
+                cancellation.join().unwrap();
+                stopping.join().unwrap();
+                pending.join().unwrap();
+                assert!(
+                    cancelled_while_pending,
+                    "pending spawn blocked active child cleanup"
+                );
+                assert!(
+                    admission_closed && late_rejected,
+                    "shutdown did not close spawn admission"
+                );
+                assert!(
+                    !stopped_before_registration,
+                    "shutdown returned before pending spawn cleanup"
+                );
+                std::process::exit(0);
+            }
             "parent" => {
                 let mut command = capture_child("sleeper");
                 command.stderr(Stdio::inherit()).stdout(Stdio::inherit());
@@ -634,6 +701,17 @@ mod tests {
         .unwrap();
         assert!(status.success());
         assert!(started.elapsed() >= Duration::from_millis(200));
+    }
+
+    #[test]
+    fn pending_spawn_does_not_block_cancellation_and_shutdown_waits_for_registration() {
+        let (status, stderr) = run_with_timeout_captured(
+            &mut capture_child("shutdown-inflight"),
+            Duration::from_secs(20),
+            8192,
+        )
+        .unwrap();
+        assert!(status.success(), "{stderr}");
     }
 
     #[test]

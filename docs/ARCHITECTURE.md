@@ -140,6 +140,14 @@ The cancellation path sets the relevant cancellation flag and terminates the
 active process tree where supported. Child processes are also cleaned up during
 application shutdown.
 
+OS process creation holds a shared spawn gate instead of the registry mutex,
+so a slow spawn cannot block status polling or cancellation of another child.
+Shutdown closes admission first, then takes that gate exclusively before its
+kill snapshot. In-flight creators must register or clean up their child before
+shutdown returns; late creators are rejected. Registry locking still protects
+lookup, reaping and ownership removal. A barrier-based regression checks this
+ordering without relaxing production timeouts.
+
 Cancellation resolves the PID through the owned-process registry. On Unix,
 waitid with WNOWAIT observes leader exit without releasing its PID/PGID;
 remaining group members are killed before the leader is reaped. On Windows,
@@ -300,10 +308,18 @@ the UI instead.
 
 Windows bootstrap:
 
-- yt-dlp 2026.08.19;
+- yt-dlp 2026.10.21;
 - FFmpeg 9.0.1 from the pinned Gyan.dev essentials archive;
 - whisper.cpp v1.9.2 CPU binaries from the pinned upstream release;
 - optional CUDA runtime installed on demand.
+
+The three bootstrap pins must match `src-tauri/runtime-pins.json` (enforced by
+the runtime-integrity tests). The Tauri pre-build/pre-bundle hooks and non-debug
+Cargo build script verify the downloader bytes against this catalog without
+executing them. A stale local runtime fails packaging with a setup instruction;
+an engine manifest version cannot replace verification of the separate media
+downloader. This update removes the affected retired emSign G3 trust anchor
+from the official executable; it does not claim that every emSign root is unsafe.
 
 macOS bootstrap builds pinned FFmpeg and both CPU and Apple Metal whisper.cpp
 engines. Linux bootstrap builds pinned static FFmpeg and a CPU whisper.cpp
@@ -435,12 +451,12 @@ The repository has two separate release paths:
    packs from pinned whisper.cpp source and publishes ZIP files with SHA-256
    sidecars for accelerators-v* tags.
 
-Both release workflows start their native build jobs directly. Tests, lint
-and secret scans are run locally before pushing; there is no separate CI
-test/lint quality gate. dependency-audit.yml runs npm/Cargo audits when dependency
-files change; release jobs do not depend on that workflow. Application packaging
-still builds its frontend assets. Accelerator assets must be public before a shipped application can
-download them without a GitHub credential.
+Frontend checks, Rust checks and locked-dependency audits are run locally;
+there are no separate CI audit or quality-gate workflows. Real CPU inference must pass before application
+artifacts are collected. Accelerator jobs run the CMake and load-path regression
+checks and verify their native runtime stage independently. Run relevant checks
+and secret scans locally before pushing as well. Accelerator assets must be
+public before a shipped application can download them without a GitHub credential.
 
 The accelerator hash helper reads the four public release assets without
 changing source by default. Its Apply mode writes verified hashes into the

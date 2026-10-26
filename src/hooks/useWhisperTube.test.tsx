@@ -1,4 +1,4 @@
-import { act, renderHook, waitFor } from "@testing-library/react";
+import { act, configure, getConfig, renderHook, waitFor } from "@testing-library/react";
 import { type ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../i18n";
@@ -141,6 +141,81 @@ describe("useWhisperTube", () => {
     expect(services.disposeAppUpdate).not.toHaveBeenCalled();
     unmount();
     expect(services.disposeAppUpdate).toHaveBeenCalledOnce();
+  });
+
+  it("reports subscription failure without an unhandled rejection", async () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    services.subscribeToProgress.mockRejectedValueOnce(new Error("Progress subscription unavailable"));
+    try {
+      const { result } = renderHook(() => useWhisperTube(), { wrapper });
+      await waitFor(() => expect(result.current.error).toContain("Progress subscription unavailable"));
+      expect(warning).toHaveBeenCalled();
+    } finally { warning.mockRestore(); }
+  });
+
+  it("preserves a shared startup refresh error across StrictMode effect replay", async () => {
+    services.getSystemStatus.mockRejectedValueOnce(new Error("Startup hardware query unavailable"));
+    const previous = getConfig().reactStrictMode;
+    configure({ reactStrictMode: true });
+    try {
+      const { result } = renderHook(() => useWhisperTube(), { wrapper });
+      await waitFor(() => expect(result.current.error).toContain("Startup hardware query unavailable"));
+      expect(services.getSystemStatus).toHaveBeenCalledOnce();
+    } finally { configure({ reactStrictMode: previous }); }
+  });
+
+  it("releases a subscription that finishes registering after unmount", async () => {
+    let resolve!: (unlisten: () => void) => void;
+    services.subscribeToProgress.mockReturnValueOnce(new Promise<() => void>((done) => { resolve = done; }));
+    const { result, unmount } = renderHook(() => useWhisperTube(), { wrapper });
+    await waitFor(() => expect(result.current.system).toEqual(system));
+    unmount();
+    const unlisten = vi.fn();
+    await act(async () => resolve(unlisten));
+    expect(unlisten).toHaveBeenCalledOnce();
+  });
+
+  it("ticks the visible elapsed time once per second and stops when inference completes", async () => {
+    let finish!: (value: TranscriptResult) => void;
+    services.startTranscription.mockReturnValueOnce(new Promise<TranscriptResult>((resolve) => { finish = resolve; }));
+    const { result, unmount } = renderHook(() => useWhisperTube(), { wrapper });
+    await waitFor(() => expect(result.current.system).toEqual(system));
+    act(() => result.current.setUrl(metadata.webpageUrl));
+    await act(async () => result.current.inspectVideo());
+    await waitFor(() => expect(result.current.checkingResume).toBe(false));
+    let pending!: Promise<void>;
+    act(() => { pending = result.current.startTranscription(); });
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "performance"] });
+    try {
+      act(() => services.subscribeToProgress.mock.calls[0][0]({ ...result.current.progress, stage: "transcribing" }));
+      expect(result.current.transcriptionElapsedMs).toBe(0);
+      act(() => vi.advanceTimersByTime(999));
+      expect(result.current.transcriptionElapsedMs).toBe(0);
+      act(() => vi.advanceTimersByTime(1));
+      expect(result.current.transcriptionElapsedMs).toBe(1000);
+      await act(async () => { finish(transcript); await pending; });
+      expect(vi.getTimerCount()).toBe(0);
+      act(() => vi.advanceTimersByTime(5000));
+      expect(result.current.transcriptionElapsedMs).toBe(1000);
+    } finally {
+      finish(transcript);
+      unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  it("continues releasing other subscriptions if one cleanup throws", async () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const release = vi.fn();
+    services.subscribeToProgress.mockResolvedValueOnce(() => { throw new Error("cleanup unavailable"); });
+    services.subscribeToModelDownload.mockResolvedValueOnce(release);
+    try {
+      const { result, unmount } = renderHook(() => useWhisperTube(), { wrapper });
+      await waitFor(() => expect(result.current.system).toEqual(system));
+      unmount();
+      expect(release).toHaveBeenCalledOnce();
+      expect(warning).toHaveBeenCalled();
+    } finally { warning.mockRestore(); }
   });
 
   it.each([null, 0, 8192, "missing"] as const)("uses only the explicit CUDA adapter's memory (%s)", async (free) => {

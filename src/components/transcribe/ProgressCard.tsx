@@ -37,7 +37,7 @@ export function ProgressCard({ progress, selectedModel, backend, networkSpeedByt
             </span>
           )}
           <div className="progress-metrics">
-            <div className="progress-metric">
+            <div className="progress-metric" title={t("progress.cpuUsageNote")}>
               <Activity size={13} />
               <span>{t("progress.cpuUsage")}</span>
               <strong>{formatUsage(progress.cpuUsagePercent, t("progress.unavailable"))}</strong>

@@ -370,6 +370,8 @@ async fn download_archive(
         .map_err(|e| format!("Gagal membuat file accelerator: {e}"))?;
     let mut downloaded = 0u64;
     let download_started_at = Instant::now();
+    let mut last_progress = Duration::ZERO;
+    emit_progress(app, backend, 0.0, 0, total, None);
     loop {
         if cancelled.load(Ordering::SeqCst) {
             return Err("Download accelerator dibatalkan.".into());
@@ -401,8 +403,22 @@ async fn download_archive(
         } else {
             0.0
         };
-        emit_progress(app, backend, percent, downloaded, total, bytes_per_second);
+        if network::download_progress_due(download_started_at.elapsed(), &mut last_progress) {
+            emit_progress(app, backend, percent, downloaded, total, bytes_per_second);
+        }
     }
+    emit_progress(
+        app,
+        backend,
+        if total > 0 {
+            downloaded as f64 / total as f64 * 85.0
+        } else {
+            0.0
+        },
+        downloaded,
+        total,
+        None,
+    );
     file.flush()
         .await
         .map_err(|e| format!("Gagal menyelesaikan file accelerator: {e}"))?;
@@ -546,7 +562,8 @@ fn validate_staged_capability(
                 .arg(&model)
                 .args(["-f"])
                 .arg(&wav)
-                .args(["-l", "auto", "-t", "1", "-nt", "-np", "-of"])
+                // -np disables the pinned CLI's GPU attestation callback.
+                .args(["-l", "auto", "-t", "1", "-nt", "-of"])
                 .arg(&output)
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::piped())
@@ -557,7 +574,16 @@ fn validate_staged_capability(
                 64 * 1024,
                 cancelled,
             ) {
-                Ok((status, _stderr)) if status.success() => return Ok(()),
+                Ok((status, stderr)) if status.success() => {
+                    match crate::transcription::require_gpu_backend_attestation(
+                        &stderr,
+                        backend,
+                        device_index,
+                    ) {
+                        Ok(()) => return Ok(()),
+                        Err(error) => failures.push(format!("{candidate}: {error}")),
+                    }
+                }
                 Ok((_, stderr)) => {
                     let detail = if stderr.trim().is_empty() {
                         "tanpa detail".into()
@@ -577,7 +603,9 @@ fn validate_staged_capability(
             failures.join(" | ")
         ))
     })();
-    let _ = fs::remove_dir_all(&probe_dir);
+    if let Err(error) = fs::remove_dir_all(&probe_dir) {
+        eprintln!("WhisperTube accelerator probe cleanup warning: {error}");
+    }
     result
 }
 
@@ -706,7 +734,7 @@ pub async fn install(
         .map_err(|e| format!("Gagal membuat temporary accelerator folder: {e}"))?;
     let result = async {
         let client = Client::builder()
-            .user_agent("WhisperTube/0.1")
+            .user_agent(concat!("WhisperTube/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(Duration::from_secs(30))
             .build()
             .map_err(|e| format!("Gagal membuat HTTP client accelerator: {e}"))?;

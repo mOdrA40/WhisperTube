@@ -14,17 +14,20 @@ The script does not perform a transcription or upload private data.
 
 ## Local validation commands
 
-The project does not define a separate npm lint script. The frontend build
-performs TypeScript checking before the Vite production build.
+The project does not define a separate npm lint script. Use TypeScript checking
+for routine changes; a full frontend build is needed for production-output,
+bundling, runtime-resource, or release changes.
 
 Run the relevant checks from the project root:
 
-    npm run build
-    npm run test:frontend -- --run
-    npm audit --audit-level=high
+    npm run typecheck
+    npm run test:frontend
+    node --test scripts/test-runtime-integrity.mjs scripts/test-native-inference.mjs scripts/test-runtime-loadpaths.mjs scripts/test-distribution-config.mjs scripts/test-cargo-advisories.mjs
+    npm audit --audit-level=moderate
     cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
-    cargo test --manifest-path src-tauri/Cargo.toml --all-targets --all-features
+    cargo check --manifest-path src-tauri/Cargo.toml --all-targets --all-features
     cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
+    cargo test --manifest-path src-tauri/Cargo.toml --all-targets --all-features
     .\scripts\check-secrets.ps1
 
 The Rust dependency audit also requires cargo-audit:
@@ -32,11 +35,38 @@ The Rust dependency audit also requires cargo-audit:
     cargo install cargo-audit --locked
     cargo audit --file src-tauri/Cargo.lock
 
-Run these checks locally before pushing. GitHub Actions only builds and
-publishes application bundles and accelerator packs; there is no separate CI
-quality gate. Application packaging still builds the frontend, including its
-TypeScript check, because the resulting assets are required by the installer.
+Run these checks locally before pushing; agents must follow AGENTS.md before
+reporting completion. GitHub Actions has no separate dependency-audit or
+quality-gate workflow. Use `node scripts/check-cargo-advisories.mjs` for the
+stricter local advisory policy. The
+packaging validator rejects stale yt-dlp executables by SHA-256, including
+direct Tauri builds and standalone `tauri bundle`; non-debug Cargo builds enforce the same pin independently.
+The application workflow also verifies a real one-second CPU inference with a
+hash-verified base model before collecting/distributing artifacts. This is not
+a substitute for driver-specific GPU or clean-machine installer QA.
+Prepared release jobs explicitly run the otherwise opt-in native FFmpeg test
+for successful short audio, corrupt partial input and overlong conversion.
 Check Unix script syntax locally with `bash -n scripts/<script-name>.sh`.
+
+For a local native CPU smoke check, use an existing `ggml-base.bin` (read-only):
+
+    node scripts/verify-native-inference.mjs <path-to-ggml-base.bin>
+
+The check verifies the model hash from the Rust catalog, generates its WAV and
+JSON inside a disposable temporary directory, disables GPU use explicitly,
+and requires structured transcript output as well as a successful process.
+It never installs/updates the application or uses real transcription data.
+
+Before declaring GPU artifacts ready, run short success/failure tests on each
+shipping backend and inspect the pinned whisper.cpp attestation, not just exit
+status. CUDA must select a physical UUID through CUDA_VISIBLE_DEVICES and use
+child ordinal 0; Vulkan must attest the selected engine ordinal; Metal must
+attest MTL initialization. Reject CPU fallback, missing attestation and GPU
+initialization-failure logs. Hosted CPU-only checks do not establish this.
+
+CPU telemetry is sampled on Windows/Linux. macOS currently reports an aggregate
+moving average from ps and can lag the activity; the UI tooltip makes that
+distinction explicit. A model's large resident memory is not, by itself, a leak.
 
 ## Node.js, Rust, or Cargo is not recognized
 

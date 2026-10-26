@@ -363,7 +363,7 @@ pub async fn download_model(
         spec.id
     );
     let client = AsyncClient::builder()
-        .user_agent("WhisperTube/0.1")
+        .user_agent(concat!("WhisperTube/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(30))
         .build()
         .map_err(|e| format!("Gagal membuat HTTP client: {e}"))?;
@@ -397,6 +397,7 @@ pub async fn download_model(
         .map_err(|e| format!("Gagal membuat file model: {e}"))?;
     let mut downloaded = 0u64;
     let download_started_at = Instant::now();
+    let mut last_progress = Duration::ZERO;
     emit_model_progress(&app, spec.id, 0, total, None);
     loop {
         if cancelled.load(Ordering::SeqCst) {
@@ -424,8 +425,11 @@ pub async fn download_model(
         downloaded += chunk.len() as u64;
         let elapsed = download_started_at.elapsed().as_secs_f64();
         let bytes_per_second = (elapsed > 0.0).then(|| (downloaded as f64 / elapsed) as u64);
-        emit_model_progress(&app, spec.id, downloaded, total, bytes_per_second);
+        if network::download_progress_due(download_started_at.elapsed(), &mut last_progress) {
+            emit_model_progress(&app, spec.id, downloaded, total, bytes_per_second);
+        }
     }
+    emit_model_progress(&app, spec.id, downloaded, total, None);
     file.flush()
         .await
         .map_err(|e| format!("Gagal menyelesaikan file model: {e}"))?;
@@ -445,7 +449,7 @@ pub async fn download_model(
         .await
         .map_err(|e| format!("Gagal memasang model: {e}"))?;
     temp_guard.commit();
-    emit_model_progress(&app, spec.id, total, total, None);
+    emit_model_progress(&app, spec.id, downloaded, downloaded, None);
     Ok(())
 }
 
@@ -503,7 +507,7 @@ async fn download_cuda_package(
     }
     emit_cuda_progress(app, 0.0, 0, 0, None);
     let client = AsyncClient::builder()
-        .user_agent("WhisperTube/0.1")
+        .user_agent(concat!("WhisperTube/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(CUDA_CONNECT_TIMEOUT)
         .build()
         .map_err(|e| format!("Gagal membuat HTTP client CUDA: {e}"))?;
@@ -619,6 +623,7 @@ async fn download_cuda_package(
             .await
             .map_err(|e| format!("Gagal membuka file download CUDA: {e}"))?;
         let download_started_at = Instant::now();
+        let mut last_progress = Duration::ZERO;
         emit_cuda_progress(
             app,
             downloaded as f64 / total_bytes as f64 * 85.0,
@@ -661,14 +666,23 @@ async fn download_cuda_package(
             let bytes_per_second =
                 (elapsed > 0.0).then(|| (attempt_downloaded as f64 / elapsed) as u64);
             let percent = total.map_or(0.0, |size| downloaded as f64 / size as f64 * 85.0);
-            emit_cuda_progress(
-                app,
-                percent,
-                downloaded,
-                total.unwrap_or(0),
-                bytes_per_second,
-            );
+            if network::download_progress_due(download_started_at.elapsed(), &mut last_progress) {
+                emit_cuda_progress(
+                    app,
+                    percent,
+                    downloaded,
+                    total.unwrap_or(0),
+                    bytes_per_second,
+                );
+            }
         }
+        emit_cuda_progress(
+            app,
+            total.map_or(0.0, |size| downloaded as f64 / size as f64 * 85.0),
+            downloaded,
+            total.unwrap_or(0),
+            None,
+        );
         file.flush()
             .await
             .map_err(|e| format!("Gagal menyelesaikan file CUDA: {e}"))?;

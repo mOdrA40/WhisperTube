@@ -288,6 +288,15 @@ fn job_dir_for_result(app: &AppHandle, result_path: &str) -> Result<Option<PathB
 // a checkpoint job is finished.
 pub fn referenced_job_directories(app: &AppHandle) -> Result<HashSet<PathBuf>, String> {
     let conn = open_connection(app)?;
+    // Prepare the private roots once, rather than chmod/sync both for every row.
+    let jobs_root = crate::paths::jobs_dir(app)?;
+    referenced_job_directories_in(&conn, &jobs_root)
+}
+
+fn referenced_job_directories_in(
+    conn: &Connection,
+    jobs_root: &Path,
+) -> Result<HashSet<PathBuf>, String> {
     let mut statement = conn
         .prepare("SELECT result_path FROM history")
         .map_err(|e| format!("Gagal membaca referensi history untuk resume: {e}"))?;
@@ -297,7 +306,7 @@ pub fn referenced_job_directories(app: &AppHandle) -> Result<HashSet<PathBuf>, S
     let mut directories = HashSet::new();
     for path in paths {
         let path = path.map_err(|e| format!("Path history untuk resume tidak valid: {e}"))?;
-        if let Some(directory) = job_dir_for_result(app, &path)? {
+        if let Some(directory) = job_dir_for_result_in(jobs_root, &path)? {
             directories.insert(directory);
         }
     }
@@ -955,6 +964,34 @@ mod tests {
     struct Fixture {
         root: PathBuf,
         database: PathBuf,
+    }
+
+    #[test]
+    fn reference_lookup_retains_containment_and_missing_job_behavior() {
+        let fixture = Fixture::new();
+        let conn = fixture.open();
+        fixture.insert(&conn, "complete");
+        fixture.insert(&conn, "missing");
+        fs::remove_dir_all(fixture.root.join("missing")).unwrap();
+        let referenced = super::referenced_job_directories_in(&conn, &fixture.root).unwrap();
+        assert_eq!(
+            referenced,
+            std::collections::HashSet::from([
+                fs::canonicalize(fixture.root.join("complete")).unwrap(),
+            ])
+        );
+        conn.execute(
+            "UPDATE history SET result_path = ?1",
+            [fixture
+                .root
+                .parent()
+                .unwrap()
+                .join("result.json")
+                .to_str()
+                .unwrap()],
+        )
+        .unwrap();
+        assert!(super::referenced_job_directories_in(&conn, &fixture.root).is_err());
     }
     impl Fixture {
         fn new() -> Self {

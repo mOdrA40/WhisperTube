@@ -1,4 +1,4 @@
-# WhisperTube 0.1
+# WhisperTube 0.2.0
 
 WhisperTube is a local-first desktop app that turns videos from supported platforms into transcripts using `yt-dlp`, FFmpeg, and whisper.cpp. Audio and transcript processing stay on the user's device.
 
@@ -303,13 +303,14 @@ The Linux bundle should be built on the oldest supported base distribution;
 glibc compatibility can prevent a bundle built on a newer distribution from
 running on an older one.
 
-The optional `.github/workflows/build-application-bundles.yml` repeats the
-native builds on GitHub-hosted Windows, macOS, and Linux runners. Run it
-manually to get short-lived workflow artifacts, or push an application tag such
-as `v0.1.0` to publish the native NSIS, DMG, Debian, and AppImage installers in
-a GitHub Release. Updater artifacts use Tauri signatures for update verification;
+The `.github/workflows/build-application-bundles.yml` runs native builds on
+GitHub-hosted Windows, macOS, and Linux runners. Run checks and dependency audits
+locally before pushing; there are no separate CI audit or quality-gate workflows. Run it
+manually to get short-lived workflow artifacts. To publish native NSIS, DMG,
+Debian and AppImage installers, push an unused `vX.Y.Z` application tag matching
+all three version manifests. Updater artifacts use Tauri signatures for update verification;
 Windows has no Authenticode signing yet, and macOS uses a free ad-hoc signature
-but is not Apple-notarized in v0.1.
+but is not Apple-notarized in 0.2.0.
 Each installer is accompanied by a SHA-256 sidecar. The application bundles
 also contain the project license and third-party notices.
 
@@ -376,7 +377,7 @@ Tauri selects the platform-specific app-local-data directory. WhisperTube stores
 3. Protected downloads depend on the exported cookies format, yt-dlp compatibility, and platform authentication behavior.
 4. Login-protected downloads can break when a platform changes authentication, anti-bot, or extractor requirements.
 5. There are no playlist/batch jobs, speaker diarization, word-level subtitle editing, or runtime/model auto-updates yet. App updates are handled by the signed Tauri updater; see [`docs/UPDATER.md`](docs/UPDATER.md).
-6. macOS/Linux builds are available from native scripts and CI. macOS uses an ad-hoc signature but is not notarized; Windows/Linux signing and broad distro/hardware QA are not complete in v0.1.
+6. macOS/Linux builds are available from native scripts and CI. macOS uses an ad-hoc signature but is not notarized; Windows/Linux signing and broad distro/hardware QA are not complete in 0.2.0.
 7. macOS/Linux bootstrap builds FFmpeg statically from a pinned source archive; clean-machine redistribution and license QA are still required.
 
 ## License

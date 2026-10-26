@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../../i18n";
 import type { SystemStatus } from "../../types";
@@ -62,6 +62,41 @@ function renderSettingsPage(overrides: Partial<SettingsPageProps> = {}) {
 }
 
 describe("SettingsPage local data reset", () => {
+  it("clears its reset notification timer on unmount", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const { unmount } = renderSettingsPage();
+      fireEvent.click(screen.getByRole("button", { name: "Reset WhisperTube data" }));
+      await act(async () => fireEvent.click(screen.getByRole("button", { name: "Delete permanently" })));
+      // Flush jsdom/React's zero-delay housekeeping, not the notification.
+      act(() => vi.advanceTimersByTime(0));
+      expect(vi.getTimerCount()).toBe(1);
+      unmount();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("does not schedule a notification when clipboard completes after unmount", async () => {
+    const previous = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+    let resolve!: () => void;
+    const writeText = vi.fn().mockReturnValue(new Promise<void>((done) => { resolve = done; }));
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const { unmount } = renderSettingsPage();
+      fireEvent.click(screen.getByRole("button", { name: "Choose cookies.txt" }));
+      fireEvent.click(screen.getAllByRole("button", { name: "Copy link" })[0]);
+      expect(writeText).toHaveBeenCalledOnce();
+      unmount();
+      await act(async () => resolve());
+      act(() => vi.advanceTimersByTime(0));
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+      if (previous) Object.defineProperty(navigator, "clipboard", previous);
+      else Reflect.deleteProperty(navigator, "clipboard");
+    }
+  });
   it("requires explicit confirmation, keeps data on cancel, and surfaces reset failures", async () => {
     const onResetUserData = vi.fn().mockResolvedValue(undefined);
 

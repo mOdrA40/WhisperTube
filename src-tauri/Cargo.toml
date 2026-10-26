@@ -11,6 +11,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# Reuse dependencies already present in the application graph for release gates.
+serde_json = "1"
+sha2 = "0.10"
 
 [dependencies]
 tauri = { version = "2", features = [] }

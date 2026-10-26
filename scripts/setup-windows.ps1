@@ -11,8 +11,8 @@ $CpuTransactionId = [guid]::NewGuid().ToString("N")
 $StagingCpu = Join-Path $Runtime (".cpu-staging-" + $CpuTransactionId)
 $CpuBackup = Join-Path $Runtime (".cpu-backup-" + $CpuTransactionId)
 
-$YtDlpVersion = "2026.08.19"
-$YtDlpSha256 = "66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c0562af101dd3e7a"
+$YtDlpVersion = "2026.10.21"
+$YtDlpSha256 = "33121d192d706e62f684a06f80918e3f3a8ba52ac3a65213b6951c39c7d9f555"
 $FfmpegVersion = "9.0.1"
 $FfmpegSha256 = "fec81ae03971d9dd4be3ebe02e263bd2ec1d789483f931bdba5f5715e65da2e9"
 $WhisperVersion = "v1.9.2"

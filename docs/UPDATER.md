@@ -10,11 +10,12 @@ embedded updater public key before installation.
    src-tauri/tauri.conf.json, and src-tauri/Cargo.toml.
 2. Commit the versioned application changes on the intended release branch,
    normally main.
-3. Push a new application tag such as v0.1.0.
-4. build-application-bundles.yml builds the native bundles directly and
-   collects checksums and updater signatures. Tests and lint run locally before
-   pushing; there is no separate CI test/lint quality gate. dependency-audit.yml
-   runs npm/Cargo audits on dependency-file changes independently of release jobs.
+3. Push a new `vX.Y.Z` application tag matching all three version manifests. Never reuse an existing tag.
+4. Run frontend/Rust checks and dependency audits locally before pushing.
+   build-application-bundles.yml builds the native bundles and collects
+   checksums and updater signatures. A hash-verified real CPU inference check
+   must pass before artifacts are collected. There are no separate CI audit or
+   quality-gate workflows.
 5. The workflow validates that the tag version matches all three version
    files, generates latest.json, and publishes the GitHub Release.
 6. The application checks the updater endpoint, presents the available update,

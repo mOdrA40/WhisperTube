@@ -12,12 +12,35 @@ pub fn available_memory_mb() -> u64 {
 }
 
 pub fn available_disk_bytes(path: &Path) -> Option<u64> {
+    let path = existing_disk_path(path).ok()?;
     let disks = Disks::new_with_refreshed_list();
     let mounts = disks
         .iter()
         .map(|disk| disk.mount_point().to_path_buf())
         .collect::<Vec<_>>();
-    matching_mount_index(path, &mounts).map(|index| disks[index].available_space())
+    matching_mount_index(&path, &mounts).map(|index| disks[index].available_space())
+}
+
+// Capacity belongs to the filesystem reached by the OS, including linked
+// ancestors. Future files/directories use their nearest existing ancestor.
+fn existing_disk_path(path: &Path) -> std::io::Result<PathBuf> {
+    let absolute = std::path::absolute(path)?;
+    for ancestor in absolute.ancestors() {
+        match std::fs::canonicalize(ancestor) {
+            Ok(path) => return Ok(path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // A dangling link is not an output that can be created here.
+                if std::fs::symlink_metadata(ancestor).is_ok_and(|meta| meta.is_symlink()) {
+                    return Err(error);
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "Storage ancestor tidak ditemukan",
+    ))
 }
 
 // Comparison only: keep the original path for all filesystem operations.
@@ -71,13 +94,7 @@ pub fn require_disk_allocations(allocations: &[(&Path, u64)], purpose: &str) -> 
         .iter()
         .map(|disk| disk.mount_point().to_path_buf())
         .collect::<Vec<_>>();
-    let mut required_by_disk = vec![0u64; disks.len()];
-
-    for (path, required) in allocations {
-        let index = matching_mount_index(path, &mounts)
-            .ok_or_else(|| "Ruang disk tersedia tidak dapat diperiksa.".to_string())?;
-        required_by_disk[index] = required_by_disk[index].saturating_add(*required);
-    }
+    let required_by_disk = disk_allocations_by_mount(allocations, &mounts)?;
 
     for (index, required) in required_by_disk.into_iter().enumerate() {
         if required == 0 {
@@ -94,6 +111,21 @@ pub fn require_disk_allocations(allocations: &[(&Path, u64)], purpose: &str) -> 
         }
     }
     Ok(())
+}
+
+fn disk_allocations_by_mount(
+    allocations: &[(&Path, u64)],
+    mounts: &[PathBuf],
+) -> Result<Vec<u64>, String> {
+    let mut required_by_disk = vec![0u64; mounts.len()];
+    for (path, required) in allocations {
+        let resolved = existing_disk_path(path)
+            .map_err(|error| format!("Gagal menentukan filesystem tujuan: {error}"))?;
+        let index = matching_mount_index(&resolved, mounts)
+            .ok_or_else(|| "Ruang disk tersedia tidak dapat diperiksa.".to_string())?;
+        required_by_disk[index] = required_by_disk[index].saturating_add(*required);
+    }
+    Ok(required_by_disk)
 }
 
 pub fn require_memory(required: u64, purpose: &str) -> Result<(), String> {
@@ -125,6 +157,69 @@ pub fn require_disk(path: &Path, required: u64, purpose: &str) -> Result<(), Str
 mod tests {
     use super::matching_mount_index;
     use std::path::PathBuf;
+
+    #[cfg(windows)]
+    #[test]
+    fn disk_identity_resolves_junctions_before_mount_selection() {
+        use std::fs;
+        let root = std::env::temp_dir().join(format!("disk-junction-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("volume")).unwrap();
+        let volume = fs::canonicalize(root.join("volume")).unwrap();
+        let alias = root.join("alias");
+        let output = std::process::Command::new("pwsh")
+            .args(["-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference='Stop'; New-Item -ItemType Junction -Path $env:WHISPERTUBE_JUNCTION_PATH -Target $env:WHISPERTUBE_JUNCTION_TARGET | Out-Null"])
+            .env("WHISPERTUBE_JUNCTION_PATH", &alias)
+            // New-Item stores a verbatim \\?\ target as an invalid junction.
+            // Use its normal Win32 spelling; compare the resolved identity below.
+            .env("WHISPERTUBE_JUNCTION_TARGET", root.join("volume"))
+            .output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(fs::canonicalize(&alias).unwrap(), volume);
+        let future = alias.join("future/audio.wav");
+        assert_eq!(super::existing_disk_path(&future).unwrap(), volume);
+        assert_eq!(
+            super::disk_allocations_by_mount(
+                &[(&future, 7), (&volume.join("model.bin"), 9)],
+                &[fs::canonicalize(&root).unwrap(), volume],
+            )
+            .unwrap(),
+            vec![0, 16]
+        );
+        assert_eq!(
+            fs::canonicalize(&root).unwrap().parent(),
+            Some(fs::canonicalize(std::env::temp_dir()).unwrap().as_path())
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn disk_identity_resolves_linked_ancestors_and_groups_future_allocations() {
+        use std::{fs, os::unix::fs::symlink};
+        let root = std::env::temp_dir().join(format!("disk-alias-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("volume")).unwrap();
+        let canonical_root = fs::canonicalize(&root).unwrap();
+        let volume = canonical_root.join("volume");
+        let alias = root.join("alias");
+        symlink(&volume, &alias).unwrap();
+        let future = alias.join("new/job/audio.wav");
+        assert_eq!(super::existing_disk_path(&future).unwrap(), volume);
+        assert_eq!(
+            super::disk_allocations_by_mount(
+                &[(&future, 11), (&volume.join("model.bin"), 13)],
+                &[canonical_root, volume.clone()],
+            )
+            .unwrap(),
+            vec![0, 24]
+        );
+        symlink(root.join("absent"), root.join("broken")).unwrap();
+        assert!(super::existing_disk_path(&root.join("broken/file")).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[cfg(windows)]
     #[test]

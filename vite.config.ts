@@ -11,8 +11,10 @@ export default defineConfig({
       ignored: ["**/src-tauri/**", "**/skills/**"]
     }
   },
-  envPrefix: ["VITE_", "TAURI_"],
+  envPrefix: ["VITE_", "TAURI_ENV_"],
   test: {
     environment: "jsdom",
+    css: true,
+    setupFiles: ["./src/test/setup.ts"],
   },
 });

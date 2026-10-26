@@ -3,7 +3,7 @@ use std::{
     io,
     ops::{Deref, DerefMut},
     process::{Child, Command, ExitStatus},
-    sync::{Mutex, OnceLock},
+    sync::{Mutex, OnceLock, RwLock},
     time::Duration,
 };
 
@@ -32,6 +32,11 @@ impl Owner {
 }
 
 static REGISTRY: OnceLock<Mutex<Registry>> = OnceLock::new();
+// Slow OS process creation must not block polling/cancellation of children
+// already registered. Shutdown takes this gate exclusively after closing
+// admission, so in-flight spawns are registered (or cleaned up) before its kill
+// snapshot and no untracked child survives shutdown's return.
+static SPAWN_GATE: RwLock<()> = RwLock::new(());
 fn registry() -> &'static Mutex<Registry> {
     REGISTRY.get_or_init(|| Mutex::new(Registry::default()))
 }
@@ -39,6 +44,7 @@ fn registry() -> &'static Mutex<Registry> {
 pub struct OwnedChild {
     child: Child,
     reaped: bool,
+    registered: bool,
     owner: Owner,
 }
 
@@ -62,7 +68,10 @@ impl OwnedChild {
             // that are not their current stdout/stderr handles.
             self.owner.terminate();
             self.reaped = true;
-            registry.children.remove(&self.owner.pid);
+            if self.registered {
+                registry.children.remove(&self.owner.pid);
+                self.registered = false;
+            }
         }
         Ok(status)
     }
@@ -155,7 +164,7 @@ impl Drop for OwnedChild {
             }
         }
         // Closing the Windows job also removes descendants after normal exit.
-        if !self.reaped {
+        if !self.reaped && self.registered {
             registry()
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -166,14 +175,29 @@ impl Drop for OwnedChild {
 }
 
 pub fn spawn(command: &mut Command) -> io::Result<OwnedChild> {
-    // Shutdown and spawn share a lock: no child can appear after the shutdown
-    // snapshot, including a helper whose cancellation flag was just reset.
-    let mut registry = registry()
+    spawn_inner(command, || {})
+}
+
+fn check_admission() -> io::Result<()> {
+    let registry = registry()
         .lock()
         .map_err(|_| io::Error::other("Tracker proses terkunci."))?;
     if registry.shutting_down {
-        return Err(io::Error::other("Aplikasi sedang ditutup."));
+        Err(io::Error::other("Aplikasi sedang ditutup."))
+    } else {
+        Ok(())
     }
+}
+
+fn spawn_inner(command: &mut Command, before_create: impl FnOnce()) -> io::Result<OwnedChild> {
+    // Reject late work without waiting behind shutdown's exclusive gate.
+    check_admission()?;
+    let _inflight = SPAWN_GATE
+        .read()
+        .map_err(|_| io::Error::other("Koordinasi spawn proses terkunci."))?;
+    // Shutdown could have closed admission while this spawn waited for the gate.
+    check_admission()?;
+    before_create();
     super::hide_console(command);
     #[cfg(windows)]
     let job = {
@@ -198,20 +222,58 @@ pub fn spawn(command: &mut Command) -> io::Result<OwnedChild> {
         #[cfg(windows)]
         job,
     };
-    registry.children.insert(child.id(), owner.clone());
-    Ok(OwnedChild {
+    let mut owned = OwnedChild {
         child,
         owner,
         reaped: false,
-    })
+        registered: false,
+    };
+    // Establish RAII ownership before this fallible lock acquisition. Admission
+    // may now be closed, but shutdown still waits for our shared gate and must
+    // include this child in its subsequent snapshot.
+    let mut registry = registry()
+        .lock()
+        .map_err(|_| io::Error::other("Tracker proses terkunci."))?;
+    registry.children.insert(owned.id(), owned.owner.clone());
+    owned.registered = true;
+    Ok(owned)
 }
 
 pub fn shutdown() {
+    // Never wait for SPAWN_GATE while holding the registry mutex: pending
+    // spawns need that mutex to finish registration before releasing the gate.
+    registry()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .shutting_down = true;
+    let _exclusive = SPAWN_GATE.write().unwrap_or_else(|error| {
+        eprintln!("WhisperTube: koordinasi spawn poisoned saat shutdown.");
+        error.into_inner()
+    });
     let mut registry = registry().lock().unwrap_or_else(|e| e.into_inner());
     registry.shutting_down = true;
     for owner in registry.children.values() {
         owner.terminate();
     }
+}
+
+#[cfg(test)]
+pub(super) fn spawn_paused_for_test(
+    command: &mut Command,
+    ready: &std::sync::Barrier,
+    release: &std::sync::Barrier,
+) -> io::Result<OwnedChild> {
+    spawn_inner(command, || {
+        ready.wait();
+        release.wait();
+    })
+}
+
+#[cfg(test)]
+pub(super) fn admission_closed_for_test() -> bool {
+    registry()
+        .try_lock()
+        .is_ok_and(|registry| registry.shutting_down)
 }
 
 #[cfg(windows)]

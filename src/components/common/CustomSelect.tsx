@@ -37,6 +37,7 @@ export function CustomSelect({
   const [highlightedIndex, setHighlightedIndex] = useState<number>(-1);
   const containerRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
   const shouldScrollHighlightedRef = useRef(false);
   const wasOpenRef = useRef(false);
   const previousOptionsRef = useRef(options);
@@ -93,12 +94,16 @@ export function CustomSelect({
 
   // Scroll highlighted into view
   useEffect(() => {
-    if (isOpen && shouldScrollHighlightedRef.current && listRef.current && highlightedIndex >= 0) {
+    if (isOpen && shouldScrollHighlightedRef.current && listRef.current && scrollRef.current && highlightedIndex >= 0) {
       const el = listRef.current.children[highlightedIndex] as HTMLElement | undefined;
       if (el) {
-        const list = listRef.current;
-        const top = el.offsetTop;
-        const bottom = top + el.offsetHeight;
+        const list = scrollRef.current;
+        // Rectangles share viewport coordinates even when the positioned
+        // ancestor differs from the element that owns overflow scrolling.
+        const viewport = list.getBoundingClientRect();
+        const option = el.getBoundingClientRect();
+        const top = option.top - viewport.top - list.clientTop + list.scrollTop;
+        const bottom = top + option.height;
         if (top < list.scrollTop) list.scrollTop = top;
         else if (bottom > list.scrollTop + list.clientHeight) list.scrollTop = bottom - list.clientHeight;
       }
@@ -258,7 +263,7 @@ export function CustomSelect({
       </button>
 
       {isOpen && (
-        <div className="custom-select-popover">
+        <div ref={scrollRef} className="custom-select-popover">
           <ul
             ref={listRef}
             id={listboxId}

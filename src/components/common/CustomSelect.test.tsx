@@ -4,7 +4,7 @@ import { useState } from "react";
 import { CustomSelect } from "./CustomSelect";
 
 describe("CustomSelect", () => {
-  afterEach(() => cleanup());
+  afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
   beforeEach(() => {
     Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
@@ -97,5 +97,35 @@ describe("CustomSelect", () => {
     fireEvent.keyDown(trigger, { key: "Enter" });
 
     expect(onChange).toHaveBeenCalledWith("cpu");
+  });
+
+  it.each(["0", "10"])("scrolls the overflow owner for initial value %s and keyboard navigation", (value) => {
+    // jsdom has no layout. Supply viewport geometry while exercising the real
+    // DOM/ref owner and scroll algorithm, including scrolling back upward.
+    vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
+      if (this.classList.contains("custom-select-popover")) return new DOMRect(0, 100, 100, 40);
+      if (this.getAttribute("role") === "option") {
+        const index = Array.from(this.parentElement!.children).indexOf(this);
+        const owner = this.closest(".custom-select-popover")!;
+        return new DOMRect(0, 100 + index * 20 - owner.scrollTop, 100, 20);
+      }
+      return new DOMRect();
+    });
+    vi.spyOn(Element.prototype, "clientHeight", "get").mockImplementation(function (this: Element) {
+      return this.classList.contains("custom-select-popover") ? 40 : 400;
+    });
+    render(<CustomSelect value={value} options={Array.from({ length: 12 }, (_, index) => ({
+      value: String(index), label: `Device ${index}`,
+    }))} onChange={vi.fn()} ariaLabel="Device" />);
+    const trigger = screen.getByRole("combobox");
+    fireEvent.click(trigger);
+    const list = screen.getByRole("listbox");
+    const owner = list.parentElement!;
+    expect(owner.scrollTop).toBe(value === "10" ? 180 : 0);
+    fireEvent.keyDown(trigger, { key: "End" });
+    expect(owner.scrollTop).toBe(200);
+    expect(list.scrollTop).toBe(0);
+    fireEvent.keyDown(trigger, { key: "Home" });
+    expect(owner.scrollTop).toBe(0);
   });
 });

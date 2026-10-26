@@ -192,7 +192,9 @@ export function useWhisperTube() {
       if (startedAt !== null) setTranscriptionElapsedMs(performance.now() - startedAt);
     };
     updateElapsed();
-    const timer = window.setInterval(updateElapsed, 250);
+    // The display has whole-second precision; faster ticks only rerender the
+    // application without changing the visible timer.
+    const timer = window.setInterval(updateElapsed, 1000);
     return () => window.clearInterval(timer);
   }, [busy, transcriptionTimerActive]);
 
@@ -301,6 +303,22 @@ export function useWhisperTube() {
 
   useEffect(() => {
     let disposed = false;
+    const listeners: Array<() => void> = [];
+    const release = (unlisten: () => void) => {
+      try { unlisten(); }
+      catch (cause) { console.warn("WhisperTube event cleanup failed.", cause); }
+    };
+    const ownSubscription = (subscription: Promise<() => void>) => {
+      void subscription.then((unlisten) => {
+        if (disposed) release(unlisten);
+        else listeners.push(unlisten);
+      }, (cause) => {
+        console.warn("WhisperTube event subscription failed.", cause);
+        if (!disposed) setError(friendlyError(cause));
+      });
+    };
+    // An effect replay shares the first in-flight refresh. Its error still
+    // belongs to the hook even after that initiating effect has cleaned up.
     refreshSystem().catch((cause) => setError(friendlyError(cause)));
     checkForAppUpdate()
       .then((update) => {
@@ -312,7 +330,8 @@ export function useWhisperTube() {
         // Update checks are best-effort on startup. The Settings action reports manual failures.
       });
 
-    const unlistenProgress = subscribeToProgress((payload) => {
+    ownSubscription(subscribeToProgress((payload) => {
+      if (disposed) return;
       if (payload.stage === "transcribing" && transcriptionStartedAtRef.current === null) {
         transcriptionStartedAtRef.current = performance.now();
         setTranscriptionElapsedMs(0);
@@ -322,28 +341,28 @@ export function useWhisperTube() {
       setNetworkSpeedBytesPerSecond(
         payload.stage === "downloading" ? payload.networkBytesPerSecond : null,
       );
-    });
-    const unlistenModel = subscribeToModelDownload((payload) => {
+    }));
+    ownSubscription(subscribeToModelDownload((payload) => {
+      if (disposed) return;
       setDownloadingModel((previous) => ({ ...previous, [payload.id]: payload }));
       setNetworkSpeedBytesPerSecond(payload.bytesPerSecond);
-    });
-    const unlistenCuda = subscribeToCudaDownload((payload) => {
+    }));
+    ownSubscription(subscribeToCudaDownload((payload) => {
+      if (disposed) return;
       setCudaDownloadPercent(payload.percent);
       setNetworkSpeedBytesPerSecond(payload.bytesPerSecond);
-    });
-    const unlistenAccelerator = subscribeToAcceleratorDownload((payload) => {
+    }));
+    ownSubscription(subscribeToAcceleratorDownload((payload) => {
+      if (disposed) return;
       setAcceleratorDownloadPercent(payload.percent);
       setNetworkSpeedBytesPerSecond(payload.bytesPerSecond);
-    });
+    }));
 
     return () => {
       disposed = true;
       appUpdateCheckRequest.current += 1;
       void disposeAppUpdate();
-      unlistenProgress.then((unlisten) => unlisten());
-      unlistenModel.then((unlisten) => unlisten());
-      unlistenCuda.then((unlisten) => unlisten());
-      unlistenAccelerator.then((unlisten) => unlisten());
+      for (const unlisten of listeners) release(unlisten);
     };
   }, [refreshSystem]);
 

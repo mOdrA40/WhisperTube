@@ -1335,7 +1335,6 @@ input:focus-visible,
   flex: 1;
   min-width: 0;
   border: 0;
-  outline: 0;
   background: none;
   color: #ffffff;
   font-size: 12px;

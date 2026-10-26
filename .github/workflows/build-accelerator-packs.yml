@@ -64,6 +64,7 @@ jobs:
           work="$RUNNER_TEMP/whisper.cpp"
           stage="$RUNNER_TEMP/$PACKAGE_NAME"
           node "$GITHUB_WORKSPACE/scripts/test-distribution-config.mjs"
+          node --test "$GITHUB_WORKSPACE/scripts/test-runtime-loadpaths.mjs"
           git clone --depth 1 --branch "$WHISPER_VERSION" https://github.com/ggml-org/whisper.cpp.git "$work"
           actual_commit="$(git -C "$work" rev-parse HEAD)"
           if [ "$actual_commit" != "$WHISPER_COMMIT" ]; then

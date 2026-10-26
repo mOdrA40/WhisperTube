@@ -2,6 +2,9 @@ import { ControlsCard } from "./ControlsCard";
 import { ProgressCard } from "./ProgressCard";
 import { SourceCard } from "./SourceCard";
 import { TranscriptCard } from "./TranscriptCard";
+import { useState } from "react";
+import { useI18n } from "../../i18n";
+import { WhisperTubeLogo } from "../common/WhisperTubeLogo";
 import type {
   AppTab,
   AcceleratorInfo,
@@ -135,9 +138,14 @@ export function TranscribePage({
   onRevealAudio,
   onSearchChange,
 }: TranscribePageProps) {
+  const { t } = useI18n();
+  const [configurationExpanded, setConfigurationExpanded] = useState(false);
+  const reading = Boolean(result && !busy);
+  const componentSetupActive = Object.keys(downloadingModel).length > 0 || installingCuda || installingAccelerator !== null;
+  const configurationVisible = configurationExpanded || componentSetupActive;
   return (
-    <div className="transcribe-layout-grid">
-      <section className="transcribe-main-stream">
+    <div className={`transcribe-workspace ${reading ? "is-reading" : busy ? "is-processing" : "is-preparing"}`}>
+      <div className="source-workspace">
         <SourceCard
           url={url}
           busy={busy || operationActive}
@@ -151,6 +159,18 @@ export function TranscribePage({
           onClear={onClear}
           onOpenSettings={() => onTabChange("settings")}
         />
+      </div>
+      <section className="transcribe-main-stream" aria-label={t("workspace.document")}>
+        {!busy && !result && <div className="workspace-empty">
+          <WhisperTubeLogo size={56} />
+          <h2>{t("workspace.emptyTitle")}</h2>
+          <p>{t("workspace.emptyHint")}</p>
+          <ol className="workspace-steps">
+            <li><span>1</span>{t("source.checkVideo")}</li>
+            <li><span>2</span>{t("controls.title")}</li>
+            <li><span>3</span>{t("controls.transcribe")}</li>
+          </ol>
+        </div>}
         {busy && <ProgressCard progress={progress} selectedModel={selectedModel} backend={backend} networkSpeedBytesPerSecond={networkSpeedBytesPerSecond} transcriptionElapsedMs={transcriptionElapsedMs} onCancel={onCancelTranscription} />}
         {result && !busy && (
           <TranscriptCard
@@ -169,6 +189,12 @@ export function TranscribePage({
       </section>
 
       <aside className="transcribe-sidebar-stream">
+        {(reading || busy) && <button type="button" className="configuration-toggle secondary-button"
+          aria-expanded={configurationVisible} aria-controls="transcription-configuration" disabled={componentSetupActive}
+          onClick={() => setConfigurationExpanded((expanded) => !expanded)}>
+          {t(componentSetupActive ? "workspace.componentSetup" : configurationExpanded ? "workspace.hideConfiguration" : "workspace.showConfiguration")}
+        </button>}
+        <div id="transcription-configuration" className="configuration-body" hidden={(reading || busy) && !configurationVisible}>
         <ControlsCard
           models={models}
           modelId={modelId}
@@ -206,6 +232,7 @@ export function TranscribePage({
           onCancelAccelerator={onCancelAccelerator}
           onStart={onStart}
         />
+        </div>
       </aside>
     </div>
   );

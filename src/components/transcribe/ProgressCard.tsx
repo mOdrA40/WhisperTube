@@ -1,4 +1,9 @@
-import { Activity, CircleStop, Gauge, LoaderCircle, Timer, Wifi } from "lucide-react";
+import { PulseIcon } from "@phosphor-icons/react/dist/csr/Pulse";
+import { StopCircleIcon } from "@phosphor-icons/react/dist/csr/StopCircle";
+import { GaugeIcon } from "@phosphor-icons/react/dist/csr/Gauge";
+import { CircleNotchIcon } from "@phosphor-icons/react/dist/csr/CircleNotch";
+import { TimerIcon } from "@phosphor-icons/react/dist/csr/Timer";
+import { WifiHighIcon } from "@phosphor-icons/react/dist/csr/WifiHigh";
 import { getProgressMessage, getProgressStageLabel, useI18n } from "../../i18n";
 import { formatBytes, formatElapsedDuration } from "../../lib/format";
 import type { BackendChoice, ModelInfo, ProgressPayload } from "../../types";
@@ -15,7 +20,7 @@ type ProgressCardProps = {
 export function ProgressCard({ progress, selectedModel, backend, networkSpeedBytesPerSecond, transcriptionElapsedMs, onCancel }: ProgressCardProps) {
   const { t } = useI18n();
   const percent = Math.max(0, Math.min(100, progress.percent));
-  const actualBackend = progress.backend ?? (backend === "auto" ? null : backend);
+  const actualBackend = progress.backend;
   const networkSpeed = networkSpeedBytesPerSecond ?? progress.networkBytesPerSecond;
 
   return (
@@ -23,9 +28,9 @@ export function ProgressCard({ progress, selectedModel, backend, networkSpeedByt
       <div className="progress-header">
         <div>
           <span className="eyebrow">
-            <LoaderCircle className="spin" size={15} /> {t("progress.processing")}
+            <CircleNotchIcon aria-hidden="true" className="spin" size={15} /> {t("progress.processing")}
           </span>
-          <h3>{getProgressStageLabel(progress.stage, t)}</h3>
+          <h2>{getProgressStageLabel(progress.stage, t)}</h2>
           <p aria-live="polite" aria-atomic="true">
             {getProgressMessage(progress, backend, t)}
           </p>
@@ -38,30 +43,30 @@ export function ProgressCard({ progress, selectedModel, backend, networkSpeedByt
           )}
           <div className="progress-metrics">
             <div className="progress-metric" title={t("progress.cpuUsageNote")}>
-              <Activity size={13} />
+              <PulseIcon aria-hidden="true" size={13} />
               <span>{t("progress.cpuUsage")}</span>
               <strong>{formatUsage(progress.cpuUsagePercent, t("progress.unavailable"))}</strong>
             </div>
             <div className="progress-metric">
-              <Gauge size={13} />
+              <GaugeIcon aria-hidden="true" size={13} />
               <span>{t("progress.gpuUsage")}</span>
               <strong>{formatUsage(progress.gpuUsagePercent, t("progress.unavailable"))}</strong>
             </div>
             {networkSpeed !== null && (
               <div className="progress-metric network-metric">
-                <Wifi size={13} />
+                <WifiHighIcon aria-hidden="true" size={13} />
                 <span>{t("progress.networkSpeed")}</span>
                 <strong>{formatBytes(networkSpeed)}/s</strong>
               </div>
             )}
             <div className="progress-metric">
-              <Timer size={13} />
+              <TimerIcon aria-hidden="true" size={13} />
               <span>{t("progress.elapsedTime")}</span>
               <strong>{formatElapsedDuration(transcriptionElapsedMs)}</strong>
             </div>
           </div>
         </div>
-        <strong>{Math.round(progress.percent)}%</strong>
+        <strong>{Math.round(percent)}%</strong>
       </div>
 
       <div
@@ -77,10 +82,10 @@ export function ProgressCard({ progress, selectedModel, backend, networkSpeedByt
 
       <div className="progress-footer">
         <span>
-          {selectedModel?.label} • {actualBackend ? actualBackend.toUpperCase() : t("progress.autoBackend")}
+          {selectedModel?.label} • {actualBackend ? actualBackend.toUpperCase() : t("workspace.pendingBackend")}
         </span>
         <button type="button" className="danger-ghost" onClick={onCancel}>
-          <CircleStop size={16} /> {t("progress.cancel")}
+          <StopCircleIcon aria-hidden="true" size={16} /> {t("progress.cancel")}
         </button>
       </div>
     </div>

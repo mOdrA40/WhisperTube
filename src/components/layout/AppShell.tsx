@@ -1,12 +1,10 @@
 import type { ReactNode } from "react";
-import {
-  Cpu,
-  History,
-  LockKeyhole,
-  Settings2,
-  Video,
-  Zap,
-} from "lucide-react";
+import { CpuIcon } from "@phosphor-icons/react/dist/csr/Cpu";
+import { ClockCounterClockwiseIcon } from "@phosphor-icons/react/dist/csr/ClockCounterClockwise";
+import { LockSimpleIcon } from "@phosphor-icons/react/dist/csr/LockSimple";
+import { SlidersHorizontalIcon } from "@phosphor-icons/react/dist/csr/SlidersHorizontal";
+import { VideoCameraIcon } from "@phosphor-icons/react/dist/csr/VideoCamera";
+import { LightningIcon } from "@phosphor-icons/react/dist/csr/Lightning";
 import type { AppTab, SystemStatus } from "../../types";
 import { useI18n } from "../../i18n";
 import { WhisperTubeLogo } from "../common/WhisperTubeLogo";
@@ -44,12 +42,10 @@ export function AppShell({
     <div className="app-window-shell">
       <WindowTitleBar />
       <div className={`app-shell ${customTitleBar ? "app-shell-with-window-titlebar" : ""}`}>
-        <div className="ambient-backdrop" aria-hidden="true" />
-
       <aside className="sidebar">
         <div className="brand-header">
           <div className="brand-logo-wrap">
-            <WhisperTubeLogo size={36} />
+            <WhisperTubeLogo size={32} />
           </div>
           <div className="brand-identity">
             <strong className="brand-name">WhisperTube</strong>
@@ -60,14 +56,14 @@ export function AppShell({
         <nav className="nav-container">
           <NavItem
             active={tab === "transcribe"}
-            icon={<Video size={18} />}
+            icon={<VideoCameraIcon aria-hidden="true" size={18} />}
             onClick={() => onTabChange("transcribe")}
           >
             {t("nav.transcribe")}
           </NavItem>
           <NavItem
             active={tab === "history"}
-            icon={<History size={18} />}
+            icon={<ClockCounterClockwiseIcon aria-hidden="true" size={18} />}
             badge={historyCount > 0 ? historyCount : undefined}
             onClick={() => onTabChange("history")}
           >
@@ -75,7 +71,7 @@ export function AppShell({
           </NavItem>
           <NavItem
             active={tab === "settings"}
-            icon={<Settings2 size={18} />}
+            icon={<SlidersHorizontalIcon aria-hidden="true" size={18} />}
             onClick={() => onTabChange("settings")}
           >
             {t("nav.settings")}
@@ -93,11 +89,11 @@ export function AppShell({
 
             <div className="hardware-spec">
               <div className="hardware-icon-box">
-                {system?.gpuName ? <Zap size={14} className={system.nvidia ? "nvidia-icon" : undefined} /> : <Cpu size={14} />}
+                {system?.gpuName ? <LightningIcon aria-hidden="true" size={14} className={system.nvidia ? "nvidia-icon" : undefined} /> : <CpuIcon aria-hidden="true" size={14} />}
               </div>
               <div className="hardware-details">
                 <span className="hardware-name">
-                  {system?.gpuName ?? `${system?.cpuThreads ?? "—"} ${t("hardware.cpuThreads")}`}
+                  <span title={system?.gpuName ?? undefined}>{system?.gpuName ?? `${system?.cpuThreads ?? "—"} ${t("hardware.cpuThreads")}`}</span>
                 </span>
                 <span className="hardware-sub">
                   {system?.nvidia && system.gpuMemoryMb
@@ -120,7 +116,7 @@ export function AppShell({
           </div>
 
           <div className="privacy-chip">
-            <LockKeyhole size={14} className="privacy-icon" />
+            <LockSimpleIcon aria-hidden="true" size={14} className="privacy-icon" />
             <span className="privacy-text">{t("app.localInference")}</span>
           </div>
         </header>

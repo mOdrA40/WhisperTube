@@ -68,6 +68,32 @@ CPU telemetry is sampled on Windows/Linux. macOS currently reports an aggregate
 moving average from ps and can lag the activity; the UI tooltip makes that
 distinction explicit. A model's large resident memory is not, by itself, a leak.
 
+## Isolated interface review
+
+Run `npm run dev`, then open
+`http://localhost:1420/src/test/ui-preview.html?scene=ready&lang=en`.
+This explicit development entry renders the real presentation components with
+synthetic data. It imports no application service or operation-owning hook,
+does not read native user storage, and is excluded from the production entry.
+Native window buttons are unavailable in this browser fixture.
+
+Useful scenes include `empty`, `ready`, `inspecting`, `cancelling`,
+`missing-model`, `warning`, `downloading`, `converting`, `transcribing`,
+`finalizing`, `resume`, `resume-download`, `retry`, `checking-resume`,
+`result`, `search-empty`, `audio-only`, `duration-mismatch`, `model-download`,
+`history`, `history-empty`, `history-failure`, `settings`, `settings-update`,
+`settings-model-download`, `accelerator-download`, `cuda-download`,
+`driver-warning`, `runtime-missing`, `error`, `result-model-download`,
+`update`, `update-installing`, `update-error`, `settings-update-installing`,
+`settings-update-error`, `settings-update-checking`, and `settings-update-current`.
+Set `lang` to `en`, `id`, or `zh`. Light/dark appearance
+follows `prefers-color-scheme`; use browser emulation when reviewing both.
+
+Check 1440×900, 1280×820, 1024×768, and 760×650, including keyboard navigation,
+200% zoom, reduced motion, long device names and paths, and dialog focus.
+Fixtures intentionally cannot validate inference, file operations, native
+window controls, or update installation; verify those separately in Tauri.
+
 ## Node.js, Rust, or Cargo is not recognized
 
 For an installed app, YouTube also needs Node.js 22+ or Deno 2.3+ on PATH;

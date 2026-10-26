@@ -83,6 +83,8 @@ describe("HistoryPage", () => {
     fireEvent.click(screen.getByRole("button", { name: /^Delete$/ }));
     await waitFor(() => expect(props.onDeleteFiles).toHaveBeenCalled());
     expect(screen.getByRole("dialog")).toBeTruthy();
+    expect(screen.getByRole("alert").textContent).toContain("Database locked");
+    expect((screen.getByRole("radio", { name: "Audio only — keep transcripts and history" }) as HTMLInputElement).checked).toBe(true);
   });
   it("never sends more than 100 history IDs for bulk deletion", async () => {
     const onDelete = vi.fn().mockResolvedValue(undefined);

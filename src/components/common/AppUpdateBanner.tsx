@@ -1,4 +1,6 @@
-import { Download, LoaderCircle, X } from "lucide-react";
+import { DownloadSimpleIcon } from "@phosphor-icons/react/dist/csr/DownloadSimple";
+import { CircleNotchIcon } from "@phosphor-icons/react/dist/csr/CircleNotch";
+import { XIcon } from "@phosphor-icons/react/dist/csr/X";
 import { useI18n } from "../../i18n";
 import type { AppUpdateInfo, AppUpdateProgress, AppUpdateStatus } from "../../types";
 
@@ -28,7 +30,7 @@ export function AppUpdateBanner({
   return (
     <section className="update-banner update-toast" role="status" aria-live="polite">
       <div className="update-banner-icon" aria-hidden="true">
-        <Download size={18} />
+        <DownloadSimpleIcon aria-hidden="true" size={18} />
       </div>
       <div className="update-banner-content">
         <div className="update-banner-title-row">
@@ -60,7 +62,7 @@ export function AppUpdateBanner({
           onClick={onInstall}
           disabled={busy || installing}
         >
-          {installing ? <LoaderCircle className="spin" size={15} /> : <Download size={15} />}
+          {installing ? <CircleNotchIcon aria-hidden="true" className="spin" size={15} /> : <DownloadSimpleIcon aria-hidden="true" size={15} />}
           {installing ? `${percent}%` : t("update.install")}
         </button>
         {!installing && (
@@ -71,7 +73,7 @@ export function AppUpdateBanner({
             title={t("update.dismiss")}
             aria-label={t("update.dismiss")}
           >
-            <X size={16} />
+            <XIcon size={16} />
           </button>
         )}
       </div>

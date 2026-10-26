@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { HardDrive, Trash2 } from "lucide-react";
+import { HardDriveIcon } from "@phosphor-icons/react/dist/csr/HardDrive";
+import { TrashIcon } from "@phosphor-icons/react/dist/csr/Trash";
 import { useI18n } from "../../i18n";
 import { formatBytes, friendlyError } from "../../lib/format";
 import type { JobCacheEntry } from "../../types";
@@ -20,8 +21,8 @@ export function JobCachePanel({ items, busy, onLoad, onDiscard }: Props) {
     try { await onDiscard(id); setPendingId(null); }
     catch (cause) { setError(friendlyError(cause)); }
   }
-  return <section className="card settings-card">
-    <div className="card-title-row"><h3>{t("settings.jobCacheTitle")}</h3><HardDrive size={20} /></div>
+  return <section id="settings-storage" className="card settings-card job-cache-settings-card">
+    <div className="card-title-row"><h2>{t("settings.jobCacheTitle")}</h2><HardDriveIcon aria-hidden="true" size={20} /></div>
     <p className="settings-note">{t("settings.jobCacheHint")}</p>
     <button type="button" className="secondary-button" disabled={busy} onClick={() => { setError(null); void onLoad(); }}>
       {t("settings.jobCacheLoad")}
@@ -35,7 +36,7 @@ export function JobCachePanel({ items, busy, onLoad, onDiscard }: Props) {
         <button type="button" className="secondary-button" disabled={busy} onClick={() => { setPendingId(null); setError(null); }}>{t("settings.jobCacheKeep")}</button>
         <button type="button" className="danger-ghost" disabled={busy} onClick={() => void discard(item.id)}>{t("settings.jobCacheDelete")}</button>
       </div> : <button type="button" className="danger-ghost" disabled={busy} onClick={() => { setPendingId(item.id); setError(null); }}>
-        <Trash2 size={14} /> {t("settings.jobCacheDiscard")}
+        <TrashIcon aria-hidden="true" size={14} /> {t("settings.jobCacheDiscard")}
       </button>}
     </article>)}</div>
     {error && <p role="alert" className="bad-text">{error}</p>}

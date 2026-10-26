@@ -1,0 +1,101 @@
+/* Document library: rows share one surface rather than becoming separate cards. */
+.history-card { padding: 20px 24px; }
+.section-heading { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding-bottom: 20px; border-bottom: 1px solid var(--separator); }
+.section-heading .eyebrow { display: none; }
+.section-heading h2 { font-size: 16px; font-weight: 600; }
+.section-heading p { font-size: 13px; color: var(--secondary); line-height: 1.5; margin-top: 6px; }
+.history-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
+.history-list { display: flex; flex-direction: column; gap: 6px; padding-top: 8px; }
+.history-item { display: grid; grid-template-columns: 20px minmax(0, 1fr) 34px 34px; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid var(--separator); }
+.history-item:last-child { border-bottom: 0; }
+/* Keep selection inside each row, including when the entire list is selected. */
+.history-item.selected { background: color-mix(in srgb, var(--accent) 9%, var(--surface)); box-shadow: inset 2px 0 var(--accent); border-bottom-color: transparent; border-radius: var(--radius-control); }
+.history-checkbox { width: 16px; height: 16px; accent-color: var(--accent); margin: 0; }
+.history-item-main { display: grid; grid-template-columns: 28px minmax(0, 1fr) auto 16px; align-items: center; gap: 12px; min-width: 0; padding: 6px 0; border: 0; text-align: left; background: transparent; }
+.history-item-main:hover:not(:disabled) .history-copy strong { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+.history-icon { color: var(--secondary); display: grid; place-items: center; }
+.history-copy { min-width: 0; }
+.history-copy strong { display: block; color: var(--text); font-size: 14px; font-weight: 500; line-height: 1.45; overflow-wrap: anywhere; }
+.history-copy span { display: block; margin-top: 4px; font-size: 12px; line-height: 1.5; color: var(--secondary); }
+.history-meta { color: var(--secondary); text-align: right; font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.history-meta span { display: block; margin: 4px 0; }
+.history-item > .history-delete-button { color: var(--secondary); }
+.history-item > .history-delete-button:hover:not(:disabled), .history-item > .history-delete-button:focus-visible { color: var(--danger); }
+.history-selection-bar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; background: var(--subtle); border: 1px solid var(--separator); padding: 10px 12px; margin: 12px 0 4px; border-radius: 8px; font-size: 13px; }
+.history-load-more { align-self: center; margin: 18px 0 0; }
+.empty-state { min-height: 320px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 32px; text-align: center; color: var(--secondary); }
+.empty-state h3 { color: var(--text); font-size: 18px; }
+.empty-state p { font-size: 13px; line-height: 1.6; max-width: 380px; }
+.empty-state .primary-button { margin-top: 8px; }
+
+/* Settings follow the user's tasks; dialogs remain mounted with their owning component. */
+.settings-layout { display: grid; grid-template-columns: 156px minmax(0, 1fr); align-items: start; gap: 28px; }
+.settings-section-nav { display: flex; flex-direction: column; gap: 4px; position: sticky; top: 60px; }
+.settings-section-nav a { display: block; color: var(--secondary); text-decoration: none; font-size: 13px; line-height: 1.5; padding: 8px 10px; border-radius: 7px; }
+.settings-section-nav a:hover, .settings-section-nav a:focus-visible { background: var(--accent-soft); color: var(--accent); }
+.settings-grid { display: flex; flex-direction: column; gap: 20px; min-width: 0; max-width: 900px; }
+.settings-card { padding: 22px 24px; scroll-margin-top: 60px; }
+.settings-card > .card-title-row { padding: 0 0 16px; margin-bottom: 16px; }
+.settings-card > .card-title-row .eyebrow { display: none; }
+.settings-card > .field-label { margin-top: 16px; }
+.settings-card .custom-select-container { max-width: 360px; }
+.settings-card:has(.custom-select-container.open) { position: relative; z-index: 60; }
+.settings-card .info-box { align-items: center; }
+.settings-inline-toolbar { display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: 16px; font-size: 13px; color: var(--secondary); line-height: 1.6; }
+.settings-update-copy { display: flex; flex-direction: column; min-width: 0; flex: 1 1 240px; gap: 6px; }
+.settings-update-copy strong { color: var(--accent); font-weight: 600; }
+.settings-inline-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.settings-update-progress { color: var(--accent); font-variant-numeric: tabular-nums; }
+.status-table { display: flex; flex-direction: column; }
+.status-table > div { display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; padding: 11px 0; border-bottom: 1px solid var(--separator); font-size: 13px; line-height: 1.5; }
+.status-table > div:first-child { padding-top: 0; }
+.status-table > div:last-child { border-bottom: 0; }
+.status-table span { color: var(--secondary); }
+.status-table strong { text-align: right; font-weight: 500; min-width: 0; max-width: 65%; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.status-device-list { display: grid; gap: 7px; }
+.status-table .status-device { color: var(--text); }
+.hardware-settings-card > .secondary-button, .runtime-settings-card > .secondary-button { margin-top: 16px; }
+.hardware-settings-card > .info-box { flex-wrap: wrap; }
+.hardware-settings-card > .info-box > span { flex: 1 1 200px; }
+.hardware-settings-card .model-download-block-reason, .hardware-settings-card .settings-note { flex-basis: 100%; }
+.model-manager { display: flex; flex-direction: column; }
+.model-manage-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 16px 0; border-bottom: 1px solid var(--separator); }
+.model-manage-row:first-child { padding-top: 0; }
+.model-manage-row:last-child { padding-bottom: 0; border-bottom: 0; }
+.model-manage-row > div:first-child { min-width: 0; flex: 1; }
+.model-manage-row strong { display: block; font-size: 14px; font-weight: 600; }
+.model-manage-row span { display: block; margin-top: 5px; font-size: 12px; line-height: 1.6; color: var(--secondary); }
+.model-download-status { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; max-width: 45%; }
+.model-download-status small { font-size: 12px; color: var(--secondary); }
+.danger-settings-card { background: transparent; }
+.danger-settings-card > .danger-button { width: auto; margin-top: 16px; }
+.job-cache-list { display: grid; margin-top: 16px; }
+.job-cache-item { display: grid; gap: 8px; padding: 16px 0; border-top: 1px solid var(--separator); overflow-wrap: anywhere; }
+.job-cache-item strong { font-weight: 500; font-size: 14px; }
+.job-cache-item small { color: var(--secondary); font-size: 12px; font-variant-numeric: tabular-nums; }
+.job-cache-item .danger-ghost { justify-self: start; }
+.job-cache-item > div > p { font-size: 13px; line-height: 1.6; color: var(--secondary); margin-bottom: 8px; }
+.job-cache-item > div > button { margin-right: 8px; }
+
+@media (max-width: 1200px) {
+  .settings-layout { grid-template-columns: minmax(0, 1fr); gap: 20px; }
+  .settings-section-nav { position: static; flex-direction: row; flex-wrap: wrap; gap: 4px 8px; border-bottom: 1px solid var(--separator); padding-bottom: 14px; }
+  .settings-section-nav a { padding: 6px 8px; font-size: 12px; }
+  .settings-grid { max-width: none; }
+}
+@media (max-width: 850px) {
+  .history-card, .settings-card { padding: 18px; }
+  .section-heading { align-items: flex-start; }
+  .history-item-main { grid-template-columns: minmax(0, 1fr) auto; }
+  .history-icon, .history-item-main > svg { display: none; }
+}
+@media (max-width: 560px) {
+  .section-heading { flex-direction: column; gap: 12px; }
+  .history-actions { justify-content: flex-start; }
+  .history-item { gap: 6px; }
+  .history-item-main { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .history-meta { display: flex; gap: 8px; text-align: left; }
+  .status-table > div { gap: 12px; }
+  .model-manage-row { gap: 12px; flex-wrap: wrap; }
+  .model-download-status { max-width: 100%; justify-content: flex-start; }
+}

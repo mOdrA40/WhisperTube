@@ -1,15 +1,11 @@
-import {
-  AlertCircle,
-  AudioWaveform,
-  Check,
-  CircleStop,
-  Cpu,
-  Download,
-  Gauge,
-  LoaderCircle,
-  Sparkles,
-  Zap,
-} from "lucide-react";
+import { WarningCircleIcon } from "@phosphor-icons/react/dist/csr/WarningCircle";
+import { WaveformIcon } from "@phosphor-icons/react/dist/csr/Waveform";
+import { CheckIcon } from "@phosphor-icons/react/dist/csr/Check";
+import { StopCircleIcon } from "@phosphor-icons/react/dist/csr/StopCircle";
+import { DownloadSimpleIcon } from "@phosphor-icons/react/dist/csr/DownloadSimple";
+import { GaugeIcon } from "@phosphor-icons/react/dist/csr/Gauge";
+import { CircleNotchIcon } from "@phosphor-icons/react/dist/csr/CircleNotch";
+import { InfoIcon } from "@phosphor-icons/react/dist/csr/Info";
 import { formatBytes, formatMemory } from "../../lib/format";
 import type { AcceleratorInfo, BackendChoice, ModelDownloadPayload, ModelInfo, SystemStatus, TranscriptionResumeStage } from "../../types";
 import { getAcceleratorCopy, getModelCopy, getRecommendation, useI18n } from "../../i18n";
@@ -135,11 +131,12 @@ export function ControlsCard({
       <div className="card-title-row">
         <div>
           <span className="eyebrow">{t("controls.eyebrow")}</span>
-          <h3>{t("controls.title")}</h3>
+          <h2>{t("controls.title")}</h2>
         </div>
-        <Gauge size={20} />
+        <GaugeIcon aria-hidden="true" size={20} />
       </div>
 
+      <div className="control-scroll-body">
       <label className="field-label">{t("controls.model")}</label>
       <div className="model-options" role="radiogroup" aria-label={t("controls.model")}>
         {models.map((model) => {
@@ -180,7 +177,7 @@ export function ControlsCard({
                 </span>
               </div>
               <div className="model-state">
-                {model.installed ? <Check size={15} /> : `${model.sizeMb} MB`}
+                {model.installed ? <><CheckIcon aria-hidden="true" size={15} /><span className="sr-only">{t("settings.installed")}</span></> : `${model.sizeMb} MB`}
               </div>
             </button>
           );
@@ -194,7 +191,7 @@ export function ControlsCard({
           onClick={() => onDownloadModel(selectedModel.id)}
           disabled={selectedDownload !== undefined || modelDownloadActive || controlsDisabled || modelDownloadBlocked}
         >
-          {selectedDownload !== undefined ? <LoaderCircle className="spin" size={17} /> : <Download size={17} />}
+          {selectedDownload !== undefined ? <CircleNotchIcon aria-hidden="true" className="spin" size={17} /> : <DownloadSimpleIcon aria-hidden="true" size={17} />}
           {selectedDownload !== undefined
             ? (
               <span className="download-progress-copy">
@@ -212,14 +209,60 @@ export function ControlsCard({
       )}
       {selectedDownload !== undefined && (
         <button type="button" className="danger-ghost" onClick={onCancelModel}>
-          <CircleStop size={16} /> {t("controls.cancelModel")}
+          <StopCircleIcon aria-hidden="true" size={16} /> {t("controls.cancelModel")}
         </button>
       )}
 
+      <div className="divider" />
+
+      <label className="field-label">{t("controls.language")}</label>
+      <CustomSelect
+        value={language}
+        options={languageOptions}
+        onChange={onLanguageChange}
+        disabled={controlsDisabled}
+        ariaLabel={t("controls.language")}
+      />
+
+      <label className="field-label">{t("controls.computeBackend")}</label>
+      <CustomSelect
+        value={computeTargetId}
+        options={computeTargetOptions}
+        onChange={onComputeTargetChange}
+        disabled={controlsDisabled}
+        ariaLabel={t("controls.computeBackend")}
+      />
+      <div className="recommendation">
+        <InfoIcon aria-hidden="true" size={14} /> {getRecommendation(system, t)}
+      </div>
+
+      <label className="toggle-row" htmlFor="keep-audio-toggle">
+        <div>
+          <strong>{t("controls.keepAudio")}</strong>
+          <span>{t("controls.keepAudioHint")}</span>
+        </div>
+        <input
+          id="keep-audio-toggle"
+          type="checkbox"
+          checked={keepAudio}
+          onChange={(event) => onKeepAudioChange(event.target.checked)}
+          disabled={controlsDisabled}
+        />
+      </label>
+
+      {((system?.cudaSupported && system.nvidia && !system.cudaEngine) ||
+        accelerators.some((item) => item.supported && item.downloadable && !item.installed)) && (
+      <details className="accelerator-disclosure" open={installingCuda || installingAccelerator !== null || undefined}>
+        <summary>{t("workspace.acceleration")}
+          {((system?.cudaSupported && system.nvidia && !system.cudaEngine && !system.cudaInstallable) ||
+            accelerators.some((item) => item.supported && item.downloadable && !item.installed && item.backend === "vulkan" && !item.memorySufficient)) &&
+            <span>{t("workspace.attention")}</span>}
+        </summary>
+        <div className="accelerator-disclosure-body">
       {system?.cudaSupported && system.nvidia && !system.cudaEngine && (
         <>
           <div className="info-box">
-            <Sparkles size={16} />
+            <InfoIcon aria-hidden="true" size={16} />
             <span>{t("controls.nvidiaHint")}</span>
           </div>
           {!system.cudaInstallable && (
@@ -235,7 +278,7 @@ export function ControlsCard({
             onClick={onInstallCuda}
             disabled={!system.cudaInstallable || installingCuda || installingAccelerator !== null || modelDownloadActive || controlsDisabled}
           >
-            {installingCuda ? <LoaderCircle className="spin" size={17} /> : <Download size={17} />}
+            {installingCuda ? <CircleNotchIcon aria-hidden="true" className="spin" size={17} /> : <DownloadSimpleIcon aria-hidden="true" size={17} />}
             {installingCuda
               ? (
                 <span className="download-progress-copy">
@@ -247,7 +290,7 @@ export function ControlsCard({
           </button>
           {installingCuda && (
             <button type="button" className="danger-ghost" onClick={onCancelCuda}>
-              <CircleStop size={16} /> {t("controls.cancelCuda")}
+              <StopCircleIcon aria-hidden="true" size={16} /> {t("controls.cancelCuda")}
             </button>
           )}
         </>
@@ -261,7 +304,7 @@ export function ControlsCard({
           return (
           <div key={accelerator.id}>
             <div className="info-box">
-              <Download size={16} />
+              <DownloadSimpleIcon aria-hidden="true" size={16} />
               <span>{t("controls.acceleratorInfo", { description: getAcceleratorCopy(accelerator, t).description })}</span>
             </div>
             <button
@@ -274,7 +317,7 @@ export function ControlsCard({
               }
               disabled={memoryBlocked || installingAccelerator !== null || installingCuda || modelDownloadActive || controlsDisabled}
             >
-              {installingAccelerator === accelerator.backend ? <LoaderCircle className="spin" size={17} /> : <Download size={17} />}
+              {installingAccelerator === accelerator.backend ? <CircleNotchIcon aria-hidden="true" className="spin" size={17} /> : <DownloadSimpleIcon aria-hidden="true" size={17} />}
               {installingAccelerator === accelerator.backend
                 ? (
                   <span className="download-progress-copy">
@@ -304,63 +347,32 @@ export function ControlsCard({
             )}
             {installingAccelerator === accelerator.backend && (
               <button type="button" className="danger-ghost" onClick={onCancelAccelerator}>
-                <CircleStop size={16} /> {t("controls.cancelAccelerator")}
+                <StopCircleIcon aria-hidden="true" size={16} /> {t("controls.cancelAccelerator")}
               </button>
             )}
           </div>
           );
         })}
 
-      <div className="divider" />
-
-      <label className="field-label">{t("controls.language")}</label>
-      <CustomSelect
-        value={language}
-        options={languageOptions}
-        onChange={onLanguageChange}
-        disabled={controlsDisabled}
-        ariaLabel={t("controls.language")}
-      />
-
-      <label className="field-label">{t("controls.computeBackend")}</label>
-      <CustomSelect
-        value={computeTargetId}
-        options={computeTargetOptions}
-        onChange={onComputeTargetChange}
-        disabled={controlsDisabled}
-        ariaLabel={t("controls.computeBackend")}
-      />
-      <div className="recommendation">
-        <Sparkles size={14} /> {getRecommendation(system, t)}
-      </div>
-
-      <label className="toggle-row" htmlFor="keep-audio-toggle">
-        <div>
-          <strong>{t("controls.keepAudio")}</strong>
-          <span>{t("controls.keepAudioHint")}</span>
         </div>
-        <input
-          id="keep-audio-toggle"
-          type="checkbox"
-          checked={keepAudio}
-          onChange={(event) => onKeepAudioChange(event.target.checked)}
-          disabled={controlsDisabled}
-        />
-      </label>
+      </details>
+      )}
 
+      </div>
+      <div className="control-action-footer">
       {vramWarning && (
         <p className="setup-hint">
-          <AlertCircle size={14} /> {vramWarning}
+          <WarningCircleIcon aria-hidden="true" size={14} /> {vramWarning}
         </p>
       )}
       {acceleratorWarning && (
         <p className="setup-hint">
-          <AlertCircle size={14} /> {acceleratorWarning}
+          <WarningCircleIcon aria-hidden="true" size={14} /> {acceleratorWarning}
         </p>
       )}
 
       <button type="button" className="start-button" disabled={!canStart} onClick={onStart}>
-        {checkingResume ? <LoaderCircle className="spin" size={18} /> : <AudioWaveform size={18} />}
+        {checkingResume ? <CircleNotchIcon aria-hidden="true" className="spin" size={18} /> : <WaveformIcon aria-hidden="true" size={18} />}
         {t(checkingResume ? "controls.checkingResume" : resumeStage ? "controls.resume" : retryAvailable ? "controls.retry" : "controls.transcribe")}
       </button>
       {resumeStage && <p className="setup-hint" role="status">
@@ -372,9 +384,10 @@ export function ControlsCard({
 
       {!runtimeReady && system && (
         <p className="setup-hint">
-          <AlertCircle size={14} /> {t("controls.runtimeHint")}
+          <WarningCircleIcon aria-hidden="true" size={14} /> {t("controls.runtimeHint")}
         </p>
       )}
+      </div>
     </div>
   );
 }

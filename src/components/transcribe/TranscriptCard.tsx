@@ -1,4 +1,9 @@
-import { Check, Copy, FileText, FolderOpen, Play, Search, Timer } from "lucide-react";
+import { CheckIcon } from "@phosphor-icons/react/dist/csr/Check";
+import { CopyIcon } from "@phosphor-icons/react/dist/csr/Copy";
+import { FileTextIcon } from "@phosphor-icons/react/dist/csr/FileText";
+import { FolderOpenIcon } from "@phosphor-icons/react/dist/csr/FolderOpen";
+import { MagnifyingGlassIcon } from "@phosphor-icons/react/dist/csr/MagnifyingGlass";
+import { TimerIcon } from "@phosphor-icons/react/dist/csr/Timer";
 import { Virtuoso } from "react-virtuoso";
 import type { Segment, TranscriptResult } from "../../types";
 import { getModelLabel, useI18n } from "../../i18n";
@@ -38,23 +43,23 @@ export function TranscriptCard({
       <div className="transcript-toolbar">
         <div>
           <span className="success-label">
-            <Check size={14} /> {t(!transcriptAvailable ? "history.savedFiles" : durationMismatch ? "transcript.availableAudioComplete" : "transcript.complete")}
+            <CheckIcon aria-hidden="true" size={14} /> {t(!transcriptAvailable ? "history.savedFiles" : durationMismatch ? "transcript.availableAudioComplete" : "transcript.complete")}
           </span>
-          <h3>{result.title}</h3>
+          <h2>{result.title}</h2>
           <p>
             {result.language.toUpperCase()} • {getModelLabel(result.model, t)} • {result.backend.toUpperCase()}
             {transcriptionElapsedMs !== null && (
-              <> • <Timer size={13} aria-hidden="true" /> {t("transcript.processingTime")}: {formatElapsedDuration(transcriptionElapsedMs)}</>
+              <> • <TimerIcon size={13} aria-hidden="true" /> {t("transcript.processingTime")}: {formatElapsedDuration(transcriptionElapsedMs)}</>
             )}
           </p>
         </div>
         <div className="toolbar-actions">
           <button type="button" className="secondary-button" onClick={onCopy} disabled={operationActive || !transcriptAvailable}>
-            {copied ? <Check size={16} /> : <Copy size={16} />}
+            {copied ? <CheckIcon aria-hidden="true" size={16} /> : <CopyIcon aria-hidden="true" size={16} />}
             {copied ? t("transcript.copied") : t("transcript.copy")}
           </button>
           <button type="button" className="secondary-button" onClick={() => onExport("txt")} disabled={operationActive || !transcriptAvailable}>
-            <FileText size={16} /> TXT
+            <FileTextIcon aria-hidden="true" size={16} /> TXT
           </button>
           <button type="button" className="secondary-button" onClick={() => onExport("srt")} disabled={operationActive || !transcriptAvailable}>
             SRT
@@ -64,7 +69,7 @@ export function TranscriptCard({
           </button>
           {result.audioPath && (
             <button type="button" className="secondary-button" onClick={onRevealAudio} disabled={operationActive}>
-              <FolderOpen size={16} /> {t("transcript.showAudio")}
+              <FolderOpenIcon aria-hidden="true" size={16} /> {t("transcript.showAudio")}
             </button>
           )}
         </div>
@@ -80,7 +85,7 @@ export function TranscriptCard({
       )}
 
       <div className="transcript-search">
-        <Search size={16} />
+        <MagnifyingGlassIcon aria-hidden="true" size={16} />
         <input
           value={searchQuery}
           disabled={!transcriptAvailable}
@@ -99,7 +104,7 @@ export function TranscriptCard({
             itemContent={(_, segment) => (
               <div className="segment">
                 <div className="timestamp">
-                  <Play size={11} fill="currentColor" /> {segment.from}
+                  {segment.from}
                 </div>
                 <p>{segment.text}</p>
               </div>

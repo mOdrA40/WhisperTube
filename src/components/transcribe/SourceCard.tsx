@@ -1,13 +1,10 @@
-import {
-  Check,
-  ChevronRight,
-  CircleStop,
-  Clock3,
-  LoaderCircle,
-  Search,
-  X,
-  Video,
-} from "lucide-react";
+import { CheckIcon } from "@phosphor-icons/react/dist/csr/Check";
+import { CaretRightIcon } from "@phosphor-icons/react/dist/csr/CaretRight";
+import { StopCircleIcon } from "@phosphor-icons/react/dist/csr/StopCircle";
+import { ClockIcon } from "@phosphor-icons/react/dist/csr/Clock";
+import { CircleNotchIcon } from "@phosphor-icons/react/dist/csr/CircleNotch";
+import { XIcon } from "@phosphor-icons/react/dist/csr/X";
+import { VideoCameraIcon } from "@phosphor-icons/react/dist/csr/VideoCamera";
 import type { VideoMetadata } from "../../types";
 import { formatDuration } from "../../lib/format";
 import { useI18n } from "../../i18n";
@@ -45,22 +42,15 @@ export function SourceCard({
     <div className="source-card-section">
       <div className="card source-hero-card">
         <div className="hero-content">
-          <div className="hero-badge">
-            <Video size={14} className="hero-badge-icon" />
-            <span className="hero-badge-text">{t("source.badge")}</span>
-          </div>
-
-          <h2 className="hero-headline">{t("source.headline")}</h2>
-          <p className="hero-description">
-            {t("source.description")}
-          </p>
+          <label className="source-label" htmlFor="source-url">{t("source.urlLabel")}</label>
 
           <div className="url-input-container">
             <div className="url-input-box">
               <div className="url-input-icon">
-                <Video size={19} className="yt-red-icon" />
+                <VideoCameraIcon aria-hidden="true" size={19} className="yt-red-icon" />
               </div>
               <input
+                id="source-url"
                 type="text"
                 value={url}
                 onChange={(event) => onUrlChange(event.target.value)}
@@ -79,7 +69,7 @@ export function SourceCard({
                   title={t("source.clear")}
                   aria-label={t("source.clear")}
                 >
-                  <X size={16} />
+                  <XIcon size={16} />
                 </button>
               )}
             </div>
@@ -92,12 +82,12 @@ export function SourceCard({
             >
               {inspecting ? (
                 <>
-                  {cancelling ? <LoaderCircle className="spin" size={17} /> : <CircleStop size={17} />}
+                  {cancelling ? <CircleNotchIcon aria-hidden="true" className="spin" size={17} /> : <StopCircleIcon aria-hidden="true" size={17} />}
                   <span>{cancelling ? t("source.cancelling") : t("source.cancelChecking")}</span>
                 </>
               ) : (
                 <>
-                  <Search size={17} />
+                  <CaretRightIcon aria-hidden="true" size={17} />
                   <span>{t("source.checkVideo")}</span>
                 </>
               )}
@@ -108,7 +98,7 @@ export function SourceCard({
             <span>{t("source.memberHint")}</span>
             <button type="button" className="settings-link-btn" onClick={onOpenSettings}>
               <span>{t("source.access")}</span>
-              <ChevronRight size={14} />
+              <CaretRightIcon aria-hidden="true" size={14} />
             </button>
           </div>
         </div>
@@ -135,13 +125,13 @@ function VideoPreviewCard({ metadata }: { metadata: VideoMetadata }) {
               referrerPolicy="no-referrer"
             />
             <div className="preview-duration-pill">
-              <Clock3 size={12} />
+              <ClockIcon aria-hidden="true" size={12} />
               <span>{formatDuration(metadata.duration)}</span>
             </div>
           </div>
         ) : (
           <div className="preview-thumb-placeholder">
-            <Video size={36} className="yt-placeholder-icon" />
+            <VideoCameraIcon aria-hidden="true" size={36} className="yt-placeholder-icon" />
           </div>
         )}
       </div>
@@ -149,7 +139,7 @@ function VideoPreviewCard({ metadata }: { metadata: VideoMetadata }) {
       <div className="preview-details-col">
         <div className="preview-status-strip">
           <span className="status-badge-ready">
-            <Check size={13} />
+            <CheckIcon aria-hidden="true" size={13} />
             <span>{t("source.videoReady")}</span>
           </span>
           {metadata.source && (
@@ -160,9 +150,9 @@ function VideoPreviewCard({ metadata }: { metadata: VideoMetadata }) {
           )}
         </div>
 
-        <h3 className="preview-video-title" title={metadata.title}>
+        <h2 className="preview-video-title" title={metadata.title}>
           {metadata.title}
-        </h3>
+        </h2>
 
         <div className="preview-channel-row">
           <span className="preview-channel-name">{metadata.channel}</span>

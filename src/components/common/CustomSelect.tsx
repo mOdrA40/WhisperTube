@@ -1,5 +1,6 @@
-import { useState, useRef, useEffect, useLayoutEffect, useId, type ReactNode } from "react";
-import { Check, ChevronDown } from "lucide-react";
+import { useState, useRef, useEffect, useLayoutEffect, useId, type CSSProperties, type ReactNode } from "react";
+import { CheckIcon } from "@phosphor-icons/react/dist/csr/Check";
+import { CaretDownIcon } from "@phosphor-icons/react/dist/csr/CaretDown";
 
 export type SelectOption = {
   value: string;
@@ -38,6 +39,8 @@ export function CustomSelect({
   const containerRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const [popoverStyle, setPopoverStyle] = useState<CSSProperties>();
   const shouldScrollHighlightedRef = useRef(false);
   const wasOpenRef = useRef(false);
   const previousOptionsRef = useRef(options);
@@ -48,6 +51,40 @@ export function CustomSelect({
   const listboxId = `${selectId}-listbox`;
 
   const selectedOption = options.find((opt) => opt.value === value);
+
+  // A fixed popover escapes the configuration panel's overflow without moving
+  // the listbox out of its owning keyboard/focus subtree. Keep it in the window
+  // when the scroll container or viewport changes, including text zoom.
+  useLayoutEffect(() => {
+    if (!isOpen) return;
+    const position = () => {
+      const trigger = triggerRef.current;
+      if (!trigger) return;
+      const bounds = trigger.getBoundingClientRect();
+      const gap = 6;
+      const margin = 8;
+      const topMargin = Math.max(margin, (document.querySelector(".window-titlebar")?.getBoundingClientRect().bottom ?? 0) + margin);
+      const below = window.innerHeight - bounds.bottom - gap - margin;
+      const above = bounds.top - gap - topMargin;
+      const opensAbove = below < 200 && above > below;
+      const maxHeight = Math.max(36, Math.min(240, opensAbove ? above : below));
+      const width = Math.min(bounds.width, window.innerWidth - margin * 2);
+      setPopoverStyle({
+        position: "fixed", width, right: "auto",
+        left: Math.max(margin, Math.min(bounds.left, window.innerWidth - width - margin)),
+        top: opensAbove ? "auto" : Math.max(topMargin, bounds.bottom + gap),
+        bottom: opensAbove ? Math.max(margin, window.innerHeight - bounds.top + gap) : "auto",
+        maxHeight,
+      });
+    };
+    position();
+    window.addEventListener("resize", position);
+    window.addEventListener("scroll", position, true);
+    return () => {
+      window.removeEventListener("resize", position);
+      window.removeEventListener("scroll", position, true);
+    };
+  }, [isOpen]);
 
   // Close when clicked outside
   useEffect(() => {
@@ -230,6 +267,7 @@ export function CustomSelect({
       }}
     >
       <button
+        ref={triggerRef}
         type="button"
         role="combobox"
         id={selectId}
@@ -259,11 +297,11 @@ export function CustomSelect({
             <span className="trigger-placeholder">{placeholder}</span>
           )}
         </span>
-        <ChevronDown size={16} className={`chevron-icon ${isOpen ? "rotated" : ""}`} />
+        <CaretDownIcon aria-hidden="true" size={16} className={`chevron-icon ${isOpen ? "rotated" : ""}`} />
       </button>
 
       {isOpen && (
-        <div ref={scrollRef} className="custom-select-popover">
+        <div ref={scrollRef} className="custom-select-popover" style={popoverStyle}>
           <ul
             ref={listRef}
             id={listboxId}
@@ -302,7 +340,7 @@ export function CustomSelect({
 
                   <div className="option-trailing">
                     {option.badge && <span className="option-badge">{option.badge}</span>}
-                    {isSelected && <Check size={14} className="selected-check" />}
+                    {isSelected && <CheckIcon aria-hidden="true" size={14} className="selected-check" />}
                   </div>
                 </li>
               );

@@ -1,4 +1,20 @@
-import { AlertTriangle, Check, CircleStop, Copy, Cpu, Database, Download, ExternalLink, FileKey, HardDrive, KeyRound, Languages, LockKeyhole, LoaderCircle, MonitorCog, RotateCcw, Trash2 } from "lucide-react";
+import { WarningIcon } from "@phosphor-icons/react/dist/csr/Warning";
+import { CheckIcon } from "@phosphor-icons/react/dist/csr/Check";
+import { StopCircleIcon } from "@phosphor-icons/react/dist/csr/StopCircle";
+import { CopyIcon } from "@phosphor-icons/react/dist/csr/Copy";
+import { CpuIcon } from "@phosphor-icons/react/dist/csr/Cpu";
+import { DatabaseIcon } from "@phosphor-icons/react/dist/csr/Database";
+import { DownloadSimpleIcon } from "@phosphor-icons/react/dist/csr/DownloadSimple";
+import { ArrowSquareOutIcon } from "@phosphor-icons/react/dist/csr/ArrowSquareOut";
+import { FileLockIcon } from "@phosphor-icons/react/dist/csr/FileLock";
+import { HardDriveIcon } from "@phosphor-icons/react/dist/csr/HardDrive";
+import { KeyIcon } from "@phosphor-icons/react/dist/csr/Key";
+import { TranslateIcon } from "@phosphor-icons/react/dist/csr/Translate";
+import { LockSimpleIcon } from "@phosphor-icons/react/dist/csr/LockSimple";
+import { CircleNotchIcon } from "@phosphor-icons/react/dist/csr/CircleNotch";
+import { DesktopIcon } from "@phosphor-icons/react/dist/csr/Desktop";
+import { ArrowClockwiseIcon } from "@phosphor-icons/react/dist/csr/ArrowClockwise";
+import { TrashIcon } from "@phosphor-icons/react/dist/csr/Trash";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { formatBytes, formatMemory, friendlyError } from "../../lib/format";
 import { getAcceleratorCopy, getModelCopy, uiLanguageOptions, useI18n } from "../../i18n";
@@ -285,54 +301,41 @@ export function SettingsPage({
   }
 
   return (
-    <div className="settings-grid">
-      <div className="settings-inline-toolbar">
-        <div className="settings-update-copy">
-          <span>{t("update.description")}</span>
-          {appUpdate && appUpdateStatus !== "up-to-date" && (
-            <strong>{t("update.available", { version: appUpdate.version })}</strong>
-          )}
-          {appUpdateError && <small className="settings-error">{appUpdateError}</small>}
-        </div>
-        <div className="settings-inline-actions">
-          <button
-            type="button"
-            className="secondary-button compact"
-            onClick={onCheckForUpdate}
-            disabled={updateChecking || appUpdateStatus === "installing" || busy}
-          >
-            {updateChecking ? <LoaderCircle className="spin" size={15} /> : <RotateCcw size={15} />}
-            {updateChecking ? t("update.checking") : t("update.check")}
-          </button>
-          {appUpdate && appUpdateStatus === "available" && (
-            <button
-              type="button"
-              className="primary-button compact"
-              onClick={onInstallAppUpdate}
-              disabled={busy}
-            >
-              <Download size={15} /> {t("update.install")}
-            </button>
-          )}
-          {appUpdateStatus === "installing" && (
-            <span className="settings-update-progress">
-              {t("update.installing", { percent: Math.round(appUpdateProgress.percent) })}
-            </span>
-          )}
-        </div>
-      </div>
-      <section className="card settings-card settings-access-card">
+    <div className="settings-layout">
+      <nav className="settings-section-nav" aria-label={t("workspace.settingsSections")}>
+        <a href="#settings-general">{t("workspace.general")}</a>
+        <a href="#settings-access">{t("settings.accessTitle")}</a>
+        <a href="#settings-models">{t("settings.modelsTitle")}</a>
+        <a href="#settings-compute">{t("settings.computeTitle")}</a>
+        <a href="#settings-storage">{t("workspace.storage")}</a>
+        <a href="#settings-application">{t("workspace.application")}</a>
+        <a href="#settings-reset">{t("settings.resetDataTitle")}</a>
+      </nav>
+      <div className="settings-grid">
+      <section id="settings-general" className="card settings-card settings-general-card">
+        <div className="card-title-row"><h2>{t("workspace.general")}</h2><TranslateIcon aria-hidden="true" size={20} /></div>
+        <label className="field-label">{t("settings.interfaceLanguage")}</label>
+        <CustomSelect
+          value={uiLanguage}
+          options={interfaceLanguageOptions}
+          onChange={(value) => setUiLanguage(value as typeof uiLanguage)}
+          disabled={busy}
+          ariaLabel={t("settings.interfaceLanguage")}
+        />
+        <p className="settings-note">{t("settings.interfaceLanguageNote")}</p>
+      </section>
+      <section id="settings-access" className="card settings-card settings-access-card">
         <div className="card-title-row">
           <div>
             <span className="eyebrow">{t("settings.eyebrow")}</span>
-            <h3>{t("settings.accessTitle")}</h3>
+            <h2>{t("settings.accessTitle")}</h2>
           </div>
-          <LockKeyhole size={20} />
+          <LockSimpleIcon aria-hidden="true" size={20} />
         </div>
         <label className="field-label">{t("settings.cookiesFile")}</label>
         {cookiesPath ? (
           <div className="info-box">
-            <FileKey size={16} />
+            <FileLockIcon aria-hidden="true" size={16} />
             <span title={cookiesPath}>
               {t("settings.cookiesFileSelected", {
                 file: cookiesPath.split(/[\\/]/).pop() ?? cookiesPath,
@@ -346,7 +349,7 @@ export function SettingsPage({
               title={t("settings.clearCookiesFile")}
               aria-label={t("settings.clearCookiesFile")}
             >
-              <Trash2 size={15} />
+              <TrashIcon aria-hidden="true" size={15} />
             </button>
           </div>
         ) : (
@@ -357,21 +360,12 @@ export function SettingsPage({
               onClick={() => setCookiesDialogOpen(true)}
             disabled={busy}
           >
-            <FileKey size={16} />
+            <FileLockIcon aria-hidden="true" size={16} />
             <span>{t("settings.chooseCookiesFile")}</span>
           </button>
         )}
         <p className="settings-note">{t("settings.cookiesFileNote")}</p>
 
-        <label className="field-label">{t("settings.interfaceLanguage")}</label>
-        <CustomSelect
-          value={uiLanguage}
-          options={interfaceLanguageOptions}
-          onChange={(value) => setUiLanguage(value as typeof uiLanguage)}
-          disabled={busy}
-          ariaLabel={t("settings.interfaceLanguage")}
-        />
-        <p className="settings-note">{t("settings.interfaceLanguageNote")}</p>
       </section>
 
       {cookiesDialogOpen && (
@@ -384,10 +378,11 @@ export function SettingsPage({
             aria-labelledby="cookies-guide-title"
           >
             <div className="cookies-guide-icon" aria-hidden="true">
-              <FileKey size={22} />
+              <FileLockIcon aria-hidden="true" size={22} />
             </div>
             <div className="cookies-guide-content">
               <h3 id="cookies-guide-title">{t("settings.cookiesGuideTitle")}</h3>
+              <div className="dialog-scroll-body">
               <p>{t("settings.cookiesGuideBody")}</p>
               <p className="cookies-guide-extension">{t("settings.cookiesGuideExtension")}</p>
               <div className="cookies-guide-links">
@@ -421,6 +416,7 @@ export function SettingsPage({
                 <li>{t("settings.cookiesGuideStep2")}</li>
                 <li>{t("settings.cookiesGuideStep3")}</li>
               </ol>
+              </div>
               <div className="cookies-guide-actions">
                 <button
                   type="button"
@@ -438,7 +434,7 @@ export function SettingsPage({
                     onSelectCookiesFile();
                   }}
                 >
-                  <FileKey size={15} />
+                  <FileLockIcon aria-hidden="true" size={15} />
                   {t("settings.cookiesGuideContinue")}
                 </button>
               </div>
@@ -464,23 +460,24 @@ export function SettingsPage({
             aria-describedby={resetError ? "data-reset-description data-reset-error" : "data-reset-description"}
           >
             <div className="data-reset-icon" aria-hidden="true">
-              <AlertTriangle size={22} />
+              <WarningIcon aria-hidden="true" size={22} />
             </div>
             <div className="data-reset-content">
               <span className="eyebrow">{t("settings.dataEyebrow")}</span>
               <h3 id="data-reset-title">{t("settings.resetDataDialogTitle")}</h3>
+              <div className="dialog-scroll-body">
               <p id="data-reset-description">{t("settings.resetDataDialogIntro")}</p>
 
               <div className="data-reset-section">
                 <strong className="data-reset-section-title">{t("settings.resetDataWillDelete")}</strong>
                 <div className="data-reset-list">
                   <ResetDataItem
-                    icon={<Database size={16} />}
+                    icon={<DatabaseIcon aria-hidden="true" size={16} />}
                     title={t("settings.resetDataHistory")}
                     detail={t("settings.resetDataHistoryDetail", { count: historyTotalCount })}
                   />
                   <ResetDataItem
-                    icon={<HardDrive size={16} />}
+                    icon={<HardDriveIcon aria-hidden="true" size={16} />}
                     title={t("settings.resetDataModels")}
                     detail={
                       installedModels.length > 0
@@ -489,7 +486,7 @@ export function SettingsPage({
                     }
                   />
                   <ResetDataItem
-                    icon={<HardDrive size={16} />}
+                    icon={<HardDriveIcon aria-hidden="true" size={16} />}
                     title={t("settings.resetDataRuntimes")}
                     detail={
                       system
@@ -500,7 +497,7 @@ export function SettingsPage({
                     }
                   />
                   <ResetDataItem
-                    icon={<KeyRound size={16} />}
+                    icon={<KeyIcon aria-hidden="true" size={16} />}
                     title={t("settings.resetDataAccess")}
                     detail={
                       hasSavedAccessPreference
@@ -513,20 +510,20 @@ export function SettingsPage({
 
               <div className="data-reset-keep">
                 <div className="data-reset-keep-heading">
-                  <Languages size={15} />
+                  <TranslateIcon aria-hidden="true" size={15} />
                   <strong>{t("settings.resetDataWillKeep")}</strong>
                 </div>
                 <p>{t("settings.resetDataKeepDetail")}</p>
               </div>
 
               <div className="data-reset-warning">
-                <AlertTriangle size={15} />
+                <WarningIcon aria-hidden="true" size={15} />
                 <span>{t("settings.resetDataWarning")}</span>
               </div>
 
               {resetError && (
                 <div id="data-reset-error" className="data-reset-error" role="alert">
-                  <AlertTriangle size={15} />
+                  <WarningIcon aria-hidden="true" size={15} />
                   <div>
                     <strong>{t("error.title")}</strong>
                     <p>{resetError}</p>
@@ -534,6 +531,7 @@ export function SettingsPage({
                 </div>
               )}
 
+              </div>
               <div className="data-reset-actions">
                 <button
                   ref={resetCancelRef}
@@ -550,7 +548,7 @@ export function SettingsPage({
                   onClick={() => void handleResetUserData()}
                   disabled={busy || resettingData}
                 >
-                  {resettingData ? <LoaderCircle className="spin" size={16} /> : <Trash2 size={16} />}
+                  {resettingData ? <CircleNotchIcon aria-hidden="true" className="spin" size={16} /> : <TrashIcon aria-hidden="true" size={16} />}
                   {resettingData ? t("settings.resetDataWorking") : t("settings.resetDataConfirmButton")}
                 </button>
               </div>
@@ -576,20 +574,22 @@ export function SettingsPage({
             aria-describedby={modelDeleteError ? "model-delete-description model-delete-error" : "model-delete-description"}
           >
             <div className="model-delete-icon" aria-hidden="true">
-              <AlertTriangle size={22} />
+              <WarningIcon aria-hidden="true" size={22} />
             </div>
             <div className="model-delete-content">
               <h3 id="model-delete-title">{t("settings.deleteModelTitle")}</h3>
+              <div className="dialog-scroll-body">
               <p id="model-delete-description">{t("settings.confirmDeleteModel", { model: getModelCopy(pendingModelDelete, t).label })}</p>
               {modelDeleteError && (
                 <div id="model-delete-error" className="data-reset-error" role="alert">
-                  <AlertTriangle size={15} />
+                  <WarningIcon aria-hidden="true" size={15} />
                   <div>
                     <strong>{t("error.title")}</strong>
                     <p>{modelDeleteError}</p>
                   </div>
                 </div>
               )}
+              </div>
               <div className="model-delete-actions">
                 <button
                   ref={modelDeleteCancelRef}
@@ -606,7 +606,7 @@ export function SettingsPage({
                   onClick={() => void confirmModelDelete()}
                   disabled={busy}
                 >
-                  <Trash2 size={16} /> {t("settings.deleteModelConfirm")}
+                  <TrashIcon aria-hidden="true" size={16} /> {t("settings.deleteModelConfirm")}
                 </button>
               </div>
             </div>
@@ -614,15 +614,89 @@ export function SettingsPage({
         </div>
       )}
 
-      <JobCachePanel items={jobCache} busy={busy} onLoad={onLoadJobCache} onDiscard={onDiscardJobCache} />
 
-      <section className="card settings-card hardware-settings-card">
+
+      <section id="settings-models" className="card settings-card models-settings">
+        <div className="card-title-row">
+          <div>
+            <span className="eyebrow">{t("settings.storageEyebrow")}</span>
+            <h2>{t("settings.modelsTitle")}</h2>
+          </div>
+          <DownloadSimpleIcon aria-hidden="true" size={20} />
+        </div>
+        <div className="model-manager">
+          {models.map((model) => (
+            <div className="model-manage-row" key={model.id}>
+              <div>
+                <strong>{getModelCopy(model, t).label}</strong>
+                <span>
+                  {getModelCopy(model, t).description} • {model.sizeMb} MB • {t("controls.memoryEstimate", { memory: formatMemory(model.vramRequiredMb, t("hardware.notDetected")) })}
+                </span>
+                {modelDownloadBlockReasons[model.id] && (
+                  <small className="model-download-block-reason">{modelDownloadBlockReasons[model.id]}</small>
+                )}
+              </div>
+              {downloadingModel[model.id] ? (
+                <div className="model-download-status">
+                  <span>
+                    {t("controls.downloadingModel", {
+                      percent: Math.round(downloadingModel[model.id].percent),
+                    })}
+                  </span>
+                  <small>
+                    {formatBytes(downloadingModel[model.id].downloadedBytes, t("progress.unknownSize"))} / {downloadingModel[model.id].totalBytes > 0
+                      ? formatBytes(downloadingModel[model.id].totalBytes)
+                      : t("progress.unknownSize")}
+                    {networkSpeedBytesPerSecond !== null && ` • ${formatBytes(networkSpeedBytesPerSecond)}/s`}
+                  </small>
+                  <button
+                    type="button"
+                    className="icon-button danger"
+                    onClick={onCancelModel}
+                    title={t("controls.cancelModel")}
+                    aria-label={t("controls.cancelModel")}
+                  >
+                    <StopCircleIcon aria-hidden="true" size={17} />
+                  </button>
+                </div>
+              ) : model.installed ? (
+                <button
+                  type="button"
+                  className="icon-button danger"
+                  onClick={(event) => {
+                    modelDeleteTriggerRef.current = event.currentTarget;
+                    setModelDeleteError(null);
+                    setPendingModelDelete(model);
+                  }}
+                  disabled={busy || modelDownloadActive || installingCuda || installingAccelerator !== null}
+                  title={t("settings.deleteModel")}
+                  aria-label={t("settings.deleteModel")}
+                >
+                  <TrashIcon aria-hidden="true" size={17} />
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="secondary-button compact"
+                  onClick={() => onDownloadModel(model.id)}
+                  disabled={modelDownloadActive || busy || Boolean(modelDownloadBlockReasons[model.id])}
+                  title={modelDownloadBlockReasons[model.id]}
+                >
+                  <DownloadSimpleIcon aria-hidden="true" size={15} /> {t("settings.download")}
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section id="settings-compute" className="card settings-card hardware-settings-card">
         <div className="card-title-row">
           <div>
             <span className="eyebrow">{t("settings.hardwareEyebrow")}</span>
-            <h3>{t("settings.computeTitle")}</h3>
+            <h2>{t("settings.computeTitle")}</h2>
           </div>
-          <Cpu size={20} />
+          <CpuIcon aria-hidden="true" size={20} />
         </div>
         <div className="status-table">
           <div>
@@ -702,7 +776,7 @@ export function SettingsPage({
         {system?.cudaSupported && system.nvidia ? (
           <>
             <div className="info-box">
-              <Download size={16} />
+              <DownloadSimpleIcon aria-hidden="true" size={16} />
               <span>{t("settings.cudaInfo")}</span>
             </div>
             {!system.cudaInstallable && (
@@ -718,7 +792,7 @@ export function SettingsPage({
               onClick={onInstallCuda}
               disabled={!system.cudaInstallable || installingCuda || installingAccelerator !== null || modelDownloadActive || system.cudaEngine || busy}
             >
-              {installingCuda ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}
+              {installingCuda ? <CircleNotchIcon aria-hidden="true" className="spin" size={16} /> : <DownloadSimpleIcon aria-hidden="true" size={16} />}
               {installingCuda
                 ? (
                   <span className="download-progress-copy">
@@ -732,7 +806,7 @@ export function SettingsPage({
             </button>
             {installingCuda && (
               <button type="button" className="danger-ghost" onClick={onCancelCuda}>
-                <CircleStop size={16} /> {t("settings.cancelCuda")}
+                <StopCircleIcon aria-hidden="true" size={16} /> {t("settings.cancelCuda")}
               </button>
             )}
           </>
@@ -748,7 +822,7 @@ export function SettingsPage({
           const compatibilityUnknown = accelerator.backend === "vulkan" && !accelerator.preflightChecked;
           return (
           <div className="info-box" key={accelerator.id}>
-            <Download size={16} />
+            <DownloadSimpleIcon aria-hidden="true" size={16} />
             <span>
               {copy.label}: {accelerator.installed ? t("settings.acceleratorInstalled") : copy.description}
             </span>
@@ -793,92 +867,59 @@ export function SettingsPage({
         })}
         {installingAccelerator && (
           <button type="button" className="danger-ghost" onClick={onCancelAccelerator}>
-            <CircleStop size={16} /> {t("controls.cancelAccelerator")}
+            <StopCircleIcon aria-hidden="true" size={16} /> {t("controls.cancelAccelerator")}
           </button>
         )}
       </section>
 
-      <section className="card settings-card models-settings">
-        <div className="card-title-row">
-          <div>
-            <span className="eyebrow">{t("settings.storageEyebrow")}</span>
-            <h3>{t("settings.modelsTitle")}</h3>
-          </div>
-          <Download size={20} />
+      <JobCachePanel items={jobCache} busy={busy} onLoad={onLoadJobCache} onDiscard={onDiscardJobCache} />
+
+      <section id="settings-application" className="card settings-card application-settings-card">
+        <div className="card-title-row"><h2>{t("workspace.application")}</h2><DesktopIcon aria-hidden="true" size={20} /></div>
+      <div className="settings-inline-toolbar">
+        <div className="settings-update-copy">
+          <span>{t("update.description")}</span>
+          {appUpdate && appUpdateStatus !== "up-to-date" && (
+            <strong>{t("update.available", { version: appUpdate.version })}</strong>
+          )}
+          {appUpdateError && <small className="settings-error">{appUpdateError}</small>}
         </div>
-        <div className="model-manager">
-          {models.map((model) => (
-            <div className="model-manage-row" key={model.id}>
-              <div>
-                <strong>{getModelCopy(model, t).label}</strong>
-                <span>
-                  {getModelCopy(model, t).description} • {model.sizeMb} MB • {t("controls.memoryEstimate", { memory: formatMemory(model.vramRequiredMb, t("hardware.notDetected")) })}
-                </span>
-                {modelDownloadBlockReasons[model.id] && (
-                  <small className="model-download-block-reason">{modelDownloadBlockReasons[model.id]}</small>
-                )}
-              </div>
-              {downloadingModel[model.id] ? (
-                <div className="model-download-status">
-                  <span>
-                    {t("controls.downloadingModel", {
-                      percent: Math.round(downloadingModel[model.id].percent),
-                    })}
-                  </span>
-                  <small>
-                    {formatBytes(downloadingModel[model.id].downloadedBytes, t("progress.unknownSize"))} / {downloadingModel[model.id].totalBytes > 0
-                      ? formatBytes(downloadingModel[model.id].totalBytes)
-                      : t("progress.unknownSize")}
-                    {networkSpeedBytesPerSecond !== null && ` • ${formatBytes(networkSpeedBytesPerSecond)}/s`}
-                  </small>
-                  <button
-                    type="button"
-                    className="icon-button danger"
-                    onClick={onCancelModel}
-                    title={t("controls.cancelModel")}
-                    aria-label={t("controls.cancelModel")}
-                  >
-                    <CircleStop size={17} />
-                  </button>
-                </div>
-              ) : model.installed ? (
-                <button
-                  type="button"
-                  className="icon-button danger"
-                  onClick={(event) => {
-                    modelDeleteTriggerRef.current = event.currentTarget;
-                    setModelDeleteError(null);
-                    setPendingModelDelete(model);
-                  }}
-                  disabled={busy || modelDownloadActive || installingCuda || installingAccelerator !== null}
-                  title={t("settings.deleteModel")}
-                  aria-label={t("settings.deleteModel")}
-                >
-                  <Trash2 size={17} />
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  className="secondary-button compact"
-                  onClick={() => onDownloadModel(model.id)}
-                  disabled={modelDownloadActive || busy || Boolean(modelDownloadBlockReasons[model.id])}
-                  title={modelDownloadBlockReasons[model.id]}
-                >
-                  <Download size={15} /> {t("settings.download")}
-                </button>
-              )}
-            </div>
-          ))}
+        <div className="settings-inline-actions">
+          <button
+            type="button"
+            className="secondary-button compact"
+            onClick={onCheckForUpdate}
+            disabled={updateChecking || appUpdateStatus === "installing" || busy}
+          >
+            {updateChecking ? <CircleNotchIcon aria-hidden="true" className="spin" size={15} /> : <ArrowClockwiseIcon aria-hidden="true" size={15} />}
+            {updateChecking ? t("update.checking") : t("update.check")}
+          </button>
+          {appUpdate && appUpdateStatus === "available" && (
+            <button
+              type="button"
+              className="primary-button compact"
+              onClick={onInstallAppUpdate}
+              disabled={busy}
+            >
+              <DownloadSimpleIcon aria-hidden="true" size={15} /> {t("update.install")}
+            </button>
+          )}
+          {appUpdateStatus === "installing" && (
+            <span className="settings-update-progress">
+              {t("update.installing", { percent: Math.round(appUpdateProgress.percent) })}
+            </span>
+          )}
         </div>
+      </div>
       </section>
 
       <section className="card settings-card runtime-settings-card">
         <div className="card-title-row">
           <div>
             <span className="eyebrow">{t("settings.runtimeEyebrow")}</span>
-            <h3>{t("settings.externalTitle")}</h3>
+            <h2>{t("settings.externalTitle")}</h2>
           </div>
-          <MonitorCog size={20} />
+          <DesktopIcon aria-hidden="true" size={20} />
         </div>
         <div className="status-table">
           <div>
@@ -901,17 +942,17 @@ export function SettingsPage({
           </div>
         </div>
         <button type="button" className="secondary-button full" onClick={onRefresh} disabled={busy}>
-          <RotateCcw size={16} /> {t("settings.recheck")}
+          <ArrowClockwiseIcon aria-hidden="true" size={16} /> {t("settings.recheck")}
         </button>
       </section>
 
-      <section className="card settings-card danger-settings-card">
+      <section id="settings-reset" className="card settings-card danger-settings-card">
         <div className="card-title-row">
           <div>
             <span className="eyebrow">{t("settings.dataEyebrow")}</span>
-            <h3>{t("settings.resetDataTitle")}</h3>
+            <h2>{t("settings.resetDataTitle")}</h2>
           </div>
-          <Trash2 size={20} />
+          <TrashIcon aria-hidden="true" size={20} />
         </div>
         <p className="settings-note">{t("settings.resetDataDescription")}</p>
         <button
@@ -925,11 +966,12 @@ export function SettingsPage({
           }}
           disabled={busy || resettingData}
         >
-          {resettingData ? <LoaderCircle className="spin" size={16} /> : <Trash2 size={16} />}
+          {resettingData ? <CircleNotchIcon aria-hidden="true" className="spin" size={16} /> : <TrashIcon aria-hidden="true" size={16} />}
           {resettingData ? t("settings.resetDataWorking") : t("settings.resetDataButton")}
         </button>
         {resetComplete && <p className="settings-success">{t("settings.resetDataComplete")}</p>}
       </section>
+      </div>
     </div>
   );
 }
@@ -985,10 +1027,10 @@ function CookieExtensionLink({
       </div>
       <div className="cookies-guide-link-actions">
         <button type="button" className="secondary-button compact" onClick={() => onOpen(url)}>
-          <ExternalLink size={14} /> {openLabel}
+          <ArrowSquareOutIcon aria-hidden="true" size={14} /> {openLabel}
         </button>
         <button type="button" className="secondary-button compact" onClick={() => onCopy(url)}>
-          {copied ? <Check size={14} /> : <Copy size={14} />} {copied ? copiedLabel : copyFailed ? copyFailedLabel : copyLabel}
+          {copied ? <CheckIcon aria-hidden="true" size={14} /> : <CopyIcon aria-hidden="true" size={14} />} {copied ? copiedLabel : copyFailed ? copyFailedLabel : copyLabel}
         </button>
       </div>
     </div>

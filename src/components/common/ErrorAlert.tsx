@@ -1,4 +1,5 @@
-import { AlertCircle, X } from "lucide-react";
+import { WarningCircleIcon } from "@phosphor-icons/react/dist/csr/WarningCircle";
+import { XIcon } from "@phosphor-icons/react/dist/csr/X";
 import { useI18n } from "../../i18n";
 
 type ErrorAlertProps = {
@@ -13,7 +14,7 @@ export function ErrorAlert({ message, onDismiss }: ErrorAlertProps) {
   return (
     <div className="error-alert-banner" role="alert">
       <div className="alert-icon-wrap">
-        <AlertCircle size={18} />
+        <WarningCircleIcon aria-hidden="true" size={18} />
       </div>
       <div className="alert-body">
         <strong className="alert-title">{t("error.title")}</strong>
@@ -26,7 +27,7 @@ export function ErrorAlert({ message, onDismiss }: ErrorAlertProps) {
         title={t("error.dismiss")}
         aria-label={t("error.dismiss")}
       >
-        <X size={16} />
+        <XIcon size={16} />
       </button>
     </div>
   );

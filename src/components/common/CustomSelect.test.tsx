@@ -128,4 +128,27 @@ describe("CustomSelect", () => {
     fireEvent.keyDown(trigger, { key: "Home" });
     expect(owner.scrollTop).toBe(0);
   });
+
+  it("opens above a low trigger, stays below the titlebar, and repositions on resize", () => {
+    let triggerBounds = new DOMRect(window.innerWidth - 160, window.innerHeight - 50, 150, 38);
+    vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
+      if (this.classList.contains("custom-select-trigger")) return triggerBounds;
+      if (this.classList.contains("window-titlebar")) return new DOMRect(0, 0, window.innerWidth, 36);
+      return new DOMRect();
+    });
+    const { container } = render(<><div className="window-titlebar" /><CustomSelect value="auto"
+      options={[{ value: "auto", label: "Automatic" }]} onChange={vi.fn()} ariaLabel="Device" /></>);
+    fireEvent.click(screen.getByRole("combobox"));
+    const popover = container.querySelector<HTMLElement>(".custom-select-popover")!;
+    expect(popover.style.position).toBe("fixed");
+    expect(popover.style.bottom).toBe("56px");
+    expect(popover.style.maxHeight).toBe("240px");
+    triggerBounds = new DOMRect(20, 70, 150, 38);
+    fireEvent(window, new Event("resize"));
+    expect(popover.style.top).toBe("114px");
+    expect(popover.style.bottom).toBe("auto");
+    expect(popover.style.left).toBe("20px");
+    fireEvent.keyDown(screen.getByRole("combobox"), { key: "Escape" });
+    expect(screen.queryByRole("listbox")).toBeNull();
+  });
 });

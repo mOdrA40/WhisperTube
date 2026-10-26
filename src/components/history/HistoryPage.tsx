@@ -1,4 +1,12 @@
-import { AlertTriangle, CheckSquare, ChevronRight, FileText, FolderOpen, History, RotateCcw, Square, Trash2 } from "lucide-react";
+import { WarningIcon } from "@phosphor-icons/react/dist/csr/Warning";
+import { CheckSquareIcon } from "@phosphor-icons/react/dist/csr/CheckSquare";
+import { CaretRightIcon } from "@phosphor-icons/react/dist/csr/CaretRight";
+import { FileTextIcon } from "@phosphor-icons/react/dist/csr/FileText";
+import { FolderOpenIcon } from "@phosphor-icons/react/dist/csr/FolderOpen";
+import { ClockCounterClockwiseIcon } from "@phosphor-icons/react/dist/csr/ClockCounterClockwise";
+import { ArrowClockwiseIcon } from "@phosphor-icons/react/dist/csr/ArrowClockwise";
+import { SquareIcon } from "@phosphor-icons/react/dist/csr/Square";
+import { TrashIcon } from "@phosphor-icons/react/dist/csr/Trash";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { formatBytes, formatDuration, friendlyError } from "../../lib/format";
@@ -28,6 +36,7 @@ export function HistoryPage({ history, hasMore, loadingMore, operationActive, on
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [pendingDeleteIds, setPendingDeleteIds] = useState<number[] | null>(null);
   const [deleteScope, setDeleteScope] = useState<HistoryFileScope | "all">("all");
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [filesTarget, setFilesTarget] = useState<HistoryItem | null>(null);
   const [files, setFiles] = useState<HistoryFileInfo[] | null>(null);
   const [filesError, setFilesError] = useState<string | null>(null);
@@ -67,6 +76,7 @@ export function HistoryPage({ history, hasMore, loadingMore, operationActive, on
   function handleDelete(ids: number[], trigger: HTMLButtonElement) {
     if (ids.length === 0) return;
     deleteTriggerRef.current = trigger;
+    setDeleteError(null);
     setDeleteScope("all");
     setPendingDeleteIds(ids);
   }
@@ -74,6 +84,7 @@ export function HistoryPage({ history, hasMore, loadingMore, operationActive, on
   async function confirmDelete() {
     const ids = pendingDeleteIds;
     if (!ids) return;
+    setDeleteError(null);
     try {
       if (deleteScope === "all") await onDelete(ids);
       else await onDeleteFiles(ids, deleteScope);
@@ -83,8 +94,10 @@ export function HistoryPage({ history, hasMore, loadingMore, operationActive, on
         return next;
       });
       setPendingDeleteIds(null);
-    } catch {
-      // The parent reports the error; keep the selection so the user can retry.
+    } catch (cause) {
+      // Keep the failure visible above the modal scrim as well as in the
+      // parent's global alert, without changing selection or deletion scope.
+      setDeleteError(friendlyError(cause));
     }
   }
 
@@ -157,11 +170,11 @@ export function HistoryPage({ history, hasMore, loadingMore, operationActive, on
         </div>
         <div className="history-actions">
           <button type="button" className="secondary-button" onClick={onRefresh} disabled={operationActive}>
-            <RotateCcw size={16} /> {t("history.refresh")}
+            <ArrowClockwiseIcon aria-hidden="true" size={16} /> {t("history.refresh")}
           </button>
           {history.length > 0 && (
             <button type="button" className="secondary-button" onClick={toggleAll} disabled={operationActive} aria-pressed={allSelected}>
-              {allSelected ? <CheckSquare size={16} /> : <Square size={16} />}
+              {allSelected ? <CheckSquareIcon aria-hidden="true" size={16} /> : <SquareIcon aria-hidden="true" size={16} />}
               {allSelected ? t("history.clearSelection") : t("history.selectAll")}
             </button>
           )}
@@ -180,14 +193,14 @@ export function HistoryPage({ history, hasMore, loadingMore, operationActive, on
             onClick={(event) => void handleDelete([...selectedIds], event.currentTarget)}
             disabled={operationActive}
           >
-            <Trash2 size={16} /> {t("history.deleteSelected")}
+            <TrashIcon aria-hidden="true" size={16} /> {t("history.deleteSelected")}
           </button>
         </div>
       )}
 
       {history.length === 0 ? (
         <div className="empty-state">
-          <History size={36} />
+          <ClockCounterClockwiseIcon aria-hidden="true" size={36} />
           <h3>{t("history.emptyTitle")}</h3>
           <p>{t("history.emptyDescription")}</p>
           <button
@@ -215,7 +228,7 @@ export function HistoryPage({ history, hasMore, loadingMore, operationActive, on
               />
               <button type="button" className="history-item-main" onClick={() => onLoad(item.id)} disabled={operationActive}>
               <div className="history-icon">
-                <FileText size={19} />
+                <FileTextIcon aria-hidden="true" size={19} />
               </div>
               <div className="history-copy">
                 <strong>{item.title}</strong>
@@ -227,14 +240,14 @@ export function HistoryPage({ history, hasMore, loadingMore, operationActive, on
                 <span>{formatDuration(item.duration)}</span>
                 <span>{getModelLabel(item.model, t)}</span>
               </div>
-              <ChevronRight size={18} />
+              <CaretRightIcon aria-hidden="true" size={18} />
               </button>
               <button
                 type="button" className="icon-button" disabled={operationActive}
                 onClick={(event) => void openFiles(item, event.currentTarget)}
                 title={t("history.filesFor", { title: item.title })}
                 aria-label={t("history.filesFor", { title: item.title })}
-              ><FolderOpen size={17} /></button>
+              ><FolderOpenIcon aria-hidden="true" size={17} /></button>
               <button
                 type="button"
                 className="icon-button danger history-delete-button"
@@ -243,7 +256,7 @@ export function HistoryPage({ history, hasMore, loadingMore, operationActive, on
                 title={t("history.deleteOne", { title: item.title })}
                 aria-label={t("history.deleteOne", { title: item.title })}
               >
-                <Trash2 size={17} />
+                <TrashIcon aria-hidden="true" size={17} />
               </button>
             </div>
           ))}
@@ -270,10 +283,11 @@ export function HistoryPage({ history, hasMore, loadingMore, operationActive, on
             aria-labelledby="history-delete-title"
           >
             <div className="history-delete-icon" aria-hidden="true">
-              <AlertTriangle size={22} />
+              <WarningIcon aria-hidden="true" size={22} />
             </div>
             <div className="history-delete-content">
               <h3 id="history-delete-title">{t("history.confirmTitle")}</h3>
+              <div className="dialog-scroll-body">
               <fieldset className="history-delete-scope" disabled={operationActive}>
                 <legend>{t("history.deleteScope")}</legend>
                 {(["audio", "transcript", "all"] as const).map((scope) => <label key={scope}>
@@ -283,6 +297,8 @@ export function HistoryPage({ history, hasMore, loadingMore, operationActive, on
               </fieldset>
               <p>{t(deleteScope === "audio" ? "history.confirmAudio" : deleteScope === "transcript" ? "history.confirmTranscript" : "history.confirmDelete", { count: pendingDeleteIds.length })}</p>
               <p>{t("history.externalCopiesKept")}</p>
+              {deleteError && <p className="dialog-error" role="alert">{deleteError}</p>}
+              </div>
               <div className="history-delete-actions">
                 <button
                   ref={cancelDeleteButtonRef}
@@ -298,7 +314,7 @@ export function HistoryPage({ history, hasMore, loadingMore, operationActive, on
                   onClick={() => void confirmDelete()}
                   disabled={operationActive}
                 >
-                  <Trash2 size={16} /> {t("history.confirmOk")}
+                  <TrashIcon aria-hidden="true" size={16} /> {t("history.confirmOk")}
                 </button>
               </div>
             </div>
@@ -307,11 +323,11 @@ export function HistoryPage({ history, hasMore, loadingMore, operationActive, on
       )}
       {filesTarget && createPortal(<div className="modal-backdrop history-modal-backdrop" role="presentation">
         <div className="history-delete-modal history-files-modal" ref={deleteDialogRef} role="dialog" aria-modal="true" aria-labelledby="history-files-title">
+          <div className="history-files-body">
           <header className="history-files-header">
             <h3 id="history-files-title">{t("history.filesFor", { title: filesTarget.title })}</h3>
             <p>{t("history.filesHint")}</p>
           </header>
-          <div className="history-files-body">
             {files === null && !filesError && <p role="status">{t("history.loadingFiles")}</p>}
             <div className="history-files-list">{files?.map((file) => <article key={file.kind} className="history-file-row">
               <strong>{file.kind === "audio" ? t("history.audioFormat") : file.kind.toUpperCase()}</strong>
@@ -320,7 +336,7 @@ export function HistoryPage({ history, hasMore, loadingMore, operationActive, on
               <button type="button" className="secondary-button" disabled={operationActive || !file.available} onClick={() => {
                 setFilesError(null);
                 void onRevealFile(filesTarget.id, file.kind).catch((cause) => setFilesError(friendlyError(cause)));
-              }}><FolderOpen size={16} /> {t("history.openLocation")}</button>
+              }}><FolderOpenIcon aria-hidden="true" size={16} /> {t("history.openLocation")}</button>
             </article>)}</div>
             {filesError && <p role="alert" className="bad-text">{filesError}</p>}
           </div>

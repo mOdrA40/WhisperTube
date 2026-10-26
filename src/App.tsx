@@ -1,16 +1,21 @@
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import { AppUpdateBanner } from "./components/common/AppUpdateBanner";
 import { AppShell } from "./components/layout/AppShell";
 import { ErrorAlert } from "./components/common/ErrorAlert";
-import { HistoryPage } from "./components/history/HistoryPage";
-import { SettingsPage } from "./components/settings/SettingsPage";
 import { TranscribePage } from "./components/transcribe/TranscribePage";
 import { useWhisperTube } from "./hooks/useWhisperTube";
 import { friendlyError } from "./lib/format";
 import { openExternalUrl } from "./services/tauri";
+import { useI18n } from "./i18n";
+
+// Keep secondary presentation modules out of the initial transcription bundle.
+// The operation-owning hook stays mounted in App while a page module loads.
+const HistoryPage = lazy(() => import("./components/history/HistoryPage").then((module) => ({ default: module.HistoryPage })));
+const SettingsPage = lazy(() => import("./components/settings/SettingsPage").then((module) => ({ default: module.SettingsPage })));
 
 export default function App() {
   const app = useWhisperTube();
+  const { t } = useI18n();
   const [dismissedUpdateVersion, setDismissedUpdateVersion] = useState<string | null>(null);
   const showUpdateBanner = Boolean(
     app.appUpdate &&
@@ -50,6 +55,7 @@ export default function App() {
         />
       )}
 
+      <Suspense fallback={<p className="page-loading" role="status">{t("workspace.loadingPage")}</p>}>
       {app.tab === "transcribe" && (
         <TranscribePage
           url={app.url}
@@ -167,6 +173,7 @@ export default function App() {
           onInstallAppUpdate={app.installAppUpdate}
         />
       )}
+      </Suspense>
     </AppShell>
   );
 }

@@ -64,7 +64,7 @@ pub fn finish<R: Runtime>(
         cancellation_requested,
         result
             .as_ref()
-            .is_ok_and(|result| result.source_duration.is_some()),
+            .is_ok_and(|result| result.source_duration.is_some() || result.audio_recovered),
     );
     let legacy = legacy_message.map(|body| NotificationCopy {
         title: "WhisperTube".into(),

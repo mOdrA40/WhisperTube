@@ -21,7 +21,10 @@ use crate::{
     history, models,
     paths::{engine_path_cancelable, is_regular_file, jobs_dir, model_path, tool_path},
     process, resources,
-    sources::{source_js_runtime_args, validate_media_duration, validate_media_url},
+    sources::{
+        local::{local_path, validate_source},
+        source_js_runtime_args, validate_media_duration,
+    },
     system::{
         configure_cuda_command, cuda_driver_is_compatible, detect_gpu, detect_nvidia,
         detect_nvidia_device, detect_nvidia_driver_version, ensure_cuda_install_supported,
@@ -232,6 +235,8 @@ fn remove_file_if_present(path: &Path, label: &str) -> Result<(), String> {
 
 #[derive(Deserialize, Serialize)]
 struct AudioCacheMetadata {
+    #[serde(default)]
+    audio_recovered: bool,
     version: u8,
     url: String,
     #[serde(default)]
@@ -250,7 +255,17 @@ fn write_audio_cache_metadata(
     request: &TranscriptRequest,
     audio_ready: bool,
 ) -> Result<(), String> {
+    write_audio_cache_metadata_with_recovery(job_dir, request, audio_ready, false)
+}
+
+fn write_audio_cache_metadata_with_recovery(
+    job_dir: &Path,
+    request: &TranscriptRequest,
+    audio_ready: bool,
+    audio_recovered: bool,
+) -> Result<(), String> {
     let metadata = AudioCacheMetadata {
+        audio_recovered,
         version: AUDIO_CACHE_METADATA_VERSION,
         url: request.url.clone(),
         title: request.title.clone(),
@@ -332,7 +347,7 @@ fn find_reusable_audio_job_for_source(
             continue;
         };
         if !matches!(cache.version, 1 | AUDIO_CACHE_METADATA_VERSION)
-            || validate_media_url(&cache.url).ok().as_deref() != Some(url)
+            || validate_source(&cache.url).ok().as_deref() != Some(url)
             || !cache.duration.is_finite()
             || cache.duration <= 0.0
             || cache.duration > MAX_MEDIA_DURATION_SECONDS
@@ -400,7 +415,7 @@ pub fn resume_stage(
     url: &str,
     duration: f64,
 ) -> Result<Option<crate::types::TranscriptionResumeStage>, String> {
-    let url = validate_media_url(url)?;
+    let url = validate_source(url)?;
     validate_media_duration(duration, false)?;
     resume_stage_in(
         &jobs_dir(app)?,
@@ -505,8 +520,13 @@ fn reconciled_audio_duration(audio: &checkpoint::PcmAudio, source: f64) -> (f64,
     (actual, source)
 }
 
-fn media_disk_reservation(duration: f64) -> u64 {
-    MAX_MEDIA_DOWNLOAD_BYTES_VALUE
+fn media_disk_reservation(duration: f64, local_audio: bool) -> u64 {
+    let download_bytes = if local_audio {
+        0
+    } else {
+        MAX_MEDIA_DOWNLOAD_BYTES_VALUE
+    };
+    download_bytes
         .saturating_add(pcm_wav_bytes(duration))
         .saturating_add(DISK_SAFETY_BUFFER_BYTES)
 }
@@ -848,13 +868,23 @@ fn download_speed(raw: &str) -> Option<u64> {
 }
 
 fn ffmpeg_command(ffmpeg: &Path, input: &Path, output: &Path, duration: f64) -> Command {
+    ffmpeg_decode_command(ffmpeg, input, output, duration, false)
+}
+
+fn ffmpeg_decode_command(
+    ffmpeg: &Path,
+    input: &Path,
+    output: &Path,
+    duration: f64,
+    recovering: bool,
+) -> Command {
     let mut command = Command::new(ffmpeg);
+    crate::sources::local::configure_decode(&mut command, recovering);
     process::hide_console(&mut command);
     command
         .args([
             "-y",
             "-nostdin",
-            "-xerror",
             "-nostats",
             "-loglevel",
             "error",
@@ -865,7 +895,8 @@ fn ffmpeg_command(ffmpeg: &Path, input: &Path, output: &Path, duration: f64) -> 
             "-i",
         ])
         .arg(input)
-        .args(["-t"])
+        // Match the first audio stream inspected by the duration probe.
+        .args(["-map", "0:a:0", "-t"])
         .arg(format!("{:.3}", ffmpeg_target_duration(duration)))
         .args(["-af", "apad=whole_dur=1"])
         .args(["-vn", "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le"])
@@ -881,63 +912,78 @@ fn run_ffmpeg(
     input: &Path,
     output: &Path,
     duration: f64,
-) -> Result<(), String> {
+    allow_recovery: bool,
+) -> Result<bool, String> {
     let ffmpeg = tool_path(context.app, "ffmpeg")?;
-    let mut command = ffmpeg_command(&ffmpeg, input, output, duration);
-    let mut last_disk_check = Instant::now() - DISK_CHECK_INTERVAL;
-    let (status, stderr) = run_media_command(
-        context,
-        &mut command,
-        process::OutputStream::Stdout,
-        PROCESS_INACTIVITY_TIMEOUT,
-        None,
-        |line| {
-            if let Some(raw) = line.strip_prefix("out_time_us=") {
-                if let Ok(microseconds) = raw.parse::<f64>() {
-                    let seconds = microseconds / 1_000_000.0;
-                    let percent = if duration > 0.0 {
-                        seconds / duration * 100.0
-                    } else {
-                        0.0
-                    };
-                    context.emit(ProgressUpdate {
-                        stage: "converting",
-                        message_code: "converting_audio",
-                        percent,
-                        message: "Konversi ke PCM 16 kHz mono…".into(),
-                        backend: None,
-                        downloaded_bytes: None,
-                        total_bytes: None,
-                        network_bytes_per_second: None,
-                    });
+    for recovering in [false, true] {
+        let mut command = if recovering {
+            ffmpeg_decode_command(&ffmpeg, input, output, duration, true)
+        } else {
+            ffmpeg_command(&ffmpeg, input, output, duration)
+        };
+        let mut last_disk_check = Instant::now() - DISK_CHECK_INTERVAL;
+        let (status, stderr) = run_media_command(
+            context,
+            &mut command,
+            process::OutputStream::Stdout,
+            PROCESS_INACTIVITY_TIMEOUT,
+            None,
+            |line| {
+                if let Some(raw) = line.strip_prefix("out_time_us=") {
+                    if let Ok(microseconds) = raw.parse::<f64>() {
+                        let seconds = microseconds / 1_000_000.0;
+                        let percent = if duration > 0.0 {
+                            seconds / duration * 100.0
+                        } else {
+                            0.0
+                        };
+                        context.emit(ProgressUpdate {
+                            stage: "converting",
+                            message_code: "converting_audio",
+                            percent,
+                            message: "Konversi ke PCM 16 kHz mono…".into(),
+                            backend: None,
+                            downloaded_bytes: None,
+                            total_bytes: None,
+                            network_bytes_per_second: None,
+                        });
+                    }
                 }
-            }
-            if last_disk_check.elapsed() >= DISK_CHECK_INTERVAL {
-                let output_dir = output.parent().unwrap_or_else(|| Path::new("."));
-                let written = fs::metadata(output)
-                    .map(|metadata| metadata.len())
-                    .unwrap_or(0);
-                let maximum_wav = pcm_wav_bytes(duration);
-                if written > maximum_wav.saturating_add(4096) {
-                    return Err(
-                        "WAV hasil konversi melebihi batas durasi media yang diizinkan.".into(),
-                    );
+                if last_disk_check.elapsed() >= DISK_CHECK_INTERVAL {
+                    let output_dir = output.parent().unwrap_or_else(|| Path::new("."));
+                    let written = fs::metadata(output)
+                        .map(|metadata| metadata.len())
+                        .unwrap_or(0);
+                    let maximum_wav = pcm_wav_bytes(duration);
+                    if written > maximum_wav.saturating_add(4096) {
+                        return Err(
+                            "WAV hasil konversi melebihi batas durasi media yang diizinkan.".into(),
+                        );
+                    }
+                    resources::require_disk(
+                        output_dir,
+                        remaining_disk_reservation(written, maximum_wav, 0),
+                        "konversi media",
+                    )?;
+                    ensure_job_storage_quota(context.app)?;
+                    last_disk_check = Instant::now();
                 }
-                resources::require_disk(
-                    output_dir,
-                    remaining_disk_reservation(written, maximum_wav, 0),
-                    "konversi media",
-                )?;
-                ensure_job_storage_quota(context.app)?;
-                last_disk_check = Instant::now();
+                Ok(())
+            },
+        )?;
+        if !status.success() {
+            if !recovering
+                && allow_recovery
+                && crate::sources::local::can_recover_mp3(input, &stderr)
+            {
+                crate::io_cancel::check(context.cancelled)?;
+                continue;
             }
-            Ok(())
-        },
-    )?;
-    if !status.success() {
-        return Err(process_failed(context.cancelled, stderr, "FFmpeg"));
+            return Err(process_failed(context.cancelled, stderr, "FFmpeg"));
+        }
+        return Ok(recovering);
     }
-    Ok(())
+    unreachable!("both decode attempts return or fail")
 }
 
 const CAPABILITY_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -1869,12 +1915,13 @@ pub fn pipeline(
     if cancelled.load(Ordering::SeqCst) {
         return Err("Job dibatalkan.".into());
     }
-    request.url = validate_media_url(&request.url)?;
+    request.url = validate_source(&request.url)?;
+    let local_audio = local_path(&request.url)?;
     validate_transcript_request(&request)?;
     validate_media_duration(request.duration, false)?;
     let yt_dlp = tool_path(&app, "yt-dlp")?;
     let ffmpeg = tool_path(&app, "ffmpeg")?;
-    if !is_regular_file(&yt_dlp) || !is_regular_file(&ffmpeg) {
+    if (local_audio.is_none() && !is_regular_file(&yt_dlp)) || !is_regular_file(&ffmpeg) {
         return Err("Runtime belum lengkap. Jalankan scripts/setup-windows.ps1.".into());
     }
     let model = model_path(&app, &request.model_id)?;
@@ -1911,12 +1958,16 @@ pub fn pipeline(
     }
     let disk_reservation = if audio_ready {
         DISK_SAFETY_BUFFER_BYTES
+    } else if local_audio.is_some() {
+        // The original stays outside the job directory. A partial conversion
+        // is overwritten, so reserve the full WAV even when resuming a job.
+        media_disk_reservation(request.duration, true)
     } else if let Some(path) = &reusable_job_dir {
-        media_disk_reservation(request.duration)
+        media_disk_reservation(request.duration, false)
             .saturating_sub(directory_file_bytes(path)?)
             .max(DISK_SAFETY_BUFFER_BYTES)
     } else {
-        media_disk_reservation(request.duration)
+        media_disk_reservation(request.duration, false)
     };
     crate::resources::require_disk(&jobs_dir, disk_reservation, "transkripsi")?;
     ensure_job_storage_quota(&app)?;
@@ -1959,17 +2010,23 @@ pub fn pipeline(
         });
         validate_audio_wav(&wav, request.duration)?;
     } else {
-        context.emit(ProgressUpdate {
-            stage: "downloading",
-            message_code: "preparing_download",
-            percent: 0.0,
-            message: "Menyiapkan download…".into(),
-            backend: None,
-            downloaded_bytes: None,
-            total_bytes: None,
-            network_bytes_per_second: None,
-        });
-        let (source, needs_duration_probe) = run_download(&context, &request, &job_dir)?;
+        if local_audio.is_none() {
+            context.emit(ProgressUpdate {
+                stage: "downloading",
+                message_code: "preparing_download",
+                percent: 0.0,
+                message: "Menyiapkan download…".into(),
+                backend: None,
+                downloaded_bytes: None,
+                total_bytes: None,
+                network_bytes_per_second: None,
+            });
+        }
+        let allow_recovery = local_audio.is_some();
+        let (source, needs_duration_probe) = match local_audio {
+            Some(path) => (path, false),
+            None => run_download(&context, &request, &job_dir)?,
+        };
         if context.is_cancelled() {
             return Err("Job dibatalkan.".into());
         }
@@ -1997,7 +2054,9 @@ pub fn pipeline(
             total_bytes: None,
             network_bytes_per_second: None,
         });
-        run_ffmpeg(&context, &source, &wav, request.duration)?;
+        let audio_recovered =
+            run_ffmpeg(&context, &source, &wav, request.duration, allow_recovery)?;
+        local_path(&request.url)?;
         ensure_job_storage_quota(&app)?;
         validate_audio_wav(&wav, request.duration)?;
         if context.is_cancelled() {
@@ -2006,7 +2065,7 @@ pub fn pipeline(
         // Commit readiness only after FFmpeg succeeded and the WAV validates.
         // A killed conversion is never eligible as completed audio.
         checkpoint::PcmAudio::inspect(&wav, request.duration, || context.is_cancelled())?;
-        write_audio_cache_metadata(&job_dir, &request, true)?;
+        write_audio_cache_metadata_with_recovery(&job_dir, &request, true, audio_recovered)?;
     };
     // Retry cleanup even when a completed WAV bypasses download/conversion.
     history::cleanup_source_audio(&job_dir)?;
@@ -2128,6 +2187,9 @@ pub fn pipeline(
     ensure_job_storage_quota(&app)?;
     let result_store_path = job_dir.join("result.json");
     let mut result = TranscriptResult {
+        audio_recovered: read_audio_cache_metadata(&job_dir.join(AUDIO_CACHE_METADATA_FILE))
+            .ok_or("Metadata cache audio tidak dapat dibaca saat menyimpan hasil.")?
+            .audio_recovered,
         transcript_available: true,
         history_id: 0,
         title: request.title.clone(),
@@ -2339,6 +2401,100 @@ mod tests {
 
     #[test]
     #[ignore = "Requires prepared platform FFmpeg runtime; run explicitly with --ignored"]
+    fn native_multitrack_conversion_uses_the_inspected_audio_track() {
+        let platform = if cfg!(target_os = "windows") {
+            "windows"
+        } else if cfg!(target_os = "macos") {
+            "macos"
+        } else {
+            "linux"
+        };
+        let ffmpeg = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("runtime")
+            .join(platform)
+            .join(crate::paths::exe_name("ffmpeg"));
+        assert!(
+            ffmpeg.is_file(),
+            "Install the runtime before this native QA test"
+        );
+        let root = std::env::temp_dir().join(format!("whispertube-multitrack-{}", Uuid::new_v4()));
+        let _guard = JobDirectoryGuard::create(root.clone()).unwrap();
+        let input = root.join("multitrack.mp4");
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let mut generate = std::process::Command::new(&ffmpeg);
+        generate
+            .args([
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=2",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=r=44100:cl=stereo:d=4",
+                "-map",
+                "0:a",
+                "-map",
+                "1:a",
+                "-c:a",
+                "aac",
+                "-disposition:a:0",
+                "0",
+                "-disposition:a:1",
+                "default",
+            ])
+            .arg(&input);
+        let (status, stderr) = crate::process::run_with_timeout_captured_cancelable(
+            &mut generate,
+            std::time::Duration::from_secs(10),
+            4096,
+            &cancelled,
+        )
+        .unwrap();
+        assert!(status.success(), "{stderr}");
+        let (duration, recovered) = crate::sources::probe_import_duration(
+            &ffmpeg,
+            &input,
+            &Arc::new(Mutex::new(None)),
+            &cancelled,
+        )
+        .unwrap();
+        assert!(!recovered);
+        assert!((duration - 2.0).abs() < 0.1);
+        for recovering in [false, true] {
+            let output = root.join(format!("audio-{recovering}.wav"));
+            let mut command =
+                super::ffmpeg_decode_command(&ffmpeg, &input, &output, duration, recovering);
+            let (status, stderr) = crate::process::run_with_timeout_captured_cancelable(
+                &mut command,
+                std::time::Duration::from_secs(10),
+                4096,
+                &cancelled,
+            )
+            .unwrap();
+            assert!(status.success(), "{stderr}");
+            let audio = checkpoint::PcmAudio::inspect(&output, duration, || false).unwrap();
+            assert!((audio.duration_seconds() - duration).abs() < 0.1);
+            // Check actual PCM content: selecting the default second track
+            // would produce silence instead of the inspected first-track tone.
+            let wav = fs::read(&output).unwrap();
+            let audible_samples = wav[wav.len() - 16_000..]
+                .chunks_exact(2)
+                .filter(|sample| i16::from_le_bytes([sample[0], sample[1]]).unsigned_abs() > 1000)
+                .count();
+            assert!(
+                audible_samples > 1000,
+                "The inspected tone must remain audible"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "Requires prepared platform FFmpeg runtime; run explicitly with --ignored"]
     fn native_ffmpeg_accepts_short_track_but_rejects_corrupt_partial_decode() {
         use std::io::Write;
         let platform = if cfg!(target_os = "windows") {
@@ -2377,6 +2533,16 @@ mod tests {
             .unwrap();
             assert_eq!(status.success(), !corrupt, "corrupt={corrupt}");
             if !corrupt {
+                let (_, source) = crate::sources::local::local_source(&input).unwrap();
+                let local = crate::sources::local::local_path(&source).unwrap().unwrap();
+                let duration = crate::sources::probe_local_duration(
+                    &ffmpeg,
+                    &local,
+                    &Arc::new(Mutex::new(None)),
+                    &Arc::new(AtomicBool::new(false)),
+                )
+                .unwrap();
+                assert!((duration - 1.0).abs() < 0.01);
                 let audio = checkpoint::PcmAudio::open(&output, 60.0, || false).unwrap();
                 assert_eq!(
                     super::reconciled_audio_duration(&audio, 60.0),
@@ -2411,6 +2577,176 @@ mod tests {
             normalize_utf8_bytes(b"text: \xAE misalnya"),
             "text: � misalnya"
         );
+    }
+
+    #[test]
+    fn recovered_audio_warning_survives_cache_serialization() {
+        let root = std::env::temp_dir().join(format!("whispertube-recovery-{}", Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let request = TranscriptRequest {
+            url: "https://www.youtube.com/watch?v=test".into(),
+            title: "test".into(),
+            channel: "test".into(),
+            duration: 1.0,
+            cookies_path: None,
+            backend: "cpu".into(),
+            compute_device_id: None,
+            language: "id".into(),
+            model_id: "base".into(),
+            keep_audio: false,
+        };
+        super::write_audio_cache_metadata_with_recovery(&root, &request, true, true).unwrap();
+        let cache =
+            super::read_audio_cache_metadata(&root.join(super::AUDIO_CACHE_METADATA_FILE)).unwrap();
+        assert!(cache.audio_ready && cache.audio_recovered);
+        let old: super::AudioCacheMetadata = serde_json::from_str(
+            r#"{"version":2,"url":"url","title":"title","duration":1,"audio_ready":true}"#,
+        )
+        .unwrap();
+        assert!(!old.audio_recovered);
+        let old_result = serde_json::json!({
+            "historyId": 1, "title": "test", "channel": "local", "language": "id", "duration": 1,
+            "model": "base", "backend": "cpu", "segments": [], "text": "test",
+            "txtPath": "", "srtPath": "", "vttPath": "", "audioPath": null
+        });
+        let mut result: crate::types::TranscriptResult =
+            serde_json::from_value(old_result).unwrap();
+        assert!(!result.audio_recovered);
+        result.audio_recovered = true;
+        let saved = serde_json::to_vec(&result).unwrap();
+        assert!(
+            serde_json::from_slice::<crate::types::TranscriptResult>(&saved)
+                .unwrap()
+                .audio_recovered
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "Requires prepared platform FFmpeg runtime; run explicitly with --ignored"]
+    fn native_mp3_recovery_preserves_readable_audio_and_rejects_invalid_files() {
+        use std::io::Write;
+        use std::{
+            path::{Path, PathBuf},
+            process::Command,
+        };
+        let platform = if cfg!(windows) {
+            "windows"
+        } else if cfg!(target_os = "macos") {
+            "macos"
+        } else {
+            "linux"
+        };
+        let ffmpeg = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("runtime")
+            .join(platform)
+            .join(crate::paths::exe_name("ffmpeg"));
+        assert!(ffmpeg.is_file());
+        let root =
+            std::env::temp_dir().join(format!("whispertube-mp3-recovery-{}", Uuid::new_v4()));
+        let _guard = JobDirectoryGuard::create(root.clone()).unwrap();
+        let input = root.join("recording.mp3");
+        let mut generate = Command::new(&ffmpeg);
+        generate
+            .args([
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=10",
+                "-c:a",
+                "libmp3lame",
+                "-b:a",
+                "320k",
+            ])
+            .arg(&input);
+        assert!(generate.status().unwrap().success());
+        let tracker = Arc::new(Mutex::new(None));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let clean =
+            crate::sources::probe_import_duration(&ffmpeg, &input, &tracker, &cancelled).unwrap();
+        assert!(!clean.1);
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&input)
+            .unwrap()
+            .write_all(&[0u8; 1024])
+            .unwrap();
+        assert!(
+            crate::sources::probe_local_duration(&ffmpeg, &input, &tracker, &cancelled).is_err()
+        );
+        let (duration, recovered) =
+            crate::sources::probe_import_duration(&ffmpeg, &input, &tracker, &cancelled).unwrap();
+        assert!(recovered);
+        assert!((duration - clean.0).abs() < 0.1);
+        let output = root.join("audio.wav");
+        let mut convert = super::ffmpeg_decode_command(&ffmpeg, &input, &output, duration, true);
+        let (status, _) = crate::process::run_with_timeout_captured_cancelable(
+            &mut convert,
+            std::time::Duration::from_secs(10),
+            4096,
+            &cancelled,
+        )
+        .unwrap();
+        assert!(status.success());
+        super::validate_audio_wav(&output, duration).unwrap();
+        checkpoint::PcmAudio::inspect(&output, duration, || false).unwrap();
+        assert!(
+            crate::sources::probe_local_duration(&ffmpeg, &output, &tracker, &cancelled).is_ok()
+        );
+        // One bad packet exceeds the recovery limit in a very short recording.
+        let short = root.join("too-many-errors.mp3");
+        let mut generate = std::process::Command::new(&ffmpeg);
+        generate
+            .args(["-nostdin", "-hide_banner", "-loglevel", "error", "-i"])
+            .arg(&input)
+            .args(["-t", "0.1", "-c:a", "libmp3lame", "-b:a", "320k"])
+            .arg(&short);
+        assert!(generate.status().unwrap().success());
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&short)
+            .unwrap()
+            .write_all(&[0u8; 1024])
+            .unwrap();
+        assert!(
+            crate::sources::probe_import_duration(&ffmpeg, &short, &tracker, &cancelled).is_err()
+        );
+        fs::write(&input, b"not audio").unwrap();
+        assert!(
+            crate::sources::probe_import_duration(&ffmpeg, &input, &tracker, &cancelled).is_err()
+        );
+        cancelled.store(true, Ordering::SeqCst);
+        assert!(
+            crate::sources::probe_import_duration(&ffmpeg, &output, &tracker, &cancelled)
+                .unwrap_err()
+                .contains("dibatalkan")
+        );
+        assert_eq!(*tracker.lock().unwrap(), None);
+
+        // Optional private QA input is read only and never copied into the repo.
+        if let Some(path) = std::env::var_os("WHISPERTUBE_QA_LOCAL_MP3") {
+            cancelled.store(false, Ordering::SeqCst);
+            let path = PathBuf::from(path);
+            let (duration, recovered) =
+                crate::sources::probe_import_duration(&ffmpeg, &path, &tracker, &cancelled)
+                    .unwrap();
+            assert!(recovered && duration > 0.0);
+            let mut convert = super::ffmpeg_decode_command(&ffmpeg, &path, &output, duration, true);
+            let (status, _) = crate::process::run_with_timeout_captured_cancelable(
+                &mut convert,
+                std::time::Duration::from_secs(60),
+                4096,
+                &cancelled,
+            )
+            .unwrap();
+            assert!(status.success());
+            super::validate_audio_wav(&output, duration).unwrap();
+            checkpoint::PcmAudio::inspect(&output, duration, || false).unwrap();
+        }
     }
 
     #[test]
@@ -2942,6 +3278,22 @@ mod tests {
             ffmpeg_target_duration(super::MAX_MEDIA_DURATION_SECONDS),
             super::MAX_MEDIA_DURATION_SECONDS + 1.0
         );
+    }
+
+    #[test]
+    fn local_audio_reserves_wav_and_safety_buffer_without_a_download() {
+        for duration in [1.0, 60.0, super::MAX_MEDIA_DURATION_SECONDS] {
+            let local = super::media_disk_reservation(duration, true);
+            assert_eq!(
+                local,
+                super::pcm_wav_bytes(duration) + DISK_SAFETY_BUFFER_BYTES
+            );
+            assert!(local < 1024 * 1024 * 1024 + DISK_SAFETY_BUFFER_BYTES);
+            assert_eq!(
+                super::media_disk_reservation(duration, false),
+                local + super::MAX_MEDIA_DOWNLOAD_BYTES_VALUE
+            );
+        }
     }
 
     #[test]

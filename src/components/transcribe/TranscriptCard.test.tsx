@@ -3,6 +3,15 @@ import { afterEach, expect, it, vi } from "vitest";
 import { I18nProvider } from "../../i18n";
 import { TranscriptCard } from "./TranscriptCard";
 afterEach(cleanup);
+it("shows a persisted recovery warning when reopening a transcript", () => {
+  render(<I18nProvider><TranscriptCard result={{ historyId: 1, title: "Recovered recording", channel: "Local audio", language: "id", duration: 60,
+    audioRecovered: true, model: "base", backend: "cpu", segments: [], text: "", txtPath: "", srtPath: "", vttPath: "", audioPath: null }}
+    operationActive={false} copied={false} searchQuery="" filteredSegments={[]} onCopy={vi.fn()} onExport={vi.fn()}
+    onRevealAudio={vi.fn()} onSearchChange={vi.fn()} transcriptionElapsedMs={null} /></I18nProvider>);
+  expect(screen.getByRole("status").textContent).toContain("timestamps may shift");
+  expect(screen.queryByText("Transcription complete")).toBeNull();
+  expect(screen.getByText("Available audio transcribed")).toBeTruthy();
+});
 it("shows the actual audio coverage without claiming the full source was transcribed", () => {
   render(<I18nProvider><TranscriptCard result={{ historyId: 1, title: "Short audio", channel: "Channel", language: "en", duration: 1, sourceDuration: 60,
     model: "base", backend: "cpu", segments: [], text: "", txtPath: "", srtPath: "", vttPath: "", audioPath: null }}

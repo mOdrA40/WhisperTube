@@ -208,6 +208,23 @@ pub fn end_app_update(state: State<'_, AppState>) -> CommandResult<()> {
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub async fn inspect_local_audio(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+) -> CommandResult<VideoMetadata> {
+    let operation = OperationGuard::reserve_inspecting(&state)?;
+    let active_pid = state.active_pid.clone();
+    let cancelled = state.inspect_cancelled.clone();
+    Ok(tokio::task::spawn_blocking(move || {
+        let _operation = operation;
+        sources::local::inspect(&app, std::path::Path::new(&path), &active_pid, &cancelled)
+    })
+    .await
+    .map_err(|e| format!("Pemeriksaan audio gagal: {e}"))??)
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub async fn inspect_media(
     app: AppHandle,
     state: State<'_, AppState>,

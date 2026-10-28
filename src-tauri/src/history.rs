@@ -1022,6 +1022,7 @@ mod tests {
             let id = self.insert(conn, name);
             let job = self.root.join(name);
             let result = crate::types::TranscriptResult {
+                audio_recovered: false,
                 history_id: id,
                 title: "title".into(),
                 channel: "channel".into(),

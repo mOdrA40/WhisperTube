@@ -18,6 +18,7 @@ type SourceCardProps = {
   hasResult: boolean;
   onUrlChange: (url: string) => void;
   onInspect: () => void;
+  onImportAudio?: () => void;
   onCancel: () => void;
   onClear: () => void;
   onOpenSettings: () => void;
@@ -32,6 +33,7 @@ export function SourceCard({
   hasResult,
   onUrlChange,
   onInspect,
+  onImportAudio,
   onCancel,
   onClear,
   onOpenSettings,
@@ -94,6 +96,12 @@ export function SourceCard({
             </button>
           </div>
 
+          <div className="source-import-actions">
+            <button type="button" className="secondary-button" onClick={onImportAudio} disabled={busy || inspecting}>
+              {t("source.importAudio")}
+            </button>
+          </div>
+          <p className="hero-footer-tips">{t("source.audioHint")}</p>
           <div className="hero-footer-tips">
             <span>{t("source.memberHint")}</span>
             <button type="button" className="settings-link-btn" onClick={onOpenSettings}>
@@ -140,7 +148,7 @@ function VideoPreviewCard({ metadata }: { metadata: VideoMetadata }) {
         <div className="preview-status-strip">
           <span className="status-badge-ready">
             <CheckIcon aria-hidden="true" size={13} />
-            <span>{t("source.videoReady")}</span>
+            <span>{t(metadata.source === "Local audio" ? "source.audioReady" : "source.videoReady")}</span>
           </span>
           {metadata.source && (
             <span className="status-badge-availability">{metadata.source}</span>
@@ -153,6 +161,7 @@ function VideoPreviewCard({ metadata }: { metadata: VideoMetadata }) {
         <h2 className="preview-video-title" title={metadata.title}>
           {metadata.title}
         </h2>
+        {metadata.audioRecovered && <p role="status" className="warning-inline">{t("source.audioRecovered")}</p>}
 
         <div className="preview-channel-row">
           <span className="preview-channel-name">{metadata.channel}</span>

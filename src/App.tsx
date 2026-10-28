@@ -96,6 +96,7 @@ export default function App() {
           onTabChange={app.setTab}
           onUrlChange={app.setUrl}
           onInspect={app.inspectVideo}
+          onImportAudio={app.importLocalAudio}
           onClear={app.clearTranscription}
           onCancelInspection={app.cancelInspection}
           onCancelTranscription={app.cancelJob}

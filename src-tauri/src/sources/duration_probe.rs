@@ -41,23 +41,84 @@ impl Drop for ProbeDirectory {
     }
 }
 
-fn parsed_duration(progress: &[u8]) -> Result<f64, String> {
-    // Machine progress is separate from untrusted container metadata in stderr.
-    // Require the completed stream, never a partial header/last timeout sample.
-    let text = String::from_utf8_lossy(progress);
-    if text.lines().last() != Some("progress=end") {
-        return Err("Probe audio belum selesai.".into());
+#[derive(Default)]
+struct DurationProgress {
+    micros: Option<u64>,
+    completed: bool,
+}
+
+impl DurationProgress {
+    fn line(&mut self, line: &str) {
+        self.completed = line == "progress=end";
+        if let Some(value) = line.strip_prefix("out_time_us=") {
+            self.micros = value.parse().ok();
+        }
     }
-    let micros = text
-        .lines()
-        .filter_map(|line| line.strip_prefix("out_time_us="))
-        .next_back()
-        .and_then(|value| value.parse::<u64>().ok())
-        .ok_or("Durasi file media tidak dapat diverifikasi.")?;
-    let duration = micros as f64 / 1_000_000.0;
-    validate_media_duration(duration, false)
-        .map_err(|error| format!("{}{error}", super::SOURCE_DURATION_ERROR_PREFIX))?;
-    Ok(duration)
+
+    fn duration(self) -> Result<f64, String> {
+        // Require the completed stream, never a partial header/timeout sample.
+        if !self.completed {
+            return Err("Probe audio belum selesai.".into());
+        }
+        let micros = self
+            .micros
+            .ok_or("Durasi file media tidak dapat diverifikasi.")?;
+        let duration = micros as f64 / 1_000_000.0;
+        validate_media_duration(duration, false)
+            .map_err(|error| format!("{}{error}", super::SOURCE_DURATION_ERROR_PREFIX))?;
+        Ok(duration)
+    }
+}
+
+fn run_audio_probe(
+    command: &mut Command,
+    active_pid: &Arc<Mutex<Option<u32>>>,
+    cancelled: &Arc<AtomicBool>,
+    timeout: Duration,
+) -> Result<(std::process::ExitStatus, String, DurationProgress), String> {
+    use crate::process::{ActiveProcessGuard, OutputEvent, OutputLines, OutputStream};
+
+    let mut lines = OutputLines::default();
+    let mut progress = DurationProgress::default();
+    let mut stderr = Vec::new();
+    let mut active = None;
+    let status = crate::process::run_piped(
+        command,
+        Some(timeout),
+        Some(cancelled),
+        |pid| {
+            active = Some(ActiveProcessGuard::new(active_pid, pid)?);
+            Ok(())
+        },
+        |event| {
+            match event {
+                OutputEvent::Data(OutputStream::Stdout, bytes) => {
+                    // Keep only the last duration and completion marker. Total
+                    // progress output must not limit how long decoding can run.
+                    lines.push(bytes, |line| {
+                        progress.line(&line);
+                        Ok(())
+                    })?;
+                }
+                OutputEvent::Data(OutputStream::Stderr, bytes) => {
+                    let retained = bytes
+                        .len()
+                        .min(super::MAX_METADATA_STDERR_BYTES.saturating_sub(stderr.len()));
+                    stderr.extend_from_slice(&bytes[..retained]);
+                }
+                OutputEvent::Tick => {}
+            }
+            Ok(())
+        },
+    )?;
+    if let Some(line) = lines.finish() {
+        progress.line(&line);
+    }
+    Ok((
+        status,
+        String::from_utf8_lossy(&stderr).into_owned(),
+        progress,
+    ))
 }
 
 // Probe only a local, finite file; never hand a platform/CDN URL or cookies
@@ -69,43 +130,83 @@ pub(crate) fn probe_local_duration(
     active_pid: &Arc<Mutex<Option<u32>>>,
     cancelled: &Arc<AtomicBool>,
 ) -> Result<f64, String> {
+    probe_duration(ffmpeg, media, active_pid, cancelled, LOCAL_PROBE_TIMEOUT)
+}
+
+pub(super) fn probe_duration(
+    ffmpeg: &Path,
+    media: &Path,
+    active_pid: &Arc<Mutex<Option<u32>>>,
+    cancelled: &Arc<AtomicBool>,
+    timeout: Duration,
+) -> Result<f64, String> {
+    probe_audio(ffmpeg, media, active_pid, cancelled, timeout, false).map(|(duration, _)| duration)
+}
+
+pub(crate) fn probe_import_duration(
+    ffmpeg: &Path,
+    media: &Path,
+    active_pid: &Arc<Mutex<Option<u32>>>,
+    cancelled: &Arc<AtomicBool>,
+) -> Result<(f64, bool), String> {
+    probe_audio(
+        ffmpeg,
+        media,
+        active_pid,
+        cancelled,
+        Duration::from_secs(600),
+        true,
+    )
+}
+
+fn probe_audio(
+    ffmpeg: &Path,
+    media: &Path,
+    active_pid: &Arc<Mutex<Option<u32>>>,
+    cancelled: &Arc<AtomicBool>,
+    timeout: Duration,
+    allow_recovery: bool,
+) -> Result<(f64, bool), String> {
     crate::io_cancel::check(cancelled)?;
     if !crate::paths::is_regular_file(media) {
         return Err("File probe media kosong atau bukan file biasa.".into());
     }
-    let mut command = Command::new(ffmpeg);
-    command
-        .args([
-            "-nostdin",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-xerror",
-            "-nostats",
-            "-progress",
-            "pipe:1",
-            "-protocol_whitelist",
-            "file",
-            "-i",
-        ])
-        .arg(media)
-        .args(["-map", "0:a:0", "-vn", "-sn", "-dn", "-t"])
-        .arg((crate::transcription::MAX_MEDIA_DURATION_SECONDS + 1.0).to_string())
-        .args(["-f", "null", "-"]);
-    let output = run_output_limited(
-        command,
-        active_pid,
-        cancelled,
-        64 * 1024,
-        LOCAL_PROBE_TIMEOUT,
-    )?;
-    if !output.status.success() {
-        // Raw FFmpeg/yt-dlp stderr can contain signed URLs or credentials.
-        return Err(
-            "File media tidak dapat dibaca sebagai audio untuk memverifikasi durasinya.".into(),
-        );
+    for recovering in [false, true] {
+        let mut command = Command::new(ffmpeg);
+        super::local::configure_decode(&mut command, recovering);
+        command
+            .args([
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostats",
+                "-progress",
+                "pipe:1",
+                "-protocol_whitelist",
+                "file",
+                "-i",
+            ])
+            .arg(media)
+            .args(["-map", "0:a:0", "-vn", "-sn", "-dn", "-t"])
+            .arg((crate::transcription::MAX_MEDIA_DURATION_SECONDS + 1.0).to_string())
+            .args(["-f", "null", "-"]);
+        let (status, stderr, progress) =
+            run_audio_probe(&mut command, active_pid, cancelled, timeout)?;
+        if !status.success() {
+            if !recovering && allow_recovery && super::local::can_recover_mp3(media, &stderr) {
+                continue;
+            }
+            // Raw FFmpeg/yt-dlp stderr can contain signed URLs or credentials.
+            return Err(if allow_recovery {
+                "File media tidak dapat didekode sebagai audio dalam batas pemulihan. Pemulihan otomatis hanya tersedia untuk error decoding MP3 tertentu. Coba ekspor ulang rekaman dari aplikasi asal.".into()
+            } else {
+                "File media tidak dapat dibaca sebagai audio untuk memverifikasi durasinya.".into()
+            });
+        }
+        return Ok((progress.duration()?, recovering));
     }
-    parsed_duration(&output.stdout)
+    unreachable!("both decode attempts return or fail")
 }
 
 pub(super) fn recover_public_duration(
@@ -193,6 +294,59 @@ fn recover_with_tools(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parsed_duration(bytes: &[u8]) -> Result<f64, String> {
+        let mut progress = DurationProgress::default();
+        let mut lines = crate::process::OutputLines::default();
+        // Exercise progress records split across arbitrary pipe reads.
+        for chunk in bytes.chunks(7) {
+            lines.push(chunk, |line| {
+                progress.line(&line);
+                Ok(())
+            })?;
+        }
+        if let Some(line) = lines.finish() {
+            progress.line(&line);
+        }
+        progress.duration()
+    }
+
+    #[test]
+    fn progress_probe_child() {
+        if std::env::var_os("WHISPERTUBE_DURATION_PROGRESS_CHILD").is_some() {
+            use std::io::Write;
+            let mut stdout = std::io::stdout().lock();
+            for _ in 0..10_000 {
+                stdout
+                    .write_all(b"out_time_us=1000000\nprogress=continue\n")
+                    .unwrap();
+            }
+            stdout
+                .write_all(b"out_time_us=61970000\nprogress=end\n")
+                .unwrap();
+            stdout.flush().unwrap();
+            std::process::exit(0);
+        }
+    }
+
+    #[test]
+    fn audio_probe_streams_more_than_64_kib_of_progress() {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "sources::duration_probe::tests::progress_probe_child",
+                "--nocapture",
+            ])
+            .env("WHISPERTUBE_DURATION_PROGRESS_CHILD", "1");
+        let tracker = Arc::new(Mutex::new(None));
+        let token = Arc::new(AtomicBool::new(false));
+        let (status, _, progress) =
+            run_audio_probe(&mut command, &tracker, &token, Duration::from_secs(10)).unwrap();
+        assert!(status.success());
+        assert_eq!(progress.duration(), Ok(61.97));
+        assert_eq!(*tracker.lock().unwrap(), None);
+    }
 
     #[test]
     fn duration_parser_requires_completed_finite_bounded_audio() {

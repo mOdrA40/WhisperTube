@@ -149,6 +149,8 @@ pub struct ModelInfo {
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct VideoMetadata {
+    #[serde(default)]
+    pub audio_recovered: bool,
     pub id: String,
     pub title: String,
     pub channel: String,
@@ -215,6 +217,8 @@ pub struct Segment {
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct TranscriptResult {
+    #[serde(default)]
+    pub audio_recovered: bool,
     pub history_id: i64,
     pub title: String,
     pub channel: String,

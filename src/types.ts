@@ -80,6 +80,7 @@ export type ModelInfo = {
 };
 
 export type VideoMetadata = {
+  audioRecovered?: boolean;
   id: string;
   title: string;
   channel: string;
@@ -143,6 +144,7 @@ export type Segment = {
 };
 
 export type TranscriptResult = {
+  audioRecovered?: boolean;
   historyId: number;
   title: string;
   channel: string;

@@ -19,6 +19,9 @@ use crate::{
 };
 
 mod duration_probe;
+pub(crate) mod local;
+#[cfg(test)]
+pub(crate) use duration_probe::probe_import_duration;
 pub(crate) use duration_probe::probe_local_duration;
 
 #[derive(Clone, Copy)]
@@ -886,6 +889,7 @@ pub async fn inspect_media(
         )?;
         let channel = metadata_channel(&value)?;
         Ok(VideoMetadata {
+            audio_recovered: false,
             id: required_metadata_text(&value, "id", "unknown", MAX_METADATA_ID_BYTES)?,
             title,
             channel: channel.to_string(),

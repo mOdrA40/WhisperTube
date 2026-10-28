@@ -178,6 +178,19 @@ export async function pickCookiesFile() {
   return typeof selected === "string" ? selected : null;
 }
 
+export async function pickLocalAudio() {
+  const path = await open({
+    multiple: false,
+    directory: false,
+    filters: [{ name: "Audio", extensions: ["mp3", "wav", "m4a", "aac", "flac", "ogg", "opus", "wma", "aiff", "aif", "webm", "mp4"] }],
+  });
+  return typeof path === "string" ? path : null;
+}
+
+export function inspectLocalAudio(path: string) {
+  return invoke<VideoMetadata>("inspect_local_audio", { path });
+}
+
 export function openExternalUrl(url: string) {
   return openUrl(url);
 }

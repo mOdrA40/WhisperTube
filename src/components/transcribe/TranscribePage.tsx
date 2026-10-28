@@ -59,6 +59,7 @@ type TranscribePageProps = {
   onTabChange: (tab: AppTab) => void;
   onUrlChange: (url: string) => void;
   onInspect: () => void;
+  onImportAudio?: () => void;
   onClear: () => void;
   onCancelInspection: () => void;
   onCancelTranscription: () => void;
@@ -119,6 +120,7 @@ export function TranscribePage({
   onTabChange,
   onUrlChange,
   onInspect,
+  onImportAudio,
   onClear,
   onCancelInspection,
   onCancelTranscription,
@@ -155,6 +157,7 @@ export function TranscribePage({
           hasResult={hasResult}
           onUrlChange={onUrlChange}
           onInspect={onInspect}
+          onImportAudio={onImportAudio}
           onCancel={onCancelInspection}
           onClear={onClear}
           onOpenSettings={() => onTabChange("settings")}

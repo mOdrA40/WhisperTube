@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
-import { save } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
+import { inspectLocalAudio, pickLocalAudio } from "./tauri";
 import type { TranscriptRequest, TranscriptResult } from "../types";
 import { checkForAppUpdate, disposeAppUpdate, deleteModel, discardJobCache, downloadModel, exportTranscriptFile, getTranscriptionResumeStage, inspectMedia, installAppUpdate, listHistory, listJobCache, startTranscription, deleteHistoryFiles, listHistoryFiles, revealHistoryFile } from "./tauri";
 
@@ -14,6 +15,16 @@ vi.mock("@tauri-apps/plugin-updater", () => ({ check: vi.fn() }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ save: vi.fn(), open: vi.fn() }));
 
 describe("Tauri IPC contracts", () => {
+  it("opens one local audio file and sends the selected path through IPC", async () => {
+    vi.mocked(open).mockResolvedValueOnce("D:/audio 日本.mp3");
+    const path = await pickLocalAudio();
+    expect(path).toBe("D:/audio 日本.mp3");
+    expect(open).toHaveBeenCalledWith(expect.objectContaining({ multiple: false, directory: false }));
+    await inspectLocalAudio(path!);
+    expect(invoke).toHaveBeenCalledWith("inspect_local_audio", { path });
+    vi.mocked(open).mockResolvedValueOnce(null);
+    expect(await pickLocalAudio()).toBeNull();
+  });
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(invoke).mockResolvedValue(undefined);

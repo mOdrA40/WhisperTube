@@ -44,7 +44,7 @@ export function TranscriptCard({
       <div className="transcript-toolbar">
         <div>
           <span className="success-label">
-            <CheckIcon aria-hidden="true" size={14} /> {t(!transcriptAvailable ? "history.savedFiles" : durationMismatch ? "transcript.availableAudioComplete" : "transcript.complete")}
+            <CheckIcon aria-hidden="true" size={14} /> {t(!transcriptAvailable ? "history.savedFiles" : durationMismatch || result.audioRecovered ? "transcript.availableAudioComplete" : "transcript.complete")}
           </span>
           <h2>{result.title}</h2>
           <p>
@@ -77,6 +77,7 @@ export function TranscriptCard({
       </div>
 
       {transcriptAvailable && isQwenModel(result.model) && <p className="warning-inline" role="note">{t("controls.qwenTiming")}</p>}
+      {result.audioRecovered && <p role="status" className="warning-inline">{t("source.audioRecovered")}</p>}
       {durationMismatch && (
         <p role="status" className="warning-inline">
           {t("transcript.durationMismatch", {

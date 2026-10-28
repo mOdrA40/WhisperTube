@@ -14,6 +14,8 @@ const services = vi.hoisted(() => ({
   listJobCache: vi.fn(),
   discardJobCache: vi.fn(),
   inspectMedia: vi.fn(),
+  inspectLocalAudio: vi.fn(),
+  pickLocalAudio: vi.fn(),
   startTranscription: vi.fn(),
   deleteHistory: vi.fn(),
   deleteHistoryFiles: vi.fn(),
@@ -180,6 +182,8 @@ describe("useWhisperTube", () => {
     services.listJobCache.mockResolvedValue([]);
     services.discardJobCache.mockResolvedValue(undefined);
     services.inspectMedia.mockResolvedValue(metadata);
+    services.pickLocalAudio.mockReset().mockResolvedValue(null);
+    services.inspectLocalAudio.mockReset();
     services.startTranscription.mockResolvedValue(transcript);
     services.loadHistory.mockResolvedValue(transcript);
     services.deleteHistory.mockResolvedValue({ deletedIds: [1], cleanupWarnings: [] });
@@ -200,6 +204,51 @@ describe("useWhisperTube", () => {
     expect(services.disposeAppUpdate).not.toHaveBeenCalled();
     unmount();
     expect(services.disposeAppUpdate).toHaveBeenCalledOnce();
+  });
+
+  it("transcribes local audio without a downloader or URL", async () => {
+    services.getSystemStatus.mockResolvedValue({ ...system, ytDlp: false });
+    const local = { ...metadata, title: "Recording.mp3", source: "Local audio", webpageUrl: "file:///recording.mp3?size=100&modified=123" };
+    services.pickLocalAudio.mockResolvedValue("D:/Recording.mp3");
+    services.inspectLocalAudio.mockResolvedValue(local);
+    const { result } = renderHook(() => useWhisperTube(), { wrapper });
+    await waitFor(() => expect(result.current.system).not.toBeNull());
+    await act(async () => result.current.importLocalAudio());
+    await waitFor(() => expect(result.current.canStart).toBe(true));
+    expect(result.current.metadata).toEqual(local);
+    expect(services.inspectMedia).not.toHaveBeenCalled();
+    await act(async () => result.current.startTranscription());
+    expect(services.startTranscription).toHaveBeenCalledWith(expect.objectContaining({ url: local.webpageUrl, title: local.title, duration: 60 }), expect.anything());
+  });
+
+  it("keeps the previous source when the audio picker is dismissed and reports invalid audio", async () => {
+    const { result } = renderHook(() => useWhisperTube(), { wrapper });
+    await waitFor(() => expect(result.current.system).toEqual(system));
+    act(() => result.current.setUrl(metadata.webpageUrl));
+    await act(async () => result.current.inspectVideo());
+    await act(async () => result.current.importLocalAudio());
+    expect(result.current.metadata).toEqual(metadata);
+    expect(services.inspectLocalAudio).not.toHaveBeenCalled();
+    services.pickLocalAudio.mockResolvedValue("D:/broken.mp3");
+    services.inspectLocalAudio.mockRejectedValue(new Error("Audio rusak"));
+    await act(async () => result.current.importLocalAudio());
+    expect(result.current.metadata).toBeNull();
+    expect(result.current.error).toContain("Audio rusak");
+    expect(result.current.inspecting).toBe(false);
+  });
+
+  it("does not start local inspection when selection was cancelled while the picker was open", async () => {
+    let select!: (path: string) => void;
+    services.pickLocalAudio.mockReturnValueOnce(new Promise<string>((resolve) => { select = resolve; }));
+    const { result } = renderHook(() => useWhisperTube(), { wrapper });
+    await waitFor(() => expect(result.current.system).toEqual(system));
+    let pending!: Promise<void>;
+    act(() => { pending = result.current.importLocalAudio(); });
+    await act(async () => result.current.cancelInspection());
+    await act(async () => { select("D:/recording.mp3"); await pending; });
+    expect(services.inspectLocalAudio).not.toHaveBeenCalled();
+    expect(result.current.inspecting).toBe(false);
+    expect(result.current.cancellingInspection).toBe(false);
   });
 
   it.each([

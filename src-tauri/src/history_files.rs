@@ -64,6 +64,7 @@ pub(crate) fn metadata_only_result(
             [id],
             |row| {
                 Ok(TranscriptResult {
+                    audio_recovered: false,
                     history_id: id,
                     title: row.get(0)?,
                     channel: row.get(1)?,

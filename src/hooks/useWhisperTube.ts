@@ -17,6 +17,8 @@ import {
   installAccelerator,
   installCudaEngine,
   inspectMedia,
+  inspectLocalAudio,
+  pickLocalAudio,
   installAppUpdate,
   listHistory,
   listJobCache as listJobCacheRequest,
@@ -135,6 +137,7 @@ export function useWhisperTube() {
   const [transcriptionElapsedMs, setTranscriptionElapsedMs] = useState<number | null>(null);
   const [transcriptionTimerActive, setTranscriptionTimerActive] = useState(false);
   const transcriptionStartedAtRef = useRef<number | null>(null);
+  const localImportCancelled = useRef(false);
   const [busy, setBusy] = useState(false);
   const [inspecting, setInspecting] = useState(false);
   const [cancellingInspection, setCancellingInspection] = useState(false);
@@ -212,7 +215,8 @@ export function useWhisperTube() {
   const cudaReady = Boolean(system?.cudaInstallable && system.nvidia && system.cudaEngine &&
     system.computeDevices.some((device) => device.backend === "cuda"));
   const runtimeReady = Boolean(
-    system?.ytDlp &&
+    system &&
+    (metadata?.source === "Local audio" || system?.ytDlp) &&
       system.ffmpeg &&
       (isQwenModel(modelId)
         ? (supportsModelBackend(modelId, backend, system) && (backend !== "cuda" || cudaReady))
@@ -597,6 +601,28 @@ export function useWhisperTube() {
     }
   }
 
+  async function importLocalAudio() {
+    if (operationActive) return;
+    localImportCancelled.current = false;
+    setInspecting(true);
+    setCancellingInspection(false);
+    setError(null);
+    try {
+      const path = await pickLocalAudio();
+      if (!path || localImportCancelled.current) return;
+      setMetadata(null);
+      setCurrentResult(null);
+      setUrl("");
+      setMetadata(await inspectLocalAudio(path));
+    } catch (cause) {
+      const message = friendlyError(cause);
+      if (!message.toLowerCase().includes("dibatalkan")) setError(message);
+    } finally {
+      setInspecting(false);
+      setCancellingInspection(false);
+    }
+  }
+
   async function handleDownloadModel(id: string) {
     if (operationActive) return;
     setError(null);
@@ -765,8 +791,8 @@ export function useWhisperTube() {
     setCurrentResult(null);
     setNetworkSpeedBytesPerSecond(null);
       setProgress({
-        stage: "downloading",
-        messageCode: "preparing_download",
+        stage: metadata.source === "Local audio" ? "converting" : "downloading",
+        messageCode: metadata.source === "Local audio" ? "normalizing_audio" : "preparing_download",
         percent: 0,
       message: "",
       backend: null,
@@ -851,6 +877,7 @@ export function useWhisperTube() {
 
   async function handleCancelInspection() {
     if (!inspecting || cancellingInspection) return;
+    localImportCancelled.current = true;
     setCancellingInspection(true);
     try {
       await cancelJobRequest();
@@ -1080,6 +1107,7 @@ export function useWhisperTube() {
     acceleratorWarning,
     refreshSystem: refreshSystemFromUi,
     inspectVideo,
+    importLocalAudio,
     cancelInspection: handleCancelInspection,
     downloadModel: handleDownloadModel,
     removeModel: handleRemoveModel,

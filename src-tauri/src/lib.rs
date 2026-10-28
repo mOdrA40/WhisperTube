@@ -89,6 +89,7 @@ pub fn run() {
             commands::begin_app_update,
             commands::end_app_update,
             commands::inspect_media,
+            commands::inspect_local_audio,
             commands::start_transcription,
             commands::transcription_resume_stage,
             commands::cancel_job,

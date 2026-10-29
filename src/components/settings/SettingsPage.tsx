@@ -161,9 +161,10 @@ export function SettingsPage({
     }
   }
 
-  const installedModels = models.filter((model) => model.installed);
+  const installedModels = models.filter((model) => model.weightsPresent ?? model.installed);
   const installedAccelerators = accelerators.filter((accelerator) => accelerator.installed);
   const installedRuntimes = [
+    ...(system?.qwenRuntime ? ["Qwen3-ASR"] : []),
     ...(system?.cudaEngine ? [t("settings.cudaEngine")] : []),
     ...installedAccelerators.map((accelerator) => getAcceleratorCopy(accelerator, t).label),
   ];
@@ -641,6 +642,14 @@ export function SettingsPage({
                   <small className="model-download-block-reason">{modelDownloadBlockReasons[model.id]}</small>
                 )}
               </div>
+              {!model.installed && model.weightsPresent && !downloadingModel[model.id] && (
+                <button type="button" className="secondary-button compact"
+                  onClick={() => onDownloadModel(model.id)}
+                  disabled={modelDownloadActive || busy || Boolean(modelDownloadBlockReasons[model.id])}
+                  title={modelDownloadBlockReasons[model.id]}>
+                  <DownloadSimpleIcon aria-hidden="true" size={15} /> {t("settings.download")}
+                </button>
+              )}
               {downloadingModel[model.id] ? (
                 <div className="model-download-status">
                   <span>
@@ -664,7 +673,7 @@ export function SettingsPage({
                     <StopCircleIcon aria-hidden="true" size={17} />
                   </button>
                 </div>
-              ) : model.installed ? (
+              ) : (model.weightsPresent ?? model.installed) ? (
                 <button
                   type="button"
                   className="icon-button danger"

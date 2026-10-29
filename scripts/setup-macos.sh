@@ -5,6 +5,10 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RUNTIME="$ROOT/src-tauri/runtime/macos"
 CPU="$RUNTIME/cpu"
 METAL="$RUNTIME/metal"
+source "$ROOT/scripts/activate-runtime.sh"
+STAGED_CPU=""
+STAGED_METAL=""
+STAGED_FFMPEG=""
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/whispertube-macos.XXXXXX")"
 FFMPEG_VERSION="9.0.1"
 FFMPEG_SOURCE_SHA256="cf38e0e28c7e5605942c4a77755349b0145804a397af37eb1fb4c77cb237f635"
@@ -13,6 +17,9 @@ YT_DLP_SHA256="7a6fe71d7d680f1fb0ac18d4949873d77db2859e90017c0f44bd94b23be4ee40"
 YT_DLP_TMP="$RUNTIME/.yt-dlp.tmp"
 
 cleanup() {
+  if [[ -n "$STAGED_FFMPEG" ]]; then rm -f "$STAGED_FFMPEG"; fi
+  if [[ -n "$STAGED_CPU" ]]; then rm -rf "$STAGED_CPU"; fi
+  if [[ -n "$STAGED_METAL" ]]; then rm -rf "$STAGED_METAL"; fi
   rm -rf "$WORK"
   rm -f "$YT_DLP_TMP"
 }
@@ -84,7 +91,11 @@ if otool -L "$ffmpeg_prefix/bin/ffmpeg" | grep -Eq '/opt/homebrew|/usr/local/opt
   echo "FFmpeg masih memiliki dependency package manager macOS; build dibatalkan." >&2
   exit 1
 fi
-cp "$ffmpeg_prefix/bin/ffmpeg" "$RUNTIME/ffmpeg"
+STAGED_FFMPEG="$(mktemp "$RUNTIME/.ffmpeg-staging.XXXXXX")"
+cp -p "$ffmpeg_prefix/bin/ffmpeg" "$STAGED_FFMPEG"
+"$STAGED_FFMPEG" -version >/dev/null
+mv -f "$STAGED_FFMPEG" "$RUNTIME/ffmpeg"
+STAGED_FFMPEG=""
 chmod +x "$RUNTIME/ffmpeg"
 
 curl --fail --location --retry 3 --connect-timeout 30 \
@@ -125,8 +136,7 @@ build_engine() {
     exit 1
   fi
 
-  rm -rf "$destination"
-  mkdir -p "$destination"
+  # Destination is an empty staging directory, never the active runtime.
   find "$(dirname "$cli")" -maxdepth 1 \( -type f -o -type l \) \( \
     -name "whisper-cli" -o \
     -name "libwhisper*" -o \
@@ -140,14 +150,20 @@ build_engine() {
   "$destination/whisper-cli" --version >/dev/null
 }
 
-build_engine "$WORK/build-cpu" "$CPU" OFF
-build_engine "$WORK/build-metal" "$METAL" ON
+STAGED_CPU="$(mktemp -d "$RUNTIME/.cpu-staging.XXXXXX")"
+STAGED_METAL="$(mktemp -d "$RUNTIME/.metal-staging.XXXXXX")"
+build_engine "$WORK/build-cpu" "$STAGED_CPU" OFF
+build_engine "$WORK/build-metal" "$STAGED_METAL" ON
 
 # A build-tree self-check can accidentally resolve absolute dylib paths. Remove
 # both trees before exercising only the staged runtime that will be bundled.
 rm -rf "$WORK/build-cpu" "$WORK/build-metal" "$WORK/whisper.cpp"
-"$CPU/whisper-cli" --version >/dev/null
-"$METAL/whisper-cli" --version >/dev/null
+"$STAGED_CPU/whisper-cli" --version >/dev/null
+"$STAGED_METAL/whisper-cli" --version >/dev/null
+activate_runtime "$STAGED_CPU" "$CPU"
+STAGED_CPU=""
+activate_runtime "$STAGED_METAL" "$METAL"
+STAGED_METAL=""
 
 cd "$ROOT"
 npm ci

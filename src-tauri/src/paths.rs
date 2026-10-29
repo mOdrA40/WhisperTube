@@ -515,6 +515,10 @@ pub fn engine_path_cancelable(
     if valid {
         return Ok(user_path);
     }
+    fallback_engine_path(app, backend)
+}
+
+fn fallback_engine_path(app: &AppHandle, backend: &str) -> Result<PathBuf, String> {
     #[cfg(debug_assertions)]
     {
         let development_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -529,6 +533,39 @@ pub fn engine_path_cancelable(
     Ok(runtime_dir(app)?
         .join(backend)
         .join(exe_name("whisper-cli")))
+}
+
+/// Resolve and retain the same verified files throughout probe and inference.
+pub fn engine_with_snapshot(
+    app: &AppHandle,
+    backend: &str,
+    cancelled: &AtomicBool,
+) -> Result<(PathBuf, crate::runtime_snapshot::RuntimeSnapshot), String> {
+    crate::io_cancel::check(cancelled)?;
+    let user_path = user_runtime_dir(app)?
+        .join(backend)
+        .join(exe_name("whisper-cli"));
+    let version = if matches!(backend, "metal" | "vulkan") {
+        ACCELERATOR_RUNTIME_MANIFEST_VERSION
+    } else {
+        CORE_RUNTIME_MANIFEST_VERSION
+    };
+    if is_regular_file(&user_path) {
+        match crate::runtime_snapshot::RuntimeSnapshot::capture(
+            &user_path,
+            Some(version),
+            cancelled,
+        ) {
+            Ok(snapshot) => return Ok((user_path, snapshot)),
+            Err(error) => {
+                crate::io_cancel::check(cancelled)?;
+                eprintln!("WhisperTube user runtime validation warning: {error}");
+            }
+        }
+    }
+    let path = fallback_engine_path(app, backend)?;
+    let snapshot = crate::runtime_snapshot::RuntimeSnapshot::capture(&path, None, cancelled)?;
+    Ok((path, snapshot))
 }
 
 pub fn snapshot_runtime(

@@ -360,7 +360,7 @@ fn validate_output(output: &ChunkOutput, chunk: &AudioChunk) -> Result<(), Strin
     for segment in &output.segments {
         let start = timestamp_ms(&segment.from)?;
         let end = timestamp_ms(&segment.to)?;
-        if start < previous_start || end < start || end > duration_ms + 1000 {
+        if start < previous_start || end <= start || end > duration_ms + 1000 {
             return Err("Rentang timestamp checkpoint tidak valid.".into());
         }
         previous_start = start;
@@ -374,6 +374,18 @@ fn validate_output(output: &ChunkOutput, chunk: &AudioChunk) -> Result<(), Strin
 
 fn normalize_engine_output(output: &mut ChunkOutput, chunk: &AudioChunk) -> Result<(), String> {
     let duration_ms = (chunk.end - chunk.start) * 1000 / SAMPLE_RATE;
+    // Native Whisper can emit text at a single timestamp (including chunk edges).
+    // Preserve that text with a minimum 1 ms subtitle interval, inside real audio.
+    // Missing timestamps are rejected by the JSON parser before this point.
+    for segment in &mut output.segments {
+        let start = timestamp_ms(&segment.from)?;
+        let end = timestamp_ms(&segment.to)?;
+        if start == end && start <= duration_ms && duration_ms > 0 {
+            let bounded_start = start.min(duration_ms - 1);
+            segment.from = timestamp(bounded_start, ',');
+            segment.to = timestamp(bounded_start + 1, ',');
+        }
+    }
     if let Some(last) = output.segments.last_mut() {
         let start = timestamp_ms(&last.from)?;
         let end = timestamp_ms(&last.to)?;
@@ -590,6 +602,36 @@ pub fn write_exports(prefix: &Path, result: &CompletedTranscript) -> Result<(), 
     Ok(())
 }
 
+/// Remove temporary PCM without discarding checkpoint text used for recovery.
+pub fn cleanup_audio(job_dir: &Path) -> Result<(), String> {
+    let root = job_dir.join(".checkpoints");
+    match fs::symlink_metadata(&root) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("Gagal memeriksa audio checkpoint: {e}")),
+        Ok(meta) if !meta.is_dir() || meta.file_type().is_symlink() => {
+            return Err("Folder checkpoint bukan direktori biasa.".into())
+        }
+        Ok(_) => {}
+    }
+    for entry in fs::read_dir(root).map_err(|e| format!("Gagal membaca checkpoint: {e}"))? {
+        let entry = entry.map_err(|e| format!("Gagal membaca checkpoint: {e}"))?;
+        let kind = entry
+            .file_type()
+            .map_err(|e| format!("Gagal memeriksa checkpoint: {e}"))?;
+        if kind.is_symlink() {
+            return Err("Checkpoint berisi symbolic link.".into());
+        }
+        if kind.is_dir() {
+            match fs::remove_file(entry.path().join("current.wav")) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(format!("Gagal menghapus audio checkpoint: {e}")),
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn cleanup(job_dir: &Path) -> Result<(), String> {
     let directory = job_dir.join(".checkpoints");
     match fs::symlink_metadata(&directory) {
@@ -606,6 +648,87 @@ pub fn cleanup(job_dir: &Path) -> Result<(), String> {
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn native_whisper_point_segment_between_timed_segments_is_preserved() {
+        let mut output = ChunkOutput {
+            language: "id".into(),
+            backend: "cpu".into(),
+            segments: vec![
+                Segment {
+                    from: "00:01:00,000".into(),
+                    to: "00:01:01,980".into(),
+                    text: "before".into(),
+                },
+                Segment {
+                    from: "00:01:01,980".into(),
+                    to: "00:01:01,980".into(),
+                    text: "point".into(),
+                },
+                Segment {
+                    from: "00:01:03,980".into(),
+                    to: "00:01:04,220".into(),
+                    text: "after".into(),
+                },
+            ],
+        };
+        let chunk = AudioChunk {
+            index: 1,
+            start: SAMPLE_RATE * 300,
+            end: SAMPLE_RATE * 600,
+        };
+        normalize_engine_output(&mut output, &chunk).unwrap();
+        assert_eq!(output.segments.len(), 3);
+        assert_eq!(output.segments[1].text, "point");
+        assert_eq!(output.segments[1].to, "00:01:01,981");
+        assert_eq!(output.segments[0].to, "00:01:01,980");
+        assert_eq!(output.segments[2].from, "00:01:03,980");
+    }
+
+    #[test]
+    fn native_point_timestamps_preserve_text_through_checkpoint_and_resume() {
+        let fixture = Fixture::new(1);
+        let audio = fixture.audio();
+        let result = transcribe(
+            &audio,
+            &fixture.root,
+            &fixture.request,
+            |_, _, _, _| {
+                Ok(ChunkOutput {
+                    language: "en".into(),
+                    backend: "cpu".into(),
+                    segments: ["00:00:00,000", "00:00:00,500", "00:00:01,000"]
+                        .into_iter()
+                        .map(|time| Segment {
+                            from: time.into(),
+                            to: time.into(),
+                            text: "must not disappear".into(),
+                        })
+                        .collect(),
+                })
+            },
+            || false,
+            |_, _| {},
+        );
+        let result = result.unwrap();
+        assert_eq!(result.segments.len(), 3);
+        assert_eq!(
+            result.text,
+            "must not disappear\nmust not disappear\nmust not disappear"
+        );
+        assert_eq!(result.segments[0].to, "00:00:00,001");
+        assert_eq!(result.segments[2].from, "00:00:00,999");
+        let resumed = transcribe(
+            &audio,
+            &fixture.root,
+            &fixture.request,
+            |_, _, _, _| panic!("valid checkpoint must be reused"),
+            || false,
+            |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(resumed.text, result.text);
+    }
 
     struct Fixture {
         root: PathBuf,

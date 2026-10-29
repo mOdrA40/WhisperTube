@@ -36,6 +36,8 @@ const CUDA_DOWNLOAD_ATTEMPTS: usize = 4;
 struct ModelFingerprint {
     size: u64,
     modified: SystemTime,
+    identity: Option<[u64; 3]>,
+    changed: [i64; 2],
 }
 
 static VERIFIED_MODELS: OnceLock<Mutex<HashMap<PathBuf, ModelFingerprint>>> = OnceLock::new();
@@ -51,8 +53,14 @@ pub fn clear_verified_models() {
 }
 
 fn model_fingerprint(path: &Path) -> Result<ModelFingerprint, String> {
-    let metadata = fs::metadata(path).map_err(|e| format!("Gagal membaca metadata model: {e}"))?;
+    let file = fs::File::open(path).map_err(|e| format!("Gagal membuka model: {e}"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|e| format!("Gagal membaca metadata model: {e}"))?;
+    let (identity, changed) = crate::runtime_snapshot::file_identity(&file, &metadata);
     Ok(ModelFingerprint {
+        identity,
+        changed,
         size: metadata.len(),
         modified: metadata
             .modified()
@@ -168,6 +176,7 @@ pub fn list_models(app: &AppHandle) -> Result<Vec<ModelInfo>, String> {
     Ok(MODELS
         .iter()
         .map(|model| ModelInfo {
+            weights_present: crate::paths::is_regular_file(&dir.join(model_filename(model.id))),
             id: model.id.into(),
             label: model.label.into(),
             description: model.description.into(),
@@ -302,7 +311,7 @@ pub fn verify_model_file(
         .map_err(|_| "Cache verifikasi model terkunci".to_string())?
         .get(path)
         .is_some_and(|cached| *cached == fingerprint);
-    if already_verified {
+    if already_verified && fingerprint.identity.is_some() {
         return Ok(());
     }
     verify_sha256_file(path, spec.sha256, cancelled)?;
@@ -563,7 +572,12 @@ async fn download_cuda_package(
                     }
                     last_error = Some(error);
                     if attempt + 1 < CUDA_DOWNLOAD_ATTEMPTS {
-                        tokio::time::sleep(Duration::from_secs(2 * (attempt as u64 + 1))).await;
+                        crate::io_cancel::sleep_async(
+                            Duration::from_secs(2 * (attempt as u64 + 1)),
+                            cancelled,
+                        )
+                        .await
+                        .map_err(|_| "Download CUDA dibatalkan.".to_string())?;
                         continue;
                     }
                     break;
@@ -582,7 +596,12 @@ async fn download_cuda_package(
             if matches!(status.as_u16(), 408 | 429) || status.is_server_error() {
                 last_error = Some(error.clone());
                 if attempt + 1 < CUDA_DOWNLOAD_ATTEMPTS {
-                    tokio::time::sleep(Duration::from_secs(2 * (attempt as u64 + 1))).await;
+                    crate::io_cancel::sleep_async(
+                        Duration::from_secs(2 * (attempt as u64 + 1)),
+                        cancelled,
+                    )
+                    .await
+                    .map_err(|_| "Download CUDA dibatalkan.".to_string())?;
                     continue;
                 }
             }
@@ -722,7 +741,9 @@ async fn download_cuda_package(
             ))
         });
         if attempt + 1 < CUDA_DOWNLOAD_ATTEMPTS {
-            tokio::time::sleep(Duration::from_secs(2 * (attempt as u64 + 1))).await;
+            crate::io_cancel::sleep_async(Duration::from_secs(2 * (attempt as u64 + 1)), cancelled)
+                .await
+                .map_err(|_| "Download CUDA dibatalkan.".to_string())?;
         }
     }
 
@@ -881,6 +902,25 @@ pub fn delete_model(app: &AppHandle, model_id: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn restored_size_and_mtime_do_not_preserve_model_verification() {
+        let path = std::env::temp_dir().join(format!("model-identity-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&path, b"old model").unwrap();
+        let before = super::model_fingerprint(&path).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::fs::write(&path, b"new model").unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(before.modified))
+            .unwrap();
+        let after = super::model_fingerprint(&path).unwrap();
+        assert_eq!(before.size, after.size);
+        assert_eq!(before.modified, after.modified);
+        assert!(before != after || after.identity.is_none());
+        std::fs::remove_file(path).unwrap();
+    }
     #[cfg(windows)]
     #[test]
     fn cuda_cleanup_reports_locked_files_and_can_be_retried() {

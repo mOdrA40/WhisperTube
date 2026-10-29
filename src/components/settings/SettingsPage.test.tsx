@@ -62,6 +62,29 @@ function renderSettingsPage(overrides: Partial<SettingsPageProps> = {}) {
 }
 
 describe("SettingsPage local data reset", () => {
+  it("lists a standalone Qwen runtime in reset confirmation without any model weights", () => {
+    const system: SystemStatus = {
+      qwenRuntime:true, qwenBackends:["auto","cpu"], ytDlp:false, ffmpeg:false,
+      cpuEngine:false, cudaEngine:false, cudaSupported:false, nvidia:false,
+      gpuName:null, gpuMemoryMb:null, gpuFreeMemoryMb:null, availableMemoryMb:8192,
+      nvidiaDriverVersion:null, cudaInstallable:false, cpuThreads:4, recommendation:"",
+      recommendedModelId:"base", recommendedBackend:"auto", accelerators:[], computeDevices:[],
+      jobStorageBytes:0, jobStorageLimitBytes:21474836480,
+    };
+    renderSettingsPage({system, models:[]});
+    fireEvent.click(screen.getByRole("button", {name:"Reset WhisperTube data"}));
+    expect(screen.getByRole("dialog").textContent).toContain("Qwen3-ASR");
+  });
+  it("offers deletion and runtime repair when Qwen weights remain without a runtime", () => {
+    const onDownloadModel = vi.fn();
+    renderSettingsPage({ models: [{ id: "qwen3-asr-1.7b-q8_0", label:"Qwen", description:"", sizeMb:100,
+      vramRequiredMb:4096, installed:false, weightsPresent:true }], onDownloadModel });
+    fireEvent.click(screen.getByRole("combobox", { name: "Model provider" }));
+    fireEvent.click(screen.getByRole("option", { name: "Alibaba · Qwen" }));
+    expect(screen.getByRole("button", { name: "Delete model" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Download" }));
+    expect(onDownloadModel).toHaveBeenCalledWith("qwen3-asr-1.7b-q8_0");
+  });
   it("separates provider models when downloading Qwen", () => {
     const onDownloadModel = vi.fn();
     const model = { label: "", description: "", sizeMb: 100, vramRequiredMb: 4096, installed: false };

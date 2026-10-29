@@ -36,6 +36,7 @@ export type AcceleratorInfo = {
 };
 
 export type SystemStatus = {
+  qwenRuntime?: boolean;
   qwenBackends: BackendChoice[];
   ytDlp: boolean;
   ffmpeg: boolean;
@@ -71,6 +72,7 @@ export type ComputeDeviceInfo = {
 };
 
 export type ModelInfo = {
+  weightsPresent?: boolean;
   id: string;
   label: string;
   description: string;

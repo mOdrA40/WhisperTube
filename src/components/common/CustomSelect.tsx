@@ -148,9 +148,14 @@ export function CustomSelect({
     }
   }, [highlightedIndex, isOpen]);
 
-  useEffect(() => () => {
+  useEffect(() => {
+    typeaheadRef.current = "";
     if (typeaheadTimerRef.current !== null) window.clearTimeout(typeaheadTimerRef.current);
-  }, []);
+    typeaheadTimerRef.current = null;
+    return () => {
+      if (typeaheadTimerRef.current !== null) window.clearTimeout(typeaheadTimerRef.current);
+    };
+  }, [isOpen]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (disabled) return;

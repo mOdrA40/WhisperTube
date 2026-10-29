@@ -1,6 +1,10 @@
-# WhisperTube 0.1
+# WhisperTube 0.2.0
 
-WhisperTube adalah aplikasi desktop local-first untuk mengubah video dari platform yang didukung menjadi transkrip menggunakan `yt-dlp`, FFmpeg, dan mesin lokal Whisper/Qwen. Audio serta proses transkripsi tetap berada di perangkat pengguna.
+WhisperTube adalah aplikasi desktop local-first untuk mengubah file audio lokal dan video dari platform yang didukung menjadi transkrip menggunakan `yt-dlp`, FFmpeg, dan mesin lokal Whisper/Qwen. Audio serta proses transkripsi tetap berada di perangkat pengguna.
+
+Gunakan **Choose local audio** untuk memilih MP3, WAV, M4A, AAC, FLAC, OGG, Opus, WMA, AIFF, WebM, atau MP4, maksimal 4 GiB / 8 jam. Impor lokal memerlukan FFmpeg serta model dan mesin transkripsi terpasang; tidak memerlukan URL, cookies, yt-dlp, atau runtime JavaScript. File asli tidak dipindahkan atau dihapus. Setelah terputus, pilih kembali file yang sama dan belum berubah untuk menggunakan audio/checkpoint tersimpan.
+
+Impor MP3 lokal dimulai dengan decoding ketat. Untuk kesalahan paket/decoder MP3 yang dikenali, pemeriksaan dan konversi otomatis mencoba ulang dengan batas kegagalan frame decoding FFmpeg sebesar 1%. Format lain, kegagalan akses, pembatalan, dan timeout tidak memicu pemulihan. Pemulihan harus tetap berhasil menghasilkan PCM WAV valid dengan durasi dalam batas. Aplikasi menampilkan peringatan pemulihan dan menyimpannya dalam hasil, history, serta cache retry; bagian rusak dapat terlewat dan timestamp dapat bergeser. Batas 1% mengukur kegagalan decoder, bukan jaminan bahwa 99% rekaman asli utuh. File yang tetap gagal perlu diekspor ulang dari aplikasi perekam.
 
 Dokumentasi utama: [README.md](README.md) (English). Dokumentasi Mandarin: [README_CN.md](README_CN.md).
 

@@ -169,6 +169,12 @@ jobs:
                 exit 1
               fi
               cp "$updater_bundle.sig" "$package_dir/$(basename "$updater_bundle").sig"
+              deb_bundle="$(find "$bundle_root/deb" -maxdepth 1 -type f -name '*.deb' -print -quit)"
+              if [[ -z "$deb_bundle" || ! -f "$deb_bundle.sig" ]]; then
+                echo "Artifact updater Debian atau signature tidak ditemukan" >&2
+                exit 1
+              fi
+              cp "$deb_bundle.sig" "$package_dir/$(basename "$deb_bundle").sig"
             fi
           fi
 
@@ -296,8 +302,9 @@ jobs:
           mac_x64_asset="$(find_asset '*-x64.app.tar.gz')"
           mac_arm64_asset="$(find_asset '*-arm64.app.tar.gz')"
           linux_asset="$(find_asset '*.AppImage')"
+          linux_deb_asset="$(find_asset '*.deb')"
 
-          for required in "$windows_asset" "$mac_x64_asset" "$mac_arm64_asset" "$linux_asset"; do
+          for required in "$windows_asset" "$mac_x64_asset" "$mac_arm64_asset" "$linux_asset" "$linux_deb_asset"; do
             if [[ -z "$required" || ! -f "$required" || ! -f "$required.sig" ]]; then
               echo "Artifact updater atau signature tidak lengkap: ${required:-<kosong>}" >&2
               exit 1
@@ -319,6 +326,8 @@ jobs:
             --arg mac_arm64_signature "$(cat "$mac_arm64_asset.sig")" \
             --arg linux_url "${release_base}/$(basename "$linux_asset")" \
             --arg linux_signature "$(cat "$linux_asset.sig")" \
+            --arg linux_deb_url "${release_base}/$(basename "$linux_deb_asset")" \
+            --arg linux_deb_signature "$(cat "$linux_deb_asset.sig")" \
             '{
               version: $version,
               notes: $notes,
@@ -327,7 +336,9 @@ jobs:
                 "windows-x86_64": { url: $windows_url, signature: $windows_signature },
                 "darwin-x86_64": { url: $mac_x64_url, signature: $mac_x64_signature },
                 "darwin-aarch64": { url: $mac_arm64_url, signature: $mac_arm64_signature },
-                "linux-x86_64": { url: $linux_url, signature: $linux_signature }
+                "linux-x86_64": { url: $linux_url, signature: $linux_signature },
+                "linux-x86_64-appimage": { url: $linux_url, signature: $linux_signature },
+                "linux-x86_64-deb": { url: $linux_deb_url, signature: $linux_deb_signature }
               }
             }' > packages/latest.json
 

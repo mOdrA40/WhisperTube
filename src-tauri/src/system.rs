@@ -1265,6 +1265,7 @@ pub fn system_status(app: &AppHandle) -> Result<SystemStatus, String> {
 
     let _ = runtime;
     Ok(SystemStatus {
+        qwen_runtime: crate::qwen::installed(app),
         qwen_backends: crate::qwen::supported_backends(),
         yt_dlp,
         ffmpeg,

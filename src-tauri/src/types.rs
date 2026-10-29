@@ -112,6 +112,7 @@ pub struct ComputeDeviceInfo {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SystemStatus {
+    pub qwen_runtime: bool,
     pub qwen_backends: Vec<&'static str>,
     pub yt_dlp: bool,
     pub ffmpeg: bool,
@@ -138,6 +139,7 @@ pub struct SystemStatus {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelInfo {
+    pub weights_present: bool,
     pub id: String,
     pub label: String,
     pub description: String,

@@ -171,7 +171,7 @@ fn inventory(
 }
 
 #[cfg(unix)]
-fn file_identity(_file: &File, metadata: &fs::Metadata) -> (Option<[u64; 3]>, [i64; 2]) {
+pub(crate) fn file_identity(_file: &File, metadata: &fs::Metadata) -> (Option<[u64; 3]>, [i64; 2]) {
     use std::os::unix::fs::MetadataExt;
     (
         Some([metadata.dev(), metadata.ino(), 0]),
@@ -180,12 +180,20 @@ fn file_identity(_file: &File, metadata: &fs::Metadata) -> (Option<[u64; 3]>, [i
 }
 
 #[cfg(windows)]
-fn file_identity(file: &File, _metadata: &fs::Metadata) -> (Option<[u64; 3]>, [i64; 2]) {
+pub(crate) fn file_identity(file: &File, _metadata: &fs::Metadata) -> (Option<[u64; 3]>, [i64; 2]) {
     use std::os::windows::io::AsRawHandle;
     #[repr(C)]
     struct FileId {
         volume: u64,
         id: [u8; 16],
+    }
+    #[repr(C)]
+    struct BasicInfo {
+        creation: i64,
+        access: i64,
+        write: i64,
+        change: i64,
+        attributes: u32,
     }
     #[link(name = "kernel32")]
     unsafe extern "system" {
@@ -216,8 +224,26 @@ fn file_identity(file: &File, _metadata: &fs::Metadata) -> (Option<[u64; 3]>, [i
             u64::from_ne_bytes(id.id[8..].try_into().unwrap()),
         ]
     });
-    // Immutable read-sharing handles replace Unix ctime checks on Windows.
-    (identity, [0, 0])
+    let mut basic = BasicInfo {
+        creation: 0,
+        access: 0,
+        write: 0,
+        change: 0,
+        attributes: 0,
+    };
+    // SAFETY: live File handle and correctly sized FILE_BASIC_INFO (class 0).
+    let basic_ok = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            0,
+            (&mut basic as *mut BasicInfo).cast(),
+            std::mem::size_of::<BasicInfo>() as u32,
+        )
+    };
+    if basic_ok == 0 || basic.change == 0 {
+        return (None, [0, 0]);
+    }
+    (identity, [basic.change, 0])
 }
 
 #[cfg(test)]

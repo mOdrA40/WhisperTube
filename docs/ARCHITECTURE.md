@@ -104,6 +104,9 @@ with a known duration of at most eight hours and a source download limit of
 divides normalized audio into approximately 300-second sections (maximum
 301 seconds), preferring quiet boundaries. A successful section is validated
 and checkpointed atomically; matching completed sections are reused on retry.
+Native text segments with equal start/end timestamps receive a minimum 1 ms
+interval within the chunk, preserving their text in checkpoints and exports.
+Missing timestamps are rejected rather than synthesized by the JSON parser.
 Before saving fresh engine output, a final segment that starts within the real
 audio and spans at most one 30-second decoder window has its endpoint clipped
 to the chunk duration if necessary. Earlier outliers, malformed, reversed or
@@ -330,8 +333,12 @@ User-runtime manifests include the accelerator pack generation, so a legacy
 runtime cannot bypass a corrected catalog merely by matching the engine version.
 
 Downloaded model files are SHA-256 verified before use. The verification cache
-is valid only for the current file size and modification timestamp and is
+is valid only for the current file identity, system change timestamp, size and modification timestamp and is
 cleared by a data reset.
+Filesystems without a usable identity cannot reuse model verification results.
+Local audio cache identities also include file identity and system change time;
+when unavailable, they use a content hash. Older local file identities require
+selecting the source again and do not authorize reusing an old WAV.
 Accelerator inference probes use the same verifier: an invalid model is skipped
 in favor of the next valid candidate. If models exist but none verify, installation
 reports a model error rather than misdiagnosing all GPU devices as incompatible.

@@ -43,5 +43,6 @@ describe("resume progress copy", () => {
     expect(getProgressMessage({ ...progress, messageCode: "resuming_transcription" }, "auto", result.current.t)).toContain(resume);
     expect(getProgressMessage({ ...progress, messageCode: "checkpoint_progress" }, "auto", result.current.t)).toContain(checkpoint);
     expect(result.current.t("controls.keepAudio")).toContain(retention);
+    expect(result.current.t("settings.jobCacheHint")).toContain("24");
   });
 });

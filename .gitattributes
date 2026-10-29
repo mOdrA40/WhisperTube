@@ -1,0 +1,2 @@
+# Shell scripts must also run from Windows checkouts mounted into WSL.
+*.sh text eol=lf

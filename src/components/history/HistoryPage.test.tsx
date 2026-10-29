@@ -29,6 +29,21 @@ function makeHistory(count: number): HistoryItem[] {
 }
 
 describe("HistoryPage", () => {
+  it("keeps deletion confirmation open until the request settles", async () => {
+    let finish!: () => void;
+    const request = new Promise<void>((resolve) => { finish = resolve; });
+    const props = renderHistory({onDelete: vi.fn(() => request)});
+    fireEvent.click(screen.getByRole("button", {name:"Delete history: Video 1"}));
+    fireEvent.click(screen.getByRole("button", {name:/^Delete$/}));
+    const cancel = screen.getByRole("button", {name:"Cancel"});
+    expect(cancel.hasAttribute("disabled")).toBe(true);
+    fireEvent.click(cancel);
+    fireEvent.keyDown(document, {key:"Escape"});
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    expect(props.onDelete).toHaveBeenCalledTimes(1);
+    finish();
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
   it.each(["Saved files: Video 1", "Delete history: Video 1"])("opens %s outside the filtered card and restores focus and page scrolling", async (name) => {
     renderHistory();
     document.body.style.overflow = "auto";

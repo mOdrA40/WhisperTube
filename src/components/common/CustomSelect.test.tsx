@@ -4,6 +4,18 @@ import { useState } from "react";
 import { CustomSelect } from "./CustomSelect";
 
 describe("CustomSelect", () => {
+  it("starts a fresh keyboard search after reopening", () => {
+    const onChange = vi.fn();
+    render(<CustomSelect value="cpu" options={[{value:"auto",label:"Auto"},{value:"cpu",label:"CPU"}]} onChange={onChange} ariaLabel="Backend" />);
+    const trigger = screen.getByRole("combobox", {name:"Backend"});
+    fireEvent.click(trigger);
+    fireEvent.keyDown(trigger, {key:"c"});
+    fireEvent.keyDown(trigger, {key:"Escape"});
+    fireEvent.click(trigger);
+    fireEvent.keyDown(trigger, {key:"a"});
+    fireEvent.keyDown(trigger, {key:"Enter"});
+    expect(onChange).toHaveBeenCalledWith("auto");
+  });
   afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
   beforeEach(() => {

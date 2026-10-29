@@ -165,7 +165,13 @@ pub(crate) fn cleanup_pending(conn: &Connection, root: &Path) -> Result<Vec<Stri
                 if let Err(e) = history::cleanup_source_audio(&job) {
                     errors.push(e);
                 }
-                if let Err(e) = crate::checkpoint::cleanup(&job) {
+                // Checkpoints contain transcript text. Audio-only deletion must
+                // preserve them, particularly when result.json cannot be recovered.
+                if kind == "transcript" {
+                    if let Err(e) = crate::checkpoint::cleanup(&job) {
+                        errors.push(e);
+                    }
+                } else if let Err(e) = crate::checkpoint::cleanup_audio(&job) {
                     errors.push(e);
                 }
                 if kind == "transcript" {
@@ -381,7 +387,7 @@ mod tests {
         assert!(cleanup_pending(&conn, &fixture.root).unwrap().is_empty());
         assert!(!fixture.job.join("audio.wav").exists());
         assert!(!fixture.job.join("source.webm").exists());
-        assert!(!fixture.job.join(".checkpoints").exists());
+        assert!(fixture.job.join(".checkpoints").exists());
         assert_eq!(fs::read(fixture.job.join("result.json")).unwrap(), original);
         for extension in ["txt", "srt", "vtt"] {
             assert!(fixture.job.join(format!("transcript.{extension}")).exists());
@@ -395,6 +401,23 @@ mod tests {
         assert!(!files[0].available);
         assert!(files[1..].iter().all(|file| file.available));
         assert!(cleanup_pending(&conn, &fixture.root).unwrap().is_empty());
+    }
+
+    #[test]
+    fn audio_only_deletion_preserves_recovery_text_when_result_is_corrupt() {
+        let fixture = Fixture::new();
+        let mut conn = fixture.open();
+        fs::write(fixture.job.join("result.json"), b"broken result").unwrap();
+        let recovery = fixture.job.join(".checkpoints/recovery.json");
+        let chunk = fixture.job.join(".checkpoints/key");
+        fs::create_dir(&chunk).unwrap();
+        fs::write(chunk.join("current.wav"), b"temporary audio").unwrap();
+        fs::write(&recovery, b"recoverable transcript text").unwrap();
+        queue_deletion(&mut conn, &fixture.root, &[1], HistoryFileScope::Audio).unwrap();
+        assert!(cleanup_pending(&conn, &fixture.root).unwrap().is_empty());
+        assert_eq!(fs::read(recovery).unwrap(), b"recoverable transcript text");
+        assert!(!chunk.join("current.wav").exists());
+        assert!(!fixture.job.join("audio.wav").exists());
     }
 
     #[test]

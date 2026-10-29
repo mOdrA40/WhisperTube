@@ -22,7 +22,7 @@ use crate::{
     paths::{engine_path_cancelable, is_regular_file, jobs_dir, model_path, tool_path},
     process, resources,
     sources::{
-        local::{local_path, validate_source},
+        local::{local_path_cancelable, validate_source, validate_source_cancelable},
         source_js_runtime_args, validate_media_duration,
     },
     system::{
@@ -291,16 +291,27 @@ pub(crate) fn cached_job_source(job_dir: &Path) -> Option<(String, String)> {
     Some((metadata.title.chars().take(256).collect(), metadata.url))
 }
 
+#[cfg(test)]
 fn find_reusable_audio_job(
     jobs_dir: &Path,
     request: &mut TranscriptRequest,
     committed_jobs: &HashSet<PathBuf>,
+) -> Result<Option<(PathBuf, bool)>, String> {
+    find_reusable_audio_job_cancelable(jobs_dir, request, committed_jobs, &AtomicBool::new(false))
+}
+
+fn find_reusable_audio_job_cancelable(
+    jobs_dir: &Path,
+    request: &mut TranscriptRequest,
+    committed_jobs: &HashSet<PathBuf>,
+    cancelled: &AtomicBool,
 ) -> Result<Option<(PathBuf, bool)>, String> {
     let job = find_reusable_audio_job_for_source(
         jobs_dir,
         &request.url,
         request.duration,
         committed_jobs,
+        cancelled,
     )?;
     Ok(job.map(|(path, cache)| {
         if cache.audio_ready {
@@ -317,7 +328,9 @@ fn find_reusable_audio_job_for_source(
     url: &str,
     duration: f64,
     committed_jobs: &HashSet<PathBuf>,
+    cancelled: &AtomicBool,
 ) -> Result<Option<(PathBuf, AudioCacheMetadata)>, String> {
+    crate::io_cancel::check(cancelled)?;
     let canonical_root = fs::canonicalize(jobs_dir)
         .map_err(|error| format!("Gagal memvalidasi folder cache audio: {error}"))?;
     let mut candidates = Vec::new();
@@ -346,8 +359,10 @@ fn find_reusable_audio_job_for_source(
         else {
             continue;
         };
+        let cache_source = validate_source_cancelable(&cache.url, cancelled);
+        crate::io_cancel::check(cancelled)?;
         if !matches!(cache.version, 1 | AUDIO_CACHE_METADATA_VERSION)
-            || validate_source(&cache.url).ok().as_deref() != Some(url)
+            || cache_source.ok().as_deref() != Some(url)
             || !cache.duration.is_finite()
             || cache.duration <= 0.0
             || cache.duration > MAX_MEDIA_DURATION_SECONDS
@@ -365,13 +380,15 @@ fn find_reusable_audio_job_for_source(
             if checkpoint::PcmAudio::inspect(&audio, cache.duration, || false).is_err() {
                 continue;
             }
+        } else if !has_saved_download(&canonical_job_dir)? {
+            continue;
         }
         let modified = fs::metadata(&canonical_job_dir)
             .and_then(|metadata| metadata.modified())
             .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
         candidates.push((modified, canonical_job_dir, cache));
     }
-    candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.0));
+    candidates.sort_by_key(|candidate| std::cmp::Reverse((candidate.2.audio_ready, candidate.0)));
     Ok(candidates
         .into_iter()
         .next()
@@ -385,14 +402,24 @@ fn resume_stage_in(
     committed: &HashSet<PathBuf>,
 ) -> Result<Option<crate::types::TranscriptionResumeStage>, String> {
     use crate::types::TranscriptionResumeStage;
-    let Some((job, cache)) = find_reusable_audio_job_for_source(root, url, duration, committed)?
+    let Some((job, cache)) = find_reusable_audio_job_for_source(
+        root,
+        url,
+        duration,
+        committed,
+        &AtomicBool::new(false),
+    )?
     else {
         return Ok(None);
     };
     if cache.audio_ready {
         return Ok(Some(TranscriptionResumeStage::Audio));
     }
-    for entry in fs::read_dir(&job).map_err(|e| format!("Gagal membaca progres unduhan: {e}"))? {
+    Ok(has_saved_download(&job)?.then_some(TranscriptionResumeStage::Download))
+}
+
+fn has_saved_download(job: &Path) -> Result<bool, String> {
+    for entry in fs::read_dir(job).map_err(|e| format!("Gagal membaca progres unduhan: {e}"))? {
         let entry = entry.map_err(|e| format!("Gagal membaca progres unduhan: {e}"))?;
         let metadata = fs::symlink_metadata(entry.path())
             .map_err(|e| format!("Gagal memeriksa progres unduhan: {e}"))?;
@@ -401,10 +428,10 @@ fn resume_stage_in(
             && !metadata.file_type().is_symlink()
             && metadata.len() > 0
         {
-            return Ok(Some(TranscriptionResumeStage::Download));
+            return Ok(true);
         }
     }
-    Ok(None)
+    Ok(false)
 }
 
 // Advisory UI lookup: use the pipeline's own candidate selection, without
@@ -1340,6 +1367,28 @@ struct ResolvedEngine {
     runtime: crate::runtime_snapshot::RuntimeSnapshot,
 }
 
+fn resolve_whisper_engine(
+    resolved: &mut Option<ResolvedEngine>,
+    cancelled: &AtomicBool,
+    choose: impl FnOnce() -> Result<ResolvedEngine, String>,
+) -> Result<BackendSelection, String> {
+    match resolved {
+        Some(selection) => {
+            selection.runtime.validate(cancelled)?;
+            Ok(selection.selection.clone())
+        }
+        None => {
+            let selection = choose()?;
+            // Selection may run a probe after capturing the runtime snapshot.
+            // Revalidate before the first inference, as for subsequent chunks.
+            selection.runtime.validate(cancelled)?;
+            let tuple = selection.selection.clone();
+            *resolved = Some(selection);
+            Ok(tuple)
+        }
+    }
+}
+
 fn choose_backend(
     context: &JobContext,
     requested: &str,
@@ -1347,20 +1396,24 @@ fn choose_backend(
     model: &Path,
     wav: &Path,
     model_id: &str,
-) -> Result<BackendSelection, String> {
+) -> Result<ResolvedEngine, String> {
     let app = context.app;
     match requested {
         "cpu" => {
-            let cpu = engine_path_cancelable(app, "cpu", context.cancelled)?;
+            let (cpu, runtime) = crate::paths::engine_with_snapshot(app, "cpu", context.cancelled)?;
             if !is_regular_file(&cpu) {
                 Err("CPU whisper engine belum terpasang.".into())
             } else {
-                Ok(("cpu".into(), cpu, None, None))
+                Ok(ResolvedEngine {
+                    selection: ("cpu".into(), cpu, None, None),
+                    runtime,
+                })
             }
         }
         "cuda" => {
             let nvidia = detect_nvidia().is_some();
-            let cuda = engine_path_cancelable(app, "cuda", context.cancelled)?;
+            let (cuda, runtime) =
+                crate::paths::engine_with_snapshot(app, "cuda", context.cancelled)?;
             if !cfg!(all(target_os = "windows", target_arch = "x86_64")) {
                 Err("CUDA hanya tersedia pada build Windows yang didukung.".into())
             } else if !nvidia {
@@ -1386,23 +1439,31 @@ fn choose_backend(
                 run_cuda_probe_with_vram_guard(model_id, &gpu, || {
                     ensure_backend_probe(context, "cuda", &cuda, model, Some(device_index))
                 })?;
-                Ok(("cuda".into(), cuda, None, Some(device_index)))
+                Ok(ResolvedEngine {
+                    selection: ("cuda".into(), cuda, None, Some(device_index)),
+                    runtime,
+                })
             }
         }
         "metal" => {
-            let metal = engine_path_cancelable(app, "metal", context.cancelled)?;
+            let (metal, runtime) =
+                crate::paths::engine_with_snapshot(app, "metal", context.cancelled)?;
             if !cfg!(target_os = "macos") {
                 Err("Apple Metal hanya tersedia di macOS.".into())
             } else if !is_regular_file(&metal) {
                 Err("Metal engine belum terpasang. Install Apple Metal dari Settings terlebih dahulu.".into())
             } else {
                 ensure_backend_probe(context, "metal", &metal, model, None)?;
-                Ok(("metal".into(), metal, None, None))
+                Ok(ResolvedEngine {
+                    selection: ("metal".into(), metal, None, None),
+                    runtime,
+                })
             }
         }
         "vulkan" => {
             let gpu_detected = detect_nvidia().is_some() || detect_gpu().is_some();
-            let vulkan = engine_path_cancelable(app, "vulkan", context.cancelled)?;
+            let (vulkan, runtime) =
+                crate::paths::engine_with_snapshot(app, "vulkan", context.cancelled)?;
             if !cfg!(any(target_os = "windows", target_os = "linux")) {
                 Err("Vulkan accelerator saat ini tersedia di Windows/Linux.".into())
             } else if !gpu_detected {
@@ -1431,7 +1492,10 @@ fn choose_backend(
                         format!("Vulkan dipilih tetapi capability probe gagal: {error}")
                     }
                 })?;
-                Ok(("vulkan".into(), vulkan, None, Some(device_index)))
+                Ok(ResolvedEngine {
+                    selection: ("vulkan".into(), vulkan, None, Some(device_index)),
+                    runtime,
+                })
             }
         }
         "auto" => {
@@ -1470,7 +1534,7 @@ fn choose_backend(
                                 )
                             })?;
                             let device_id = format!("cuda:{device_index}");
-                            let (backend, engine, _, device) = choose_backend(
+                            let selection = choose_backend(
                                 context,
                                 "cuda",
                                 Some(&device_id),
@@ -1478,25 +1542,29 @@ fn choose_backend(
                                 wav,
                                 model_id,
                             )?;
-                            Ok((backend, engine, device))
+                            Ok(selection)
                         },
                         || context.is_cancelled(),
                         &mut failures,
                     )?;
-                    if let Some((backend, engine, device)) = selection {
+                    if let Some(mut selection) = selection {
+                        let backend = &selection.selection.0;
                         let message = (!failures.is_empty())
                             .then(|| format!("Auto beralih ke {backend}: {}", failures.join("; ")));
-                        return Ok((backend, engine, message, device));
+                        selection.selection.2 = message;
+                        return Ok(selection);
                     }
                     continue;
                 }
                 // Resolve and hash only the candidate we are about to use.
                 // Explicit selection keeps its normal integrity/VRAM/probe guards.
                 match choose_backend(context, backend, None, model, wav, model_id) {
-                    Ok((backend, engine, _, device)) => {
+                    Ok(mut selection) => {
+                        let backend = &selection.selection.0;
                         let message = (!failures.is_empty())
                             .then(|| format!("Auto beralih ke {backend}: {}", failures.join("; ")));
-                        return Ok((backend, engine, message, device));
+                        selection.selection.2 = message;
+                        return Ok(selection);
                     }
                     Err(error) if context.is_cancelled() => return Err(error),
                     Err(error) => failures.push(format!("{backend}: {error}")),
@@ -1519,33 +1587,17 @@ fn run_whisper(
     config: WhisperConfig<'_>,
     resolved: &mut Option<ResolvedEngine>,
 ) -> Result<String, String> {
-    let (resolved_backend, engine, fallback_message, device_index) = match resolved {
-        Some(selection) => {
-            selection.runtime.validate(context.cancelled)?;
-            selection.selection.clone()
-        }
-        None => {
-            let selection = choose_backend(
+    let (resolved_backend, engine, fallback_message, device_index) =
+        resolve_whisper_engine(resolved, context.cancelled, || {
+            choose_backend(
                 context,
                 config.backend,
                 config.compute_device_id,
                 model,
                 wav,
                 config.model_id,
-            )?;
-            let runtime = crate::paths::snapshot_runtime(
-                context.app,
-                &selection.0,
-                &selection.1,
-                context.cancelled,
-            )?;
-            *resolved = Some(ResolvedEngine {
-                selection: selection.clone(),
-                runtime,
-            });
-            selection
-        }
-    };
+            )
+        })?;
     if let Some(message) = fallback_message {
         context.emit(ProgressUpdate {
             stage: "transcribing",
@@ -1860,22 +1912,25 @@ fn parse_whisper_result(path: &Path) -> Result<(String, Vec<Segment>, String), S
     let mut segments = Vec::new();
     let mut total_text_bytes = 0usize;
     for item in output.transcription {
+        let text = item.text.unwrap_or_default().trim().to_string();
+        if text.is_empty() {
+            continue;
+        }
         let from = item
             .timestamps
             .as_ref()
             .and_then(|timestamps| timestamps.from.as_deref())
-            .unwrap_or("00:00:00,000")
+            .ok_or("Timestamp awal hasil Whisper tidak tersedia.")?
             .to_string();
         let to = item
             .timestamps
             .as_ref()
             .and_then(|timestamps| timestamps.to.as_deref())
-            .unwrap_or("00:00:00,000")
+            .ok_or("Timestamp akhir hasil Whisper tidak tersedia.")?
             .to_string();
         if from.len() > MAX_TIMESTAMP_BYTES || to.len() > MAX_TIMESTAMP_BYTES {
             return Err("Timestamp hasil Whisper terlalu panjang.".into());
         }
-        let text = item.text.unwrap_or_default().trim().to_string();
         if !text.is_empty() {
             if segments.len() >= MAX_TRANSCRIPT_SEGMENTS {
                 return Err("Output Whisper memiliki terlalu banyak segment.".into());
@@ -1915,8 +1970,8 @@ pub fn pipeline(
     if cancelled.load(Ordering::SeqCst) {
         return Err("Job dibatalkan.".into());
     }
-    request.url = validate_source(&request.url)?;
-    let local_audio = local_path(&request.url)?;
+    request.url = validate_source_cancelable(&request.url, &cancelled)?;
+    let local_audio = local_path_cancelable(&request.url, &cancelled)?;
     validate_transcript_request(&request)?;
     validate_media_duration(request.duration, false)?;
     let yt_dlp = tool_path(&app, "yt-dlp")?;
@@ -1948,11 +2003,15 @@ pub fn pipeline(
         .saturating_add(model_bytes)
         .saturating_add(512 * 1024 * 1024);
     let committed_jobs = history::referenced_job_directories(&app)?;
-    let (reusable_job_dir, audio_ready) =
-        match find_reusable_audio_job(&jobs_dir, &mut request, &committed_jobs)? {
-            Some((path, ready)) => (Some(path), ready),
-            None => (None, false),
-        };
+    let (reusable_job_dir, audio_ready) = match find_reusable_audio_job_cancelable(
+        &jobs_dir,
+        &mut request,
+        &committed_jobs,
+        &cancelled,
+    )? {
+        Some((path, ready)) => (Some(path), ready),
+        None => (None, false),
+    };
     if !audio_ready {
         crate::resources::require_memory(inference_required, "transkripsi")?;
     }
@@ -2056,7 +2115,7 @@ pub fn pipeline(
         });
         let audio_recovered =
             run_ffmpeg(&context, &source, &wav, request.duration, allow_recovery)?;
-        local_path(&request.url)?;
+        local_path_cancelable(&request.url, &cancelled)?;
         ensure_job_storage_quota(&app)?;
         validate_audio_wav(&wav, request.duration)?;
         if context.is_cancelled() {
@@ -2259,6 +2318,95 @@ pub fn pipeline(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn whisper_engine_rejects_runtime_changes_during_probe_before_first_inference() {
+        let root = std::env::temp_dir().join(format!("whisper-probe-change-{}", Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let engine = root.join("whisper-cli.exe");
+        fs::write(&engine, b"trusted executable").unwrap();
+        let cancelled = AtomicBool::new(false);
+        crate::paths::write_runtime_manifest(&root, "whisper-cli.exe", "test", &cancelled).unwrap();
+        let mut resolved = None;
+        let result = super::resolve_whisper_engine(&mut resolved, &cancelled, || {
+            let runtime = crate::runtime_snapshot::RuntimeSnapshot::capture(
+                &engine,
+                Some("test"),
+                &cancelled,
+            )?;
+            // A new dependency can appear during a probe even on Windows,
+            // where existing snapshot files are locked against writes.
+            fs::write(root.join("unexpected.dll"), b"changed during probe").unwrap();
+            Ok(super::ResolvedEngine {
+                selection: ("vulkan".into(), engine.clone(), None, Some(0)),
+                runtime,
+            })
+        });
+        let rejected_without_caching = resolved.is_none();
+        drop(resolved);
+        fs::remove_dir_all(root).unwrap();
+        assert!(result.unwrap_err().contains("Runtime berubah"));
+        assert!(rejected_without_caching);
+    }
+
+    #[test]
+    fn whisper_engine_reuses_unchanged_runtime_and_rejects_later_changes() {
+        let root = std::env::temp_dir().join(format!("whisper-engine-reuse-{}", Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let engine = root.join("whisper-cli.exe");
+        fs::write(&engine, b"trusted executable").unwrap();
+        let cancelled = AtomicBool::new(false);
+        crate::paths::write_runtime_manifest(&root, "whisper-cli.exe", "test", &cancelled).unwrap();
+        let expected = (
+            "vulkan".into(),
+            engine.clone(),
+            Some("fallback".into()),
+            Some(1),
+        );
+        let mut resolved = None;
+        let first = super::resolve_whisper_engine(&mut resolved, &cancelled, || {
+            Ok(super::ResolvedEngine {
+                selection: expected.clone(),
+                runtime: crate::runtime_snapshot::RuntimeSnapshot::capture(
+                    &engine,
+                    Some("test"),
+                    &cancelled,
+                )?,
+            })
+        })
+        .unwrap();
+        assert_eq!(first, expected);
+        assert_eq!(
+            super::resolve_whisper_engine(&mut resolved, &cancelled, || {
+                panic!("unchanged runtime must not be selected again")
+            })
+            .unwrap(),
+            expected
+        );
+        fs::write(root.join("unexpected.dll"), b"changed between chunks").unwrap();
+        let error = super::resolve_whisper_engine(&mut resolved, &cancelled, || {
+            panic!("a changed cached runtime must fail validation")
+        })
+        .unwrap_err();
+        drop(resolved);
+        fs::remove_dir_all(root).unwrap();
+        assert!(error.contains("Runtime berubah"));
+    }
+
+    #[test]
+    fn cancelled_cache_lookup_propagates_cancellation() {
+        let cancelled = std::sync::atomic::AtomicBool::new(true);
+        let error = super::find_reusable_audio_job_for_source(
+            std::path::Path::new("unused-cancelled-cache"),
+            "file:///unused.mp3",
+            1.0,
+            &HashSet::new(),
+            &cancelled,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error, "Proses dibatalkan.");
+    }
+
     #[test]
     fn media_command_cancellation_remains_recognizable_for_every_pipeline_worker() {
         for program in [
@@ -2766,6 +2914,54 @@ mod tests {
     }
 
     #[test]
+    fn empty_newer_cache_cannot_hide_a_saved_download() {
+        let root = std::env::temp_dir().join(format!("whispertube-candidates-{}", Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let url = "https://www.youtube.com/watch?v=candidates";
+        for (name, duration, saved) in [("older", 100.0, true), ("newer", 103.0, false)] {
+            let job = root.join(name);
+            fs::create_dir(&job).unwrap();
+            fs::write(job.join(".in-progress"), b"checkpoint").unwrap();
+            fs::write(
+                job.join(".audio-cache.json"),
+                serde_json::to_vec(&serde_json::json!({
+                    "version":2,"url":url,"title":"test","duration":duration,"audio_ready":false
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            if saved {
+                fs::write(job.join("source.webm.part"), b"saved bytes").unwrap();
+            }
+        }
+        assert_eq!(
+            super::resume_stage_in(&root, url, 102.0, &HashSet::new()).unwrap(),
+            Some(crate::types::TranscriptionResumeStage::Download)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejects_text_without_complete_timestamps_but_accepts_silence() {
+        let path = std::env::temp_dir().join(format!("whispertube-result-{}.json", Uuid::new_v4()));
+        for segment in [
+            serde_json::json!({"text":"hello"}),
+            serde_json::json!({"text":"hello", "timestamps":{"from":"00:00:00,000"}}),
+            serde_json::json!({"text":"hello", "timestamps":{"to":"00:00:01,000"}}),
+        ] {
+            fs::write(
+                &path,
+                serde_json::to_vec(&serde_json::json!({"transcription":[segment]})).unwrap(),
+            )
+            .unwrap();
+            assert!(parse_whisper_result(&path).is_err());
+        }
+        fs::write(&path, br#"{"transcription":[{"text":" "}]}"#).unwrap();
+        assert!(parse_whisper_result(&path).unwrap().1.is_empty());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn job_directory_is_removed_when_pipeline_does_not_commit() {
         let path = std::env::temp_dir().join(format!("whispertube-job-test-{}", Uuid::new_v4()));
         {
@@ -2903,6 +3099,7 @@ mod tests {
             keep_audio: false,
         };
         write_audio_cache_metadata(&job, &request, false).unwrap();
+        fs::write(job.join("source.webm.part"), b"saved download").unwrap();
         request.duration = 620.0;
         let (_, ready) = find_reusable_audio_job(&root, &mut request, &HashSet::new())
             .unwrap()
@@ -3015,7 +3212,7 @@ mod tests {
         assert_eq!(stage(&matching_request.url, &HashSet::new()), None);
         assert_eq!(
             find_reusable_audio_job(&root, &mut no_keep_request.clone(), &HashSet::new()).unwrap(),
-            Some((fs::canonicalize(&job).unwrap(), false))
+            None
         );
         fs::write(job.join("audio.wav"), saved_audio).unwrap();
         write_audio_cache_metadata(&job, &matching_request, true).unwrap();

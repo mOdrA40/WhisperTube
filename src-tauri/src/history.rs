@@ -56,9 +56,6 @@ pub(crate) fn storage_tree_bytes(path: &Path) -> Result<u64, String> {
                     .len(),
             );
         }
-        if total > MAX_JOB_STORAGE_BYTES {
-            return Ok(total);
-        }
     }
     Ok(total)
 }

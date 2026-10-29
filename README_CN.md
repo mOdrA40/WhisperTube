@@ -1,6 +1,10 @@
-# WhisperTube 0.1
+# WhisperTube 0.2.0
 
-WhisperTube 是一款 local-first 桌面应用，使用 `yt-dlp`、FFmpeg 和本地 Whisper/Qwen 引擎 将受支持平台的视频转换为转录文本。音频和转录过程都保留在用户设备上。
+WhisperTube 是一款 local-first 桌面应用，使用 `yt-dlp`、FFmpeg 和本地 Whisper/Qwen 引擎将本地音频文件及受支持平台的视频转换为转录文本。音频和转录过程都保留在用户设备上。
+
+选择 **Choose local audio** 可导入 MP3、WAV、M4A、AAC、FLAC、OGG、Opus、WMA、AIFF、WebM 或 MP4（最多 4 GiB、8 小时）。本地导入需要 FFmpeg 和已安装的转录模型及引擎，无需 URL、cookies、yt-dlp 或 JavaScript 运行环境。原文件不会被移动或删除；中断后可重新选择未改变的同一文件以继续。
+
+本地 MP3 首先严格解码。识别到特定 MP3 数据包或解码错误时，检查及转换会自动重试，并将 FFmpeg 解码帧失败比例上限设为 1%。其他格式、访问失败、取消及超时不会触发恢复。恢复仍须成功生成有效且时长合规的 PCM WAV。应用会显示恢复警告，并将警告保存在结果、历史和重试缓存中；损坏部分可能被省略，时间戳可能偏移。1% 是解码失败阈值，并不保证原录音的 99% 完好。恢复失败的文件仍需从录音软件重新导出。
 
 主文档：[README.md](README.md)（English）。印度尼西亚语文档：[README_ID.md](README_ID.md)。
 

@@ -37,6 +37,8 @@ export function HistoryPage({ history, hasMore, loadingMore, operationActive, on
   const [pendingDeleteIds, setPendingDeleteIds] = useState<number[] | null>(null);
   const [deleteScope, setDeleteScope] = useState<HistoryFileScope | "all">("all");
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const deletingRef = useRef(false);
   const [filesTarget, setFilesTarget] = useState<HistoryItem | null>(null);
   const [files, setFiles] = useState<HistoryFileInfo[] | null>(null);
   const [filesError, setFilesError] = useState<string | null>(null);
@@ -83,7 +85,9 @@ export function HistoryPage({ history, hasMore, loadingMore, operationActive, on
 
   async function confirmDelete() {
     const ids = pendingDeleteIds;
-    if (!ids) return;
+    if (!ids || deletingRef.current) return;
+    deletingRef.current = true;
+    setDeleting(true);
     setDeleteError(null);
     try {
       if (deleteScope === "all") await onDelete(ids);
@@ -98,6 +102,9 @@ export function HistoryPage({ history, hasMore, loadingMore, operationActive, on
       // Keep the failure visible above the modal scrim as well as in the
       // parent's global alert, without changing selection or deletion scope.
       setDeleteError(friendlyError(cause));
+    } finally {
+      deletingRef.current = false;
+      setDeleting(false);
     }
   }
 
@@ -125,6 +132,7 @@ export function HistoryPage({ history, hasMore, loadingMore, operationActive, on
     document.body.style.overflow = "hidden";
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
+        if (deletingRef.current) return;
         setPendingDeleteIds(null);
         closeFiles();
         return;
@@ -304,6 +312,7 @@ export function HistoryPage({ history, hasMore, loadingMore, operationActive, on
                   ref={cancelDeleteButtonRef}
                   type="button"
                   className="secondary-button"
+                  disabled={deleting}
                   onClick={() => setPendingDeleteIds(null)}
                 >
                   {t("history.confirmCancel")}
@@ -312,7 +321,7 @@ export function HistoryPage({ history, hasMore, loadingMore, operationActive, on
                   type="button"
                   className="danger-button"
                   onClick={() => void confirmDelete()}
-                  disabled={operationActive}
+                  disabled={operationActive || deleting}
                 >
                   <TrashIcon aria-hidden="true" size={16} /> {t("history.confirmOk")}
                 </button>

@@ -4,6 +4,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RUNTIME="$ROOT/src-tauri/runtime/linux"
 CPU="$RUNTIME/cpu"
+source "$ROOT/scripts/activate-runtime.sh"
+STAGED_CPU=""
+STAGED_FFMPEG=""
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/whispertube-linux.XXXXXX")"
 FFMPEG_VERSION="9.0.1"
 FFMPEG_SOURCE_SHA256="cf38e0e28c7e5605942c4a77755349b0145804a397af37eb1fb4c77cb237f635"
@@ -12,6 +15,8 @@ YT_DLP_SHA256="d8bd33fca9d5b23bd5b9952b3fca36db5c46331933fda9f598a3da14ce2c243f"
 YT_DLP_TMP="$RUNTIME/.yt-dlp.tmp"
 
 cleanup() {
+  if [[ -n "$STAGED_FFMPEG" ]]; then rm -f "$STAGED_FFMPEG"; fi
+  if [[ -n "$STAGED_CPU" ]]; then rm -rf "$STAGED_CPU"; fi
   rm -rf "$WORK"
   rm -f "$YT_DLP_TMP"
 }
@@ -96,7 +101,11 @@ if grep -Eq 'not found|libav(util|codec|format|device|filter|swscale|swresample|
   echo "FFmpeg masih memiliki dependency FFmpeg eksternal atau dependency hilang; build dibatalkan." >&2
   exit 1
 fi
-cp "$ffmpeg_prefix/bin/ffmpeg" "$RUNTIME/ffmpeg"
+STAGED_FFMPEG="$(mktemp "$RUNTIME/.ffmpeg-staging.XXXXXX")"
+cp -p "$ffmpeg_prefix/bin/ffmpeg" "$STAGED_FFMPEG"
+"$STAGED_FFMPEG" -version >/dev/null
+mv -f "$STAGED_FFMPEG" "$RUNTIME/ffmpeg"
+STAGED_FFMPEG=""
 chmod +x "$RUNTIME/ffmpeg"
 
 curl --fail --location --retry 3 --connect-timeout 30 \
@@ -130,19 +139,18 @@ if [[ -z "$cli" ]]; then
   exit 1
 fi
 
-rm -rf "$CPU"
-mkdir -p "$CPU"
+STAGED_CPU="$(mktemp -d "$RUNTIME/.cpu-staging.XXXXXX")"
 find "$(dirname "$cli")" -maxdepth 1 \( -type f -o -type l \) \( \
   -name whisper-cli -o \
   -name 'libwhisper*' -o \
   -name 'libggml*' -o \
   -name 'ggml*' \
-\) -exec cp -a {} "$CPU/" \;
-if [[ ! -x "$CPU/whisper-cli" ]]; then
+\) -exec cp -a {} "$STAGED_CPU/" \;
+if [[ ! -x "$STAGED_CPU/whisper-cli" ]]; then
   echo "whisper-cli gagal disalin ke runtime yang diizinkan." >&2
   exit 1
 fi
-chmod +x "$CPU/whisper-cli"
+chmod +x "$STAGED_CPU/whisper-cli"
 
 # whisper.cpp emits sibling shared libraries. Preserve that relationship after
 # Tauri relocates the runtime into a Debian package or AppImage.
@@ -150,16 +158,19 @@ while IFS= read -r -d '' binary; do
   if file -b "$binary" | grep -Eq 'ELF .* (dynamically linked|shared object)'; then
     patchelf --set-rpath '$ORIGIN' "$binary"
   fi
-done < <(find "$CPU" -maxdepth 1 -type f -print0)
+done < <(find "$STAGED_CPU" -maxdepth 1 -type f -print0)
 
-if ldd "$CPU/whisper-cli" | grep -q 'not found'; then
+if ldd "$STAGED_CPU/whisper-cli" | grep -q 'not found'; then
   echo "whisper.cpp Linux runtime masih memiliki dependency yang tidak ditemukan." >&2
-  ldd "$CPU/whisper-cli" >&2
+  ldd "$STAGED_CPU/whisper-cli" >&2
   exit 1
 fi
 
 rm -rf "$WORK/build" "$WORK/whisper.cpp"
-"$CPU/whisper-cli" --version >/dev/null
+"$STAGED_CPU/whisper-cli" --version >/dev/null
+
+activate_runtime "$STAGED_CPU" "$CPU"
+STAGED_CPU=""
 
 cd "$ROOT"
 npm ci

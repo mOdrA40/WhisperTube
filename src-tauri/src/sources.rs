@@ -862,7 +862,8 @@ pub async fn inspect_media(
                 if cancelled.load(Ordering::SeqCst) {
                     return Err("Pemeriksaan metadata dibatalkan.".into());
                 }
-                std::thread::sleep(METADATA_RETRY_BASE_DELAY * attempt as u32);
+                crate::io_cancel::sleep(METADATA_RETRY_BASE_DELAY * attempt as u32, &cancelled)
+                    .map_err(|_| "Pemeriksaan metadata dibatalkan.".to_string())?;
             }
         };
 

@@ -14,6 +14,34 @@ pub fn check(cancelled: &AtomicBool) -> Result<(), String> {
     }
 }
 
+/// Backoff must remain interruptible even when no child process is active.
+pub fn sleep(duration: std::time::Duration, cancelled: &AtomicBool) -> Result<(), String> {
+    let start = std::time::Instant::now();
+    loop {
+        check(cancelled)?;
+        let remaining = duration.saturating_sub(start.elapsed());
+        if remaining.is_zero() {
+            return Ok(());
+        }
+        std::thread::sleep(remaining.min(std::time::Duration::from_millis(50)));
+    }
+}
+
+pub async fn sleep_async(
+    duration: std::time::Duration,
+    cancelled: &AtomicBool,
+) -> Result<(), String> {
+    let start = std::time::Instant::now();
+    loop {
+        check(cancelled)?;
+        let remaining = duration.saturating_sub(start.elapsed());
+        if remaining.is_zero() {
+            return Ok(());
+        }
+        tokio::time::sleep(remaining.min(std::time::Duration::from_millis(50))).await;
+    }
+}
+
 /// Match only cancellation errors emitted by our workers, never arbitrary logs.
 pub fn is_cancellation_error(error: &str) -> bool {
     matches!(
@@ -73,6 +101,33 @@ fn hash_reader(input: &mut impl Read, cancelled: &AtomicBool) -> Result<String, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn backoff_stops_when_cancelled_during_wait() {
+        let cancelled = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(30));
+                cancelled.store(true, Ordering::SeqCst);
+            });
+            let start = std::time::Instant::now();
+            assert!(sleep(std::time::Duration::from_secs(5), &cancelled).is_err());
+            assert!(start.elapsed() < std::time::Duration::from_secs(1));
+        });
+    }
+
+    #[tokio::test]
+    async fn async_backoff_stops_when_cancelled_during_wait() {
+        let cancelled = AtomicBool::new(false);
+        let wait = sleep_async(std::time::Duration::from_secs(5), &cancelled);
+        let cancel = async {
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            cancelled.store(true, Ordering::SeqCst);
+        };
+        let start = std::time::Instant::now();
+        let (result, ()) = tokio::join!(wait, cancel);
+        assert!(result.is_err());
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+    }
     struct CancelOnRead<'a>(&'a AtomicBool);
     impl Read for CancelOnRead<'_> {
         fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {

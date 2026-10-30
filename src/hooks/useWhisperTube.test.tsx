@@ -849,6 +849,21 @@ describe("useWhisperTube", () => {
     expect(result.current.error).not.toContain("native detail");
   });
 
+  it("accepts available replay audio and preserves its coverage note in the result", async () => {
+    services.inspectMedia.mockResolvedValueOnce({ ...metadata, duration: 3788 });
+    const availableReplay = { ...transcript, duration: 3780, sourceDuration: 3788 };
+    const { result } = renderHook(() => useWhisperTube(), { wrapper });
+    await waitFor(() => expect(result.current.system).toEqual(system));
+    act(() => result.current.setUrl(metadata.webpageUrl));
+    await act(async () => result.current.inspectVideo());
+    services.startTranscription.mockResolvedValueOnce(availableReplay);
+    await act(async () => result.current.startTranscription());
+    expect(result.current.error).toBeNull();
+    expect(result.current.result).toEqual(availableReplay);
+    expect(services.startTranscription).toHaveBeenCalledWith(expect.objectContaining({ duration: 3788 }), expect.anything());
+    expect(result.current.busy).toBe(false);
+  });
+
   it("preserves the result when reset is rejected before mutation", async () => {
     const { result } = renderHook(() => useWhisperTube(), { wrapper });
     await waitFor(() => expect(result.current.system).toEqual(system));

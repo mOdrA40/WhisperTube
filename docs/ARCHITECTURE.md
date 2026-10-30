@@ -169,8 +169,8 @@ post VOD routes, inspection downloads at most 32 MiB of audio to a bounded
 buffer under a separate 45-second watchdog, then decodes a temporary local file
 to a null sink under a 10-second watchdog. Machine-readable completed FFmpeg
 progress supplies measured duration; container text metadata is not trusted.
-Only local-file protocols are enabled for this probe. Known live/upcoming/
-processing streams and media above eight hours remain rejected. Other routes
+Only local-file protocols are enabled for this probe. Known live/upcoming
+streams, non-YouTube processing streams, and media above eight hours remain rejected. Other routes
 with unknown duration remain rejected. No new executable/dependency is bundled.
 Temporary files are removed on return; crash leftovers use the existing
 UUID-scoped, 24-hour transient cleanup. The transcription download applies the
@@ -179,6 +179,17 @@ is still missing, it rechecks actual audio before conversion, rejects a differen
 above two seconds and uses measured duration for small rounding/codec-padding
 differences. A known extractor duration keeps the normal long-VOD path without
 an extra full decode under the probe watchdog. Inspection audio is not a persistent cache.
+YouTube `post_live` replays are accepted only with extractor key `Youtube`,
+explicit `is_live: false`, and a known positive duration of at most eight hours.
+YouTube downloads emit bounded JSON metadata at `before_dl` to revalidate live
+state and duration; an absent marker fails closed. Missing fragments abort the
+download. Conversion and WAV inspection validate nonempty, finite, bounded PCM
+audio before committing readiness. `post_live` uses the same actual-audio
+coverage contract as ordinary VODs: shorter decoded audio is accepted, while
+`duration` records its real length and `sourceDuration` preserves the source
+metadata when the discrepancy exceeds two seconds. Results/history and native
+completion notifications show a coverage note instead of claiming full video
+coverage. Cache/checkpoint identity remains tied to the inspected source.
 Download and inference paths use inactivity watchdogs; CPU
 inference receives a longer allowance than downloads, conversion, and
 accelerated inference.

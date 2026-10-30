@@ -167,6 +167,19 @@ network. Metadata inspection retries only recognized transient failures and
 has a bounded 45-second process timeout. A login-protected source may require
 an imported cookies file.
 
+## A just-ended YouTube replay cannot be transcribed yet
+
+WhisperTube accepts YouTube `post_live` replays when the stream has ended and
+duration is known, including members-only replays accessible with imported
+cookies. Cookies grant access; they do not make unfinished media complete.
+The app transcribes valid available audio even when it is shorter than the
+video metadata. A result warning shows actual audio coverage and the source
+duration; it does not imply full video coverage. For example, 1:03:00 of audio
+from a 1:03:08 source is accepted with a warning. If you need the complete
+replay, wait for YouTube processing and inspect again. Missing fragments,
+decode errors, invalid/over-limit audio, and active/upcoming streams are still
+rejected.
+
 ## Job storage quota or low disk space
 
 Settings shows the current job storage usage and the 20 GiB safety quota.

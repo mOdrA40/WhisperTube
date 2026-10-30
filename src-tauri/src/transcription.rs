@@ -747,6 +747,22 @@ fn download_needs_duration_probe(value: &str, inspected: f64) -> Result<bool, St
     Ok(false)
 }
 
+const YOUTUBE_DOWNLOAD_METADATA_TEMPLATE: &str = concat!(
+    r#"before_dl:WT_YOUTUBE_METADATA={"duration":%(duration|null)j,"#,
+    r#""is_live":%(is_live|null)j,"live_status":%(live_status|null)j,"#,
+    r#""extractor_key":%(extractor_key|null)j}"#,
+);
+
+fn validate_youtube_download_metadata(raw: &str, url: &str, inspected: f64) -> Result<(), String> {
+    let metadata: serde_json::Value = serde_json::from_str(raw)
+        .map_err(|error| format!("Metadata download YouTube tidak valid: {error}"))?;
+    let duration = crate::sources::inspected_duration(&metadata, url, || {
+        Err("Durasi download YouTube tidak tersedia.".into())
+    })?;
+    download_needs_duration_probe(&duration.to_string(), inspected)?;
+    Ok(())
+}
+
 fn run_download(
     context: &JobContext,
     request: &TranscriptRequest,
@@ -754,6 +770,8 @@ fn run_download(
 ) -> Result<(PathBuf, bool), String> {
     let yt_dlp = tool_path(context.app, "yt-dlp")?;
     let probe_eligible = crate::sources::supports_duration_probe(&request.url);
+    let youtube = crate::sources::is_youtube_url(&request.url);
+    let mut youtube_metadata_seen = false;
     // Fail closed if the marker is absent. A known extractor duration keeps
     // the existing long-VOD path, without an extra full decode under 10 seconds.
     let mut needs_duration_probe = probe_eligible;
@@ -786,7 +804,9 @@ fn run_download(
         .arg(&template)
         .args(source_js_runtime_args(&request.url, context.active_pid, context.cancelled)?)
         .args(cookie_jar.args())
-        .args(if probe_eligible {
+        .args(if youtube {
+            vec!["--abort-on-unavailable-fragments", "--no-simulate", "--print", YOUTUBE_DOWNLOAD_METADATA_TEMPLATE]
+        } else if probe_eligible {
             vec!["--no-simulate", "--print", "before_dl:WT_SOURCE_DURATION=%(duration|NA)s"]
         } else { vec![] })
         .arg(&request.url)
@@ -805,6 +825,12 @@ fn run_download(
         PROCESS_INACTIVITY_TIMEOUT,
         None,
         |line| {
+            if youtube {
+                if let Some(raw) = line.strip_prefix("WT_YOUTUBE_METADATA=") {
+                    validate_youtube_download_metadata(raw, &request.url, request.duration)?;
+                    youtube_metadata_seen = true;
+                }
+            }
             if probe_eligible {
                 if let Some(value) = line.strip_prefix("WT_SOURCE_DURATION=") {
                     needs_duration_probe = download_needs_duration_probe(value, request.duration)?;
@@ -856,6 +882,9 @@ fn run_download(
     )?;
     if !status.success() {
         return Err(process_failed(context.cancelled, stderr, "Download"));
+    }
+    if youtube && !youtube_metadata_seen {
+        return Err("Metadata download YouTube tidak ditemukan; audio belum dapat diverifikasi. Periksa ulang URL.".into());
     }
 
     let mut candidates = fs::read_dir(job_dir)
@@ -2123,6 +2152,9 @@ pub fn pipeline(
         }
         // Commit readiness only after FFmpeg succeeded and the WAV validates.
         // A killed conversion is never eligible as completed audio.
+        // Post-live audio can be shorter than video metadata even after a clean
+        // decode. Preserve its actual coverage through reconciled_audio_duration
+        // and the existing result/history warning rather than rejecting it.
         checkpoint::PcmAudio::inspect(&wav, request.duration, || context.is_cancelled())?;
         write_audio_cache_metadata_with_recovery(&job_dir, &request, true, audio_recovered)?;
     };
@@ -2457,6 +2489,89 @@ mod tests {
         ] {
             assert!(!crate::io_cancel::is_cancellation_error(error));
         }
+    }
+
+    #[test]
+    fn youtube_download_rechecks_live_state_and_duration_before_accepting_replay_audio() {
+        let url = "https://youtube.com/watch?v=kNhgpKpGxV4";
+        let metadata = serde_json::json!({
+            "duration": 3788, "is_live": false,
+            "live_status": "post_live", "extractor_key": "Youtube"
+        });
+        for status in ["post_live", "was_live", "not_live"] {
+            let mut value = metadata.clone();
+            value["live_status"] = serde_json::json!(status);
+            assert_eq!(
+                super::validate_youtube_download_metadata(&value.to_string(), url, 3788.0),
+                Ok(())
+            );
+        }
+        for (key, value) in [
+            ("duration", serde_json::Value::Null),
+            ("duration", serde_json::json!(0)),
+            ("duration", serde_json::json!(28801)),
+            ("duration", serde_json::json!(4000)),
+            ("is_live", serde_json::json!(true)),
+            ("is_live", serde_json::Value::Null),
+            ("live_status", serde_json::json!("is_upcoming")),
+            ("live_status", serde_json::json!("is_live")),
+            ("extractor_key", serde_json::json!("Generic")),
+        ] {
+            let mut invalid = metadata.clone();
+            invalid[key] = value;
+            assert!(
+                super::validate_youtube_download_metadata(&invalid.to_string(), url, 3788.0)
+                    .is_err()
+            );
+        }
+        assert!(super::validate_youtube_download_metadata("invalid json", url, 3788.0).is_err());
+        // Normal rounding and codec padding are accepted without a full second decode.
+        assert!(
+            super::validate_youtube_download_metadata(&metadata.to_string(), url, 3789.0).is_ok()
+        );
+    }
+
+    #[test]
+    fn post_live_available_audio_preserves_coverage_and_retry_identity() {
+        let root = std::env::temp_dir().join(format!("whispertube-replay-{}", Uuid::new_v4()));
+        let _root_guard = JobDirectoryGuard::create(root.clone()).unwrap();
+        let job = root.join("replay");
+        let _job_guard = JobDirectoryGuard::create(job.clone()).unwrap();
+        let mut request = TranscriptRequest {
+            url: "https://www.youtube.com/watch?v=kNhgpKpGxV4".into(),
+            title: "Newly ended replay".into(),
+            channel: "Channel".into(),
+            duration: 3788.0,
+            cookies_path: None,
+            backend: "cpu".into(),
+            compute_device_id: None,
+            language: "id".into(),
+            model_id: "base".into(),
+            keep_audio: false,
+        };
+        // Reproduce the reported 8-second difference using a valid PCM WAV.
+        let wav = job.join("audio.wav");
+        let bytes = 3780 * 32_000;
+        let mut file = fs::File::create(&wav).unwrap();
+        checkpoint::write_wav_header(&mut file, bytes).unwrap();
+        file.set_len(bytes + 44).unwrap();
+        drop(file);
+        super::validate_audio_wav(&wav, request.duration).unwrap();
+        let audio = checkpoint::PcmAudio::inspect(&wav, request.duration, || false).unwrap();
+        assert_eq!(
+            super::reconciled_audio_duration(&audio, request.duration),
+            (3780.0, Some(3788.0))
+        );
+        write_audio_cache_metadata(&job, &request, true).unwrap();
+        let (_, ready) = find_reusable_audio_job(&root, &mut request, &HashSet::new())
+            .unwrap()
+            .unwrap();
+        assert!(ready);
+        assert_eq!(request.duration, 3788.0);
+        assert_eq!(
+            super::resume_stage_in(&root, &request.url, request.duration, &HashSet::new()).unwrap(),
+            Some(crate::types::TranscriptionResumeStage::Audio)
+        );
     }
 
     #[test]

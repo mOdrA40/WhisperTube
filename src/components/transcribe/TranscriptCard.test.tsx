@@ -12,15 +12,18 @@ it("shows a persisted recovery warning when reopening a transcript", () => {
   expect(screen.queryByText("Transcription complete")).toBeNull();
   expect(screen.getByText("Available audio transcribed")).toBeTruthy();
 });
-it("shows the actual audio coverage without claiming the full source was transcribed", () => {
-  render(<I18nProvider><TranscriptCard result={{ historyId: 1, title: "Short audio", channel: "Channel", language: "en", duration: 1, sourceDuration: 60,
+it.each([
+  { duration: 1, sourceDuration: 60, actual: "00:01", source: "01:00" },
+  { duration: 3780, sourceDuration: 3788, actual: "1:03:00", source: "1:03:08" },
+])("shows $actual of $source without claiming the full source was transcribed", ({ duration, sourceDuration, actual, source }) => {
+  render(<I18nProvider><TranscriptCard result={{ historyId: 1, title: "Available audio", channel: "Channel", language: "en", duration, sourceDuration,
     model: "base", backend: "cpu", segments: [], text: "", txtPath: "", srtPath: "", vttPath: "", audioPath: null }}
     operationActive={false} copied={false} searchQuery="" filteredSegments={[]} onCopy={vi.fn()} onExport={vi.fn()}
     onRevealAudio={vi.fn()} onSearchChange={vi.fn()} transcriptionElapsedMs={null} /></I18nProvider>);
   expect(screen.getByText("Available audio transcribed")).toBeTruthy();
   expect(screen.queryByText("Transcription complete")).toBeNull();
-  expect(screen.getByRole("status").textContent).toContain("00:01");
-  expect(screen.getByRole("status").textContent).toContain("01:00");
+  expect(screen.getByRole("status").textContent).toContain(actual);
+  expect(screen.getByRole("status").textContent).toContain(source);
   expect((screen.getByRole("button", { name: "TXT" }) as HTMLButtonElement).disabled).toBe(false);
 });
 it("keeps saved audio accessible while disabling deleted transcript actions", () => {

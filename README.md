@@ -24,6 +24,15 @@ Supported source families include YouTube, TikTok, X/Twitter, Facebook, Instagra
 
 For predictable disk and memory use, transcription is limited to on-demand media and completed live replays with a known duration of at most 8 hours. Inference runs in sections of approximately five minutes, with validated checkpoints for retry. Active live streams and upcoming streams are rejected before download. See [Resuming transcription](#resuming-transcription) for the quality and memory limits.
 
+YouTube replays still marked `post_live` can be inspected once the stream has
+ended and its duration is known. Before transcription, the download rechecks
+that status and duration, fails on unavailable fragments, and verifies decoded
+audio. If the available audio is shorter than the video metadata, transcription
+uses that audio and displays its actual coverage with a duration warning; it
+does not claim the entire video was transcribed. Wait for YouTube processing
+and check again if you need the complete replay.
+Members-only replays still require cookies from an account with access.
+
 ## Features
 
 When public Instagram Reels or LinkedIn video posts omit duration, metadata

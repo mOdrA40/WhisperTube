@@ -250,6 +250,15 @@ pub(crate) fn supports_duration_probe(url: &str) -> bool {
     duration_probe_extractor(url).is_some()
 }
 
+pub(crate) fn is_youtube_url(raw: &str) -> bool {
+    validate_media_url(raw).is_ok()
+        && Url::parse(raw).ok().is_some_and(|url| {
+            url.host_str().is_some_and(|host| {
+                host_matches(host, "youtube.com") || host_matches(host, "youtu.be")
+            })
+        })
+}
+
 pub(crate) fn download_media_filter(url: &str) -> String {
     // Missing duration is permitted only on concrete VOD routes that are
     // checked locally during inspection and again before audio conversion.
@@ -258,22 +267,32 @@ pub(crate) fn download_media_filter(url: &str) -> String {
     } else {
         ""
     };
-    format!("!is_live & live_status !=? is_upcoming & live_status !=? post_live & duration <={optional} {}", MAX_MEDIA_DURATION_SECONDS as u64)
+    let processing_filter = if is_youtube_url(url) {
+        // The download rechecks metadata; conversion verifies finite audio.
+        // Shorter audio retains a coverage warning in the result and history.
+        ""
+    } else {
+        " & live_status !=? post_live"
+    };
+    format!("!is_live & live_status !=? is_live & live_status !=? is_upcoming{processing_filter} & duration <={optional} {}", MAX_MEDIA_DURATION_SECONDS as u64)
 }
 
-fn inspected_duration(
+pub(crate) fn inspected_duration(
     value: &Value,
     url: &str,
     recover: impl FnOnce() -> Result<f64, String>,
 ) -> Result<f64, String> {
+    let status = value.get("live_status").and_then(Value::as_str);
+    let youtube_replay = status == Some("post_live")
+        && is_youtube_url(url)
+        && value.get("extractor_key").and_then(Value::as_str) == Some("Youtube")
+        && value.get("is_live").and_then(Value::as_bool) == Some(false);
     let live = value
         .get("is_live")
         .and_then(Value::as_bool)
         .unwrap_or(false)
-        || matches!(
-            value.get("live_status").and_then(Value::as_str),
-            Some("is_live" | "is_upcoming" | "post_live")
-        );
+        || matches!(status, Some("is_live" | "is_upcoming"))
+        || (status == Some("post_live") && !youtube_replay);
     if live {
         return Err(format!(
             "{SOURCE_DURATION_ERROR_PREFIX}Live stream aktif atau belum siap diproses."
@@ -1069,6 +1088,71 @@ mod tests {
         sync::{atomic::AtomicBool, Arc, Mutex},
         time::Duration,
     };
+
+    #[test]
+    fn youtube_post_live_replays_require_known_bounded_duration_and_explicit_ended_status() {
+        // Metadata from the reported newly ended replay, including its real duration.
+        let metadata = json!({
+            "extractor_key": "Youtube", "duration": 3788,
+            "is_live": false, "live_status": "post_live"
+        });
+        for url in [
+            "https://www.youtube.com/live/kNhgpKpGxV4?si=share",
+            "https://www.youtube.com/watch?v=kNhgpKpGxV4",
+            "https://youtu.be/kNhgpKpGxV4",
+        ] {
+            assert_eq!(
+                super::inspected_duration(&metadata, url, || panic!("no probe for YouTube")),
+                Ok(3788.0)
+            );
+        }
+        let url = "https://www.youtube.com/live/kNhgpKpGxV4";
+        for (key, value) in [
+            ("is_live", json!(true)),
+            ("is_live", Value::Null),
+            ("live_status", json!("is_live")),
+            ("live_status", json!("is_upcoming")),
+            ("duration", Value::Null),
+            ("duration", json!(0)),
+            ("duration", json!(-1)),
+            ("duration", json!(28801)),
+            ("extractor_key", json!("Generic")),
+        ] {
+            let mut invalid = metadata.clone();
+            invalid[key] = value;
+            assert!(super::inspected_duration(&invalid, url, || panic!("no probe")).is_err());
+        }
+        for url in [
+            "https://vimeo.com/123",
+            "https://youtube.com.evil.test/live/id",
+            "https://user:password@youtube.com/live/id",
+        ] {
+            assert!(super::inspected_duration(&metadata, url, || panic!("no probe")).is_err());
+        }
+        for status in ["was_live", "not_live"] {
+            let mut vod = metadata.clone();
+            vod["live_status"] = json!(status);
+            assert_eq!(
+                super::inspected_duration(&vod, url, || panic!("no probe")),
+                Ok(3788.0)
+            );
+        }
+    }
+
+    #[test]
+    fn download_filter_allows_processing_replays_only_on_youtube_with_known_duration() {
+        assert_eq!(
+            super::download_media_filter("https://youtube.com/watch?v=id"),
+            "!is_live & live_status !=? is_live & live_status !=? is_upcoming & duration <= 28800"
+        );
+        assert_eq!(
+            super::download_media_filter("https://instagram.com/reel/id"),
+            "!is_live & live_status !=? is_live & live_status !=? is_upcoming & live_status !=? post_live & duration <=? 28800"
+        );
+        assert!(!super::is_youtube_url(
+            "https://youtube.com.evil.test/watch?v=id"
+        ));
+    }
 
     #[test]
     fn missing_reel_duration_is_recovered_but_live_and_other_sources_are_not() {

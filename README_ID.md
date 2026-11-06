@@ -251,7 +251,7 @@ manual untuk mendapat artifact sementara, atau push tag aplikasi seperti
 `v0.1.0` untuk menerbitkan installer native NSIS, DMG, Debian, dan AppImage
 dalam GitHub Release. Artifact updater memiliki signature Tauri terpisah untuk
 verifikasi update; Windows belum memiliki Authenticode signing dan macOS memakai
-ad-hoc signing gratis tetapi belum dinotarize Apple pada v0.1.
+ad-hoc signing gratis tetapi belum dinotarize Apple pada 0.2.4.
 Setiap installer memiliki sidecar SHA-256, dan bundle aplikasi menyertakan
 license project serta third-party notices.
 
@@ -283,13 +283,13 @@ Model, job, export, dan `whispertube.db` disimpan di app-local-data sesuai OS. P
 
 Di Pengaturan, tinjau job belum selesai dan hapus cache retry tertentu untuk mengosongkan ruang. Penghapusan cache menghilangkan progres retry job tersebut, tetapi mempertahankan model terpasang dan history yang sudah tersimpan.
 
-## Batasan v0.1
+## Batasan
 
 - CUDA yang dipin saat ini khusus Windows x64 dengan driver NVIDIA terdeteksi.
 - Metal/Vulkan memerlukan asset release GitHub publik yang cocok.
 - Video yang memerlukan login bergantung pada kompatibilitas versi yt-dlp serta perubahan keamanan browser/platform.
 - Belum ada playlist/batch job, speaker diarization, word-level subtitle editing, atau auto-update runtime/model.
-- Build macOS/Linux sudah tersedia melalui script native dan CI. macOS memakai ad-hoc signing tetapi belum dinotarize; signing Windows/Linux dan QA lintas distro/hardware belum selesai di v0.1.
+- Build macOS/Linux sudah tersedia melalui script native dan CI. macOS memakai ad-hoc signing tetapi belum dinotarize; signing Windows/Linux dan QA lintas distro/hardware belum selesai pada 0.2.4.
 - Bootstrap macOS/Linux membangun FFmpeg statik dari source archive yang dipin; distribusi ke mesin bersih tetap membutuhkan QA dependency dan lisensi per platform.
 
 ## Lisensi

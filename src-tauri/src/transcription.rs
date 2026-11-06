@@ -19,7 +19,7 @@ use crate::{
     checkpoint,
     cookies::CookieJar,
     history, models,
-    paths::{engine_path_cancelable, is_regular_file, jobs_dir, model_path, tool_path},
+    paths::{is_regular_file, jobs_dir, model_path, tool_path},
     process, resources,
     sources::{
         local::{local_path_cancelable, validate_source, validate_source_cancelable},
@@ -1400,7 +1400,7 @@ struct ResolvedEngine {
     runtime: crate::runtime_snapshot::RuntimeSnapshot,
 }
 
-fn resolve_whisper_engine(
+fn resolve_engine(
     resolved: &mut Option<ResolvedEngine>,
     cancelled: &AtomicBool,
     choose: impl FnOnce() -> Result<ResolvedEngine, String>,
@@ -1621,7 +1621,7 @@ fn run_whisper(
     resolved: &mut Option<ResolvedEngine>,
 ) -> Result<String, String> {
     let (resolved_backend, engine, fallback_message, device_index) =
-        resolve_whisper_engine(resolved, context.cancelled, || {
+        resolve_engine(resolved, context.cancelled, || {
             choose_backend(
                 context,
                 config.backend,
@@ -1747,6 +1747,7 @@ fn run_qwen(
     model: &Path,
     config: WhisperConfig<'_>,
     runtime: &crate::runtime_snapshot::RuntimeSnapshot,
+    resolved_cuda: &mut Option<ResolvedEngine>,
 ) -> Result<checkpoint::ChunkOutput, String> {
     runtime.validate(context.cancelled)?;
     if config.backend == "vulkan" {
@@ -1756,7 +1757,6 @@ fn run_qwen(
         );
     }
     let mut gpu = None;
-    let mut cuda_runtime = None;
     let mut cuda_engine = None;
     let qwen_backends = crate::qwen::supported_backends();
     if qwen_backends.contains(&"cuda")
@@ -1770,29 +1770,41 @@ fn run_qwen(
         } else {
             None
         };
-        let candidate = match index {
-            Some(index) => detect_nvidia_device(index),
-            None => detect_nvidia(),
+        let candidates = match index {
+            Some(index) => detect_nvidia_device(index).into_iter().collect(),
+            None if config.backend == "auto" => crate::system::cuda_devices_by_preference(),
+            None => detect_nvidia().into_iter().collect(),
         };
-        let engine = engine_path_cancelable(context.app, "cuda", context.cancelled)?;
-        let candidate = candidate.filter(|candidate| {
-            is_regular_file(&engine)
-                && models::ensure_vram_available(config.model_id, candidate.available_memory_mb())
-                    .is_ok()
-        });
         if let Some(candidate) = crate::qwen::select_cuda_candidate(
             config.backend,
-            candidate,
+            &candidates,
+            context.cancelled,
             crate::system::nvidia_compute_capability,
         )? {
-            cuda_runtime = Some(crate::paths::snapshot_runtime(
-                context.app,
-                "cuda",
-                &engine,
-                context.cancelled,
-            )?);
-            cuda_engine = Some(engine);
-            gpu = Some(candidate);
+            let already_resolved = resolved_cuda.is_some();
+            let selection = resolve_engine(resolved_cuda, context.cancelled, || {
+                let (engine, runtime) =
+                    crate::paths::engine_with_snapshot(context.app, "cuda", context.cancelled)?;
+                Ok(ResolvedEngine {
+                    selection: ("cuda".into(), engine, None, None),
+                    runtime,
+                })
+            });
+            match selection {
+                Ok((_, engine, _, _)) => {
+                    cuda_engine = Some(engine);
+                    gpu = Some(candidate);
+                }
+                // Auto may use CPU when CUDA has not been installed. A change
+                // to a runtime already used by this job must instead fail closed.
+                Err(error) if config.backend == "auto" && !already_resolved => {
+                    crate::io_cancel::check(context.cancelled)?;
+                    eprintln!(
+                        "WhisperTube: runtime CUDA Qwen tidak siap; Auto memakai CPU: {error}"
+                    );
+                }
+                Err(error) => return Err(error),
+            }
         }
     }
     let backend = match config.backend {
@@ -1863,8 +1875,7 @@ fn run_qwen(
             Ok(())
         },
     )?;
-    // Retain dependency file handles until the child and its pipes have exited.
-    drop(cuda_runtime);
+    // The reservation retains CUDA dependency handles across all sections.
     if !status.success() {
         return Err(process_failed(context.cancelled, stderr, "Qwen"));
     }
@@ -2180,6 +2191,7 @@ pub fn pipeline(
     let audio = checkpoint::PcmAudio::open(&wav, request.duration, || context.is_cancelled())?;
     let (audio_duration, source_duration) = reconciled_audio_duration(&audio, request.duration);
     let mut resolved_engine = None;
+    let mut qwen_cuda_engine = None;
     let completed = checkpoint::transcribe(
         &audio,
         &job_dir,
@@ -2210,6 +2222,7 @@ pub fn pipeline(
                         model_id: &request.model_id,
                     },
                     runtime,
+                    &mut qwen_cuda_engine,
                 );
             }
             let backend = run_whisper(
@@ -2362,7 +2375,7 @@ mod tests {
         let cancelled = AtomicBool::new(false);
         crate::paths::write_runtime_manifest(&root, "whisper-cli.exe", "test", &cancelled).unwrap();
         let mut resolved = None;
-        let result = super::resolve_whisper_engine(&mut resolved, &cancelled, || {
+        let result = super::resolve_engine(&mut resolved, &cancelled, || {
             let runtime = crate::runtime_snapshot::RuntimeSnapshot::capture(
                 &engine,
                 Some("test"),
@@ -2398,7 +2411,7 @@ mod tests {
             Some(1),
         );
         let mut resolved = None;
-        let first = super::resolve_whisper_engine(&mut resolved, &cancelled, || {
+        let first = super::resolve_engine(&mut resolved, &cancelled, || {
             Ok(super::ResolvedEngine {
                 selection: expected.clone(),
                 runtime: crate::runtime_snapshot::RuntimeSnapshot::capture(
@@ -2411,20 +2424,65 @@ mod tests {
         .unwrap();
         assert_eq!(first, expected);
         assert_eq!(
-            super::resolve_whisper_engine(&mut resolved, &cancelled, || {
+            super::resolve_engine(&mut resolved, &cancelled, || {
                 panic!("unchanged runtime must not be selected again")
             })
             .unwrap(),
             expected
         );
         fs::write(root.join("unexpected.dll"), b"changed between chunks").unwrap();
-        let error = super::resolve_whisper_engine(&mut resolved, &cancelled, || {
+        let error = super::resolve_engine(&mut resolved, &cancelled, || {
             panic!("a changed cached runtime must fail validation")
         })
         .unwrap_err();
         drop(resolved);
         fs::remove_dir_all(root).unwrap();
         assert!(error.contains("Runtime berubah"));
+    }
+
+    #[test]
+    fn qwen_cuda_dependencies_are_captured_once_and_released_after_cancellation() {
+        let root = std::env::temp_dir().join(format!("qwen-cuda-reuse-{}", Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let engine = root.join("whisper-cli.exe");
+        let dependency = root.join("cuda.dll");
+        fs::write(&engine, b"trusted executable").unwrap();
+        fs::write(&dependency, b"trusted dependency").unwrap();
+        let cancelled = AtomicBool::new(false);
+        crate::paths::write_runtime_manifest(&root, "whisper-cli.exe", "test", &cancelled).unwrap();
+        let mut resolved_cuda = None;
+        let mut captures = 0;
+        for _section in 0..3 {
+            let selection = super::resolve_engine(&mut resolved_cuda, &cancelled, || {
+                captures += 1;
+                Ok(super::ResolvedEngine {
+                    selection: ("cuda".into(), engine.clone(), None, None),
+                    runtime: crate::runtime_snapshot::RuntimeSnapshot::capture(
+                        &engine,
+                        Some("test"),
+                        &cancelled,
+                    )?,
+                })
+            })
+            .unwrap();
+            assert_eq!(selection.1, engine);
+        }
+        assert_eq!(
+            captures, 1,
+            "later Qwen sections must not rehash the manifest"
+        );
+        #[cfg(windows)]
+        assert!(fs::write(&dependency, b"changed").is_err());
+        cancelled.store(true, Ordering::SeqCst);
+        assert!(super::resolve_engine(&mut resolved_cuda, &cancelled, || {
+            panic!("cancelled work must not capture another runtime")
+        })
+        .unwrap_err()
+        .contains("dibatalkan"));
+        drop(resolved_cuda);
+        // Windows snapshot read locks must leave with the reservation as well.
+        fs::write(&dependency, b"released").unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

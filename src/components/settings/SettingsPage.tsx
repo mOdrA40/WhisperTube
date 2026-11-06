@@ -631,7 +631,7 @@ export function SettingsPage({
           options={[{ value: "openai", label: "OpenAI · Whisper" }, { value: "alibaba", label: "Alibaba · Qwen" }]}
           onChange={setModelManagerProvider} ariaLabel={t("controls.provider")} />
         <div className="model-manager">
-          {models.filter((model) => modelProvider(model.id) === modelManagerProvider).map((model) => (
+          {models.filter((model) => modelProvider(model.id) === modelManagerProvider || downloadingModel[model.id]).map((model) => (
             <div className="model-manage-row" key={model.id}>
               <div>
                 <strong>{getModelCopy(model, t).label}</strong>

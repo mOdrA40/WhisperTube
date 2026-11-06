@@ -478,8 +478,11 @@ runtime for its shared libraries, and compute capability of at least 7.5.
 The application's CUDA installer is Windows x64 only; the Linux catalog entry
 alone does not establish a usable shipping CUDA installation. Qwen Metal uses
 its own native runtime and does not require the Whisper Metal accelerator pack.
-Qwen Auto uses CPU when no suitable CUDA candidate is available, including an
-old or unverified compute capability; on Apple Silicon it selects Metal.
+Qwen Auto tries the visible CUDA candidates in free-VRAM order, checking VRAM
+and compute capability for each before choosing CPU if none qualify; on Apple
+Silicon it selects Metal. A selected CUDA dependency runtime is captured once
+per job and its snapshot is validated before subsequent CUDA sections, retaining
+the dependency file handles until the transcription reservation ends.
 It does not use Whisper's one-second probe cache or promise a CPU retry after
 every native worker failure. The worker verifies the actually resolved backend
 before accepting inference output.

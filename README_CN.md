@@ -215,7 +215,7 @@ Linux 脚本会先构建固定版本的静态 FFmpeg 和 CPU engine，然后在
 的 Windows、macOS 和 Linux runner 上重复 native build。手动运行可获得临时
 artifact，或者 push 类似 `v0.1.0` 的应用 tag，将 NSIS、DMG、Debian 和 AppImage
 原生安装包发布到 GitHub Release。Windows 和 Linux 尚未签名；macOS 使用免费
-ad-hoc 签名，但 v0.1 尚未经过 Apple notarize。
+ad-hoc 签名，但 0.2.4 尚未经过 Apple notarize。
 每个安装包都会附带 SHA-256 sidecar，应用 bundle 也会包含项目 license 和
 third-party notices。
 
@@ -245,13 +245,13 @@ third-party notices。
 
 在设置中可检查未完成的任务，并单独删除重试缓存以释放空间。删除缓存会丢失该任务的重试进度，但会保留已安装的模型和已保存的历史记录。
 
-## v0.1 限制
+## 已知限制
 
 - 当前固定版本 CUDA bootstrap 面向 Windows x64 和已检测到 NVIDIA 驱动的设备。
 - Metal/Vulkan 需要匹配的公开 GitHub Release asset。
 - 需要登录的视频依赖 yt-dlp 兼容性以及浏览器/平台的安全策略变化。
 - 目前没有 playlist/batch job、说话人分离、逐词字幕编辑或 runtime 自动更新。
-- macOS/Linux 已提供 native script 和 CI 构建，但 v0.1 尚未完成签名、公证以及广泛的发行版/硬件 QA。
+- macOS/Linux 已提供 native script 和 CI 构建，但 0.2.4 尚未完成签名、公证以及广泛的发行版/硬件 QA。
 - macOS/Linux bootstrap 会从固定 source archive 构建静态 FFmpeg；向干净机器分发仍需要完成各平台的依赖和许可证 QA。
 
 ## 许可证

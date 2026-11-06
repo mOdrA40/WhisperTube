@@ -335,8 +335,10 @@ cancellable download installs its hash-verified native runtime before the GGUF.
 CUDA needs the existing NVIDIA acceleration component; CPU remains available.
 The pinned Qwen CUDA runtime requires compute capability 7.5 or newer. A GPU
 that works with Whisper CUDA (for example, a Pascal GTX 1080) may not support
-Qwen CUDA. Auto uses CPU when the selected GPU is too old or its compute
-capability cannot be verified; explicit CUDA reports the reason instead.
+Qwen CUDA. Auto tries the visible NVIDIA GPUs in free-VRAM order, skipping
+devices with insufficient/unreadable VRAM or unsupported/unverifiable compute
+capability, and uses CPU if none qualify. Explicit CUDA checks only the selected
+GPU and reports the reason if it cannot be used.
 Qwen subtitle timestamps follow audio section boundaries and are approximate.
 Whisper remains available through its own provider for aligned subtitles.
 Qwen requires a rebuilt native application; a frontend-only preview does not

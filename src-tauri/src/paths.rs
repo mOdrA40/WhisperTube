@@ -568,23 +568,6 @@ pub fn engine_with_snapshot(
     Ok((path, snapshot))
 }
 
-pub fn snapshot_runtime(
-    app: &AppHandle,
-    backend: &str,
-    engine: &Path,
-    cancelled: &AtomicBool,
-) -> Result<crate::runtime_snapshot::RuntimeSnapshot, String> {
-    let user_engine = user_runtime_dir(app)?
-        .join(backend)
-        .join(exe_name("whisper-cli"));
-    let version = (engine == user_engine).then_some(if matches!(backend, "metal" | "vulkan") {
-        ACCELERATOR_RUNTIME_MANIFEST_VERSION
-    } else {
-        CORE_RUNTIME_MANIFEST_VERSION
-    });
-    crate::runtime_snapshot::RuntimeSnapshot::capture(engine, version, cancelled)
-}
-
 /// Reports whether the same validated engine selected for inference is
 /// available. User-installed runtimes are fully checked against their manifest.
 pub fn engine_available(app: &AppHandle, backend: &str) -> Result<bool, String> {

@@ -98,6 +98,45 @@ describe("SettingsPage local data reset", () => {
     fireEvent.click(screen.getByRole("button", { name: "Download" }));
     expect(onDownloadModel).toHaveBeenCalledWith("qwen3-asr-1.7b-q8_0");
   });
+  it("keeps an active download and Cancel visible across provider filters and remount", () => {
+    const id = "qwen3-asr-1.7b-q8_0";
+    const onCancelModel = vi.fn();
+    const model = { label: "", description: "", sizeMb: 100, vramRequiredMb: 4096, installed: false };
+    const props: Partial<SettingsPageProps> = {
+      models: [{ ...model, id: "base" }, { ...model, id }],
+      downloadingModel: { [id]: { id, percent: 42, downloadedBytes: 42, totalBytes: 100, bytesPerSecond: null, phase: "runtime" } },
+      busy: true,
+      onCancelModel,
+    };
+    const assertActiveDownload = () => {
+      expect(screen.getByText("Qwen3-ASR 1.7B · Q8")).toBeTruthy();
+      expect(screen.getByText(/42%/)).toBeTruthy();
+      const cancel = screen.getByRole("button", { name: "Cancel model download" });
+      expect(cancel.hasAttribute("disabled")).toBe(false);
+      return cancel;
+    };
+    const { unmount } = renderSettingsPage(props);
+    // The manager initially shows OpenAI, even if a Qwen transfer is active.
+    expect(screen.getByText("Fast")).toBeTruthy();
+    fireEvent.click(assertActiveDownload());
+    expect(onCancelModel).toHaveBeenCalledOnce();
+    for (const provider of ["Alibaba · Qwen", "OpenAI · Whisper"]) {
+      fireEvent.click(screen.getByRole("combobox", { name: "Model provider" }));
+      fireEvent.click(screen.getByRole("option", { name: provider }));
+      assertActiveDownload();
+      expect(screen.getAllByRole("button", { name: "Cancel model download" })).toHaveLength(1);
+    }
+    unmount();
+    renderSettingsPage(props);
+    assertActiveDownload();
+  });
+
+  it("returns completed downloads to their provider filter", () => {
+    renderSettingsPage({ models: [{ id: "qwen3-asr-1.7b-q8_0", label: "Qwen", description: "", sizeMb: 100,
+      vramRequiredMb: 4096, installed: true }], downloadingModel: {} });
+    expect(screen.queryByText("Qwen3-ASR 1.7B · Q8")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Cancel model download" })).toBeNull();
+  });
   it("clears its reset notification timer on unmount", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {

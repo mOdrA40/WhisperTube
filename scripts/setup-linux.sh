@@ -64,7 +64,9 @@ fi
 mkdir -p "$CPU" "$RUNTIME"
 
 ffmpeg_archive="$WORK/ffmpeg-${FFMPEG_VERSION}.tar.xz"
-curl --fail --location --retry 3 --connect-timeout 30 \
+# Retry TLS/connection resets as well as HTTP transient failures; keep every
+# attempt and the retry window bounded. The checksum still gates extraction.
+curl --fail --location --retry 3 --retry-all-errors --retry-max-time 300 --connect-timeout 30 --max-time 120 \
   "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz" \
   -o "$ffmpeg_archive"
 if ! echo "$FFMPEG_SOURCE_SHA256  $ffmpeg_archive" | sha256sum --check --status; then

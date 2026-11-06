@@ -82,7 +82,7 @@ try {
     Write-Step "Downloading and verifying FFmpeg $FfmpegVersion"
     $FfmpegZip = Join-Path $Temp "ffmpeg.zip"
     $FfmpegExtract = Join-Path $Temp "ffmpeg"
-    Download-File "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-$FfmpegVersion-essentials_build.zip" $FfmpegZip
+    Download-File "https://github.com/GyanD/codexffmpeg/releases/download/$FfmpegVersion/ffmpeg-$FfmpegVersion-essentials_build.zip" $FfmpegZip
     Assert-Sha256 $FfmpegZip $FfmpegSha256 "FFmpeg archive"
     Expand-Archive -Path $FfmpegZip -DestinationPath $FfmpegExtract -Force
     $FfmpegExe = Get-ChildItem -Path $FfmpegExtract -Filter "ffmpeg.exe" -Recurse | Select-Object -First 1

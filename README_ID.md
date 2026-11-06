@@ -1,4 +1,4 @@
-# WhisperTube 0.2.1
+# WhisperTube 0.2.2
 
 WhisperTube adalah aplikasi desktop local-first untuk mengubah file audio lokal dan video dari platform yang didukung menjadi transkrip menggunakan `yt-dlp`, FFmpeg, dan mesin lokal Whisper/Qwen. Audio serta proses transkripsi tetap berada di perangkat pengguna.
 

@@ -247,6 +247,10 @@ pub fn run_piped(
             // Keep draining while output arrives, but still check both streams,
             // cancellation and the watchdog on every bounded iteration.
             if !received_output {
+                #[cfg(unix)]
+                wait_for_pipe_output([(&stdout, stdout_eof), (&stderr, stderr_eof)])
+                    .map_err(|e| format!("Gagal menunggu output process: {e}"))?;
+                #[cfg(windows)]
                 std::thread::sleep(Duration::from_millis(10));
             }
         }
@@ -292,6 +296,37 @@ fn run_with_timeout_captured_inner(
 
 #[cfg(unix)]
 type PipeReader = std::os::unix::net::UnixStream;
+
+#[cfg(unix)]
+fn wait_for_pipe_output(readers: [(&PipeReader, bool); 2]) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let mut descriptors = readers.map(|(reader, eof)| libc::pollfd {
+        fd: if eof { -1 } else { reader.as_raw_fd() },
+        events: libc::POLLIN,
+        revents: 0,
+    });
+    // SAFETY: poll borrows two live descriptors and writes only this array.
+    // Waiting for readiness wakes as soon as a blocked child writes again;
+    // the short deadline keeps cancellation and watchdog checks responsive.
+    let ready = unsafe { libc::poll(descriptors.as_mut_ptr(), descriptors.len() as _, 10) };
+    if ready < 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+    if descriptors
+        .iter()
+        .any(|fd| fd.revents & libc::POLLNVAL != 0)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Descriptor output process tidak valid.",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(windows)]
 enum PipeReader {
     Stdout(std::process::ChildStdout),
@@ -644,6 +679,26 @@ mod tests {
         assert!(status.success());
         assert_process_exited(std::fs::read_to_string(&file).unwrap().parse().unwrap());
         std::fs::remove_file(file).unwrap();
+    }
+
+    #[test]
+    fn large_stderr_is_completely_drained_before_success() {
+        let mut received = 0usize;
+        let result = run_piped(
+            &mut capture_child("writer"),
+            Some(Duration::from_secs(10)),
+            None,
+            |_| Ok(()),
+            |event| {
+                if let OutputEvent::Data(OutputStream::Stderr, bytes) = event {
+                    received += bytes.len();
+                }
+                Ok(())
+            },
+        );
+        assert!(result.is_ok(), "drained {received} bytes: {result:?}");
+        assert!(result.unwrap().success());
+        assert_eq!(received, 2 * 1024 * 1024);
     }
 
     #[test]

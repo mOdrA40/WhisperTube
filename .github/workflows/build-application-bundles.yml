@@ -42,6 +42,31 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Verify child process lifecycle
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Compile the actual process module without waiting for Tauri/media builds.
+          # Resolve its two dependencies to the versions in the application lockfile.
+          python3 - <<'PY'
+          import os, pathlib, shutil, tomllib
+          root = pathlib.Path(os.environ["GITHUB_WORKSPACE"])
+          probe = pathlib.Path(os.environ["RUNNER_TEMP"]) / "process-check"
+          (probe / "src").mkdir(parents=True, exist_ok=True)
+          packages = tomllib.loads((root / "src-tauri/Cargo.lock").read_text())["package"]
+          versions = {name: next(p["version"] for p in packages if p["name"] == name)
+                      for name in ("libc", "uuid")}
+          (probe / "Cargo.toml").write_text(
+              '[package]\nname = "whispertube-process-check"\nversion = "0.0.0"\nedition = "2021"\n'
+              '[dependencies]\nlibc = "=' + versions["libc"] + '"\n'
+              'uuid = { version = "=' + versions["uuid"] + '", features = ["v4"] }\n')
+          shutil.copyfile(root / "src-tauri/src/process.rs", probe / "src/process.rs")
+          shutil.copytree(root / "src-tauri/src/process", probe / "src/process", dirs_exist_ok=True)
+          shutil.copyfile(root / "src-tauri/Cargo.lock", probe / "Cargo.lock")
+          (probe / "src/lib.rs").write_text('pub mod process;\n')
+          PY
+          cargo test --release --manifest-path "$RUNNER_TEMP/process-check/Cargo.toml" --lib 'process::'
+
       - name: Install Linux Tauri dependencies
         if: runner.os == 'Linux'
         shell: bash
@@ -110,9 +135,6 @@ jobs:
               exit 1
             fi
           fi
-
-      - name: Verify child process lifecycle
-        run: cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib 'process::'
 
       - name: Verify native decoder success and partial-input failure
         run: cargo test --release --manifest-path src-tauri/Cargo.toml --lib transcription::tests::native_ffmpeg_accepts_short_track_but_rejects_corrupt_partial_decode -- --ignored --exact

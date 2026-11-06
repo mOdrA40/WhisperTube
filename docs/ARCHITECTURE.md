@@ -179,6 +179,8 @@ waitid with WNOWAIT observes leader exit without releasing its PID/PGID;
 remaining group members are killed before the leader is reaped. On Windows,
 the owned Job is terminated on leader exit. Piped execution observes leader
 exit independently of stream EOF, then drains buffered output after cleanup.
+Output polling sleeps only when neither stream delivers data; bounded read
+batches still check cancellation and the watchdog while draining large output.
 Darwin can return EPERM when a group contains only zombies. macOS accepts that
 case only after libproc reports no live members and a second complete group
 inventory matches the first. Live members, permission failures, incomplete

@@ -19,7 +19,8 @@ for required in "$RUNTIME/ffmpeg" "$RUNTIME/yt-dlp" "$RUNTIME/cpu/whisper-cli" "
 done
 
 npm ci
-build_args=(--bundles app,dmg)
+# Include the DMG helper's output when hdiutil or packaging fails on a runner.
+build_args=(--verbose --bundles app,dmg)
 if [[ "${TAURI_CREATE_UPDATER_ARTIFACTS:-}" == "true" ]]; then
   if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" && -z "${TAURI_SIGNING_PRIVATE_KEY_PATH:-}" ]]; then
     echo "TAURI_SIGNING_PRIVATE_KEY atau TAURI_SIGNING_PRIVATE_KEY_PATH wajib diisi saat membuat artifact updater." >&2

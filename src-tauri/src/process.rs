@@ -203,6 +203,7 @@ pub fn run_piped(
         let mut buffer = [0u8; 8 * 1024];
         loop {
             check()?;
+            let mut received_output = false;
             for (stream, reader, eof) in [
                 (OutputStream::Stdout, &mut stdout, &mut stdout_eof),
                 (OutputStream::Stderr, &mut stderr, &mut stderr_eof),
@@ -222,6 +223,7 @@ pub fn run_piped(
                         Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                         Err(e) => return Err(format!("Gagal membaca output process: {e}")),
                     };
+                    received_output = true;
                     on_event(OutputEvent::Data(stream, &buffer[..count]))?;
                 }
             }
@@ -241,7 +243,12 @@ pub fn run_piped(
                     return Ok(status);
                 }
             }
-            std::thread::sleep(Duration::from_millis(10));
+            // Small socket buffers on macOS may fill after every read batch.
+            // Keep draining while output arrives, but still check both streams,
+            // cancellation and the watchdog on every bounded iteration.
+            if !received_output {
+                std::thread::sleep(Duration::from_millis(10));
+            }
         }
     })();
     if outcome.is_err() {

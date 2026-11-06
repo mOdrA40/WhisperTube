@@ -42,4 +42,12 @@ if ($env:TAURI_CREATE_UPDATER_ARTIFACTS -eq 'true') {
 
 npm run tauri:build -- @buildArgs
 if ($LASTEXITCODE -ne 0) { throw "Build aplikasi gagal (npm exit code $LASTEXITCODE)." }
-Write-Host "`nBuild selesai. Cek src-tauri\target\release\bundle\" -ForegroundColor Green
+$metadata = cargo metadata --no-deps --format-version 1 --manifest-path src-tauri/Cargo.toml
+if ($LASTEXITCODE -ne 0) { throw 'Lokasi hasil build Cargo tidak dapat ditentukan.' }
+$targetRoot = ($metadata | ConvertFrom-Json).target_directory
+$releaseRoot = Join-Path $targetRoot 'release'
+$bundleConfig = Get-Content -LiteralPath 'src-tauri/tauri.conf.json' -Raw | ConvertFrom-Json
+$installer = Join-Path $releaseRoot "bundle\nsis\$($bundleConfig.productName)_$($bundleConfig.version)_x64-setup.exe"
+node scripts/verify-windows-icons.mjs (Join-Path $releaseRoot 'whispertube.exe') $installer
+if ($LASTEXITCODE -ne 0) { throw 'Ikon aplikasi/installer Windows gagal verifikasi.' }
+Write-Host "`nBuild selesai. Cek: $(Join-Path $releaseRoot 'bundle')" -ForegroundColor Green

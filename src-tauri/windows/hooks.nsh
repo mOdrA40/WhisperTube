@@ -4,6 +4,14 @@
 
 Var WhisperTubeRemoveUserData
 
+!macro NSIS_HOOK_POSTINSTALL
+  ; Tauri has replaced the executable and updated shortcuts at this point.
+  ; Notify Explorer so an upgrade at the same path refreshes the cached icon.
+  ; SHCNE_UPDATEITEM / SHCNF_PATHW, then SHCNE_ASSOCCHANGED / SHCNF_IDLIST.
+  System::Call 'shell32::SHChangeNotify(i 0x00002000, i 0x0005, w "$INSTDIR\${MAINBINARYNAME}.exe", p 0)'
+  System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0x0000, p 0, p 0)'
+!macroend
+
 !macro NSIS_HOOK_PREUNINSTALL
   ; Use Tauri's confirmation-page checkbox as the only deletion decision.
   ; Consume it before the template reaches its whole-app-data deletion block:

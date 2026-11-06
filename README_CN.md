@@ -1,4 +1,4 @@
-# WhisperTube 0.2.3
+# WhisperTube 0.2.4
 
 WhisperTube 是一款 local-first 桌面应用，使用 `yt-dlp`、FFmpeg 和本地 Whisper/Qwen 引擎将本地音频文件及受支持平台的视频转换为转录文本。音频和转录过程都保留在用户设备上。
 

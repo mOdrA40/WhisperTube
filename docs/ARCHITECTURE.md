@@ -531,6 +531,13 @@ The repository has two separate release paths:
    packs from pinned whisper.cpp source and publishes ZIP files with SHA-256
    sidecars for accelerators-v* tags.
 
+Windows uses `icons/icon.ico` for the application, NSIS installer and
+uninstaller. The post-install hook notifies the Shell after files and shortcuts
+are updated so upgrades at the same path can refresh cached icons. The Windows
+build script reads the actual PE icon resources in the application and installer
+and rejects missing, stale or default icons; native NSIS fixtures also verify
+the uninstaller. This does not change the application identity or stored data.
+
 Frontend checks, Rust checks and locked-dependency audits are run locally;
 there are no separate CI audit or quality-gate workflows. Real CPU inference must pass before application
 artifacts are collected. Accelerator jobs run the CMake and load-path regression

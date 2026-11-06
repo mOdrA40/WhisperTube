@@ -1,4 +1,4 @@
-# WhisperTube 0.2.2
+# WhisperTube 0.2.3
 
 WhisperTube is a local-first desktop app that turns local audio files and videos from supported platforms into transcripts using `yt-dlp`, FFmpeg, and local Whisper/Qwen engines. Audio and transcript processing stay on the user's device.
 
@@ -357,7 +357,7 @@ manually to get short-lived workflow artifacts. To publish native NSIS, DMG,
 Debian and AppImage installers, push an unused `vX.Y.Z` application tag matching
 all three version manifests. Updater artifacts use Tauri signatures for update verification;
 Windows has no Authenticode signing yet, and macOS uses a free ad-hoc signature
-but is not Apple-notarized in 0.2.2.
+but is not Apple-notarized in 0.2.3.
 Each installer is accompanied by a SHA-256 sidecar. The application bundles
 also contain the project license and third-party notices.
 
@@ -424,7 +424,7 @@ Tauri selects the platform-specific app-local-data directory. WhisperTube stores
 3. Protected downloads depend on the exported cookies format, yt-dlp compatibility, and platform authentication behavior.
 4. Login-protected downloads can break when a platform changes authentication, anti-bot, or extractor requirements.
 5. There are no playlist/batch jobs, speaker diarization, word-level subtitle editing, or runtime/model auto-updates yet. App updates are handled by the signed Tauri updater; see [`docs/UPDATER.md`](docs/UPDATER.md).
-6. macOS/Linux builds are available from native scripts and CI. macOS uses an ad-hoc signature but is not notarized; Windows/Linux signing and broad distro/hardware QA are not complete in 0.2.2.
+6. macOS/Linux builds are available from native scripts and CI. macOS uses an ad-hoc signature but is not notarized; Windows/Linux signing and broad distro/hardware QA are not complete in 0.2.3.
 7. macOS/Linux bootstrap builds FFmpeg statically from a pinned source archive; clean-machine redistribution and license QA are still required.
 
 ## License

@@ -7,6 +7,9 @@ use std::{
     time::Duration,
 };
 
+#[cfg(target_os = "macos")]
+mod macos;
+
 #[derive(Default)]
 struct Registry {
     shutting_down: bool,
@@ -129,10 +132,16 @@ fn unix_kill_remaining_group(pid: u32) -> io::Result<()> {
     }
     let error = io::Error::last_os_error();
     if error.raw_os_error() == Some(libc::ESRCH) {
-        Ok(())
-    } else {
-        Err(error)
+        return Ok(());
     }
+    // Darwin skips zombies when signalling a group, returning EPERM if none
+    // of its members can receive a signal. Preserve genuine permission errors
+    // unless an independent, complete inventory proves the group is inactive.
+    #[cfg(target_os = "macos")]
+    if error.raw_os_error() == Some(libc::EPERM) && macos::group_is_inactive(pid)? {
+        return Ok(());
+    }
+    Err(error)
 }
 
 pub fn terminate_registered(pid: u32) {

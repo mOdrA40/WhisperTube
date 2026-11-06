@@ -136,6 +136,9 @@ jobs:
             fi
           fi
 
+      - name: Verify application-linked process lifecycle
+        run: cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib 'process::'
+
       - name: Verify native decoder success and partial-input failure
         run: cargo test --release --manifest-path src-tauri/Cargo.toml --lib transcription::tests::native_ffmpeg_accepts_short_track_but_rejects_corrupt_partial_decode -- --ignored --exact
 

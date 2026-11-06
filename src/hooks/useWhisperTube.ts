@@ -851,10 +851,11 @@ export function useWhisperTube() {
   }
 
   async function handleCancelJob() {
+    if (busy && (progress.stage === "finalizing" || progress.stage === "done")) return;
     try {
       await cancelJobRequest();
     } catch (cause) {
-      setError(friendlyError(cause));
+      setError(errorCode(cause) === "job_finalizing" ? t("progress.cannotCancelFinalizing") : friendlyError(cause));
     }
   }
 

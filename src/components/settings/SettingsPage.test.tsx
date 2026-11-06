@@ -156,7 +156,7 @@ describe("SettingsPage local data reset", () => {
     fireEvent.click(screen.getByRole("button", { name: "Reset WhisperTube data" }));
     fireEvent.click(screen.getByRole("button", { name: "Delete permanently" }));
     await waitFor(() => expect(onResetUserData).toHaveBeenCalledOnce());
-    expect(screen.queryByRole("dialog")).toBeNull();
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 
     onResetUserData.mockRejectedValueOnce(new Error("Database sedang terkunci"));
     fireEvent.click(screen.getByRole("button", { name: "Reset WhisperTube data" }));

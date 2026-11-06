@@ -778,14 +778,18 @@ fn run_download(
     let template = job_dir.join("source.%(ext)s");
     let mut command = Command::new(yt_dlp);
     process::hide_console(&mut command);
-    let cookie_jar =
-        CookieJar::prepare(context.app, request.cookies_path.as_deref()).map_err(|error| {
-            if request.cookies_path.is_some() {
-                format!("media_source_cookie_file:{error}")
-            } else {
-                error
-            }
-        })?;
+    let cookie_jar = CookieJar::prepare(
+        context.app,
+        request.cookies_path.as_deref(),
+        context.cancelled,
+    )
+    .map_err(|error| {
+        if request.cookies_path.is_some() && !crate::io_cancel::is_cancellation_error(&error) {
+            format!("media_source_cookie_file:{error}")
+        } else {
+            error
+        }
+    })?;
     command
         .args(["--ignore-config", "--continue", "--part", "--no-playlist", "--match-filter"])
         .arg(crate::sources::download_media_filter(&request.url))
@@ -1995,6 +1999,7 @@ pub fn pipeline(
     cancelled: Arc<AtomicBool>,
     capability_probe: Arc<Mutex<HashSet<String>>>,
     mut request: TranscriptRequest,
+    reservation: &mut crate::state::JobGuard,
 ) -> Result<TranscriptResult, String> {
     if cancelled.load(Ordering::SeqCst) {
         return Err("Job dibatalkan.".into());
@@ -2254,24 +2259,22 @@ pub fn pipeline(
         },
     )
     .map_err(inference_error)?;
-    if context.is_cancelled() {
-        return Err("Job dibatalkan.".into());
-    }
-    checkpoint::write_exports(&output_prefix, &completed)?;
-    let resolved_backend = completed.backend;
-    let language = completed.language;
-    let segments = completed.segments;
-    let text = completed.text;
+    reservation.begin_finalization()?;
     context.emit(ProgressUpdate {
         stage: "finalizing",
         message_code: "finalizing_result",
         percent: 92.0,
         message: "Merapikan transcript dan menyimpan history…".into(),
-        backend: Some(&resolved_backend),
+        backend: Some(&completed.backend),
         downloaded_bytes: None,
         total_bytes: None,
         network_bytes_per_second: None,
     });
+    checkpoint::write_exports(&output_prefix, &completed)?;
+    let resolved_backend = completed.backend;
+    let language = completed.language;
+    let segments = completed.segments;
+    let text = completed.text;
     let txt_path = output_prefix.with_extension("txt");
     let srt_path = output_prefix.with_extension("srt");
     let vtt_path = output_prefix.with_extension("vtt");

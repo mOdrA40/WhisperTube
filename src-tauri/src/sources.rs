@@ -846,8 +846,14 @@ pub async fn inspect_media(
         if cancelled.load(Ordering::SeqCst) {
             return Err("Pemeriksaan metadata dibatalkan.".into());
         }
-        let cookie_jar = CookieJar::prepare(&app, cookies_path.as_deref())
-            .map_err(|error| format!("{SOURCE_COOKIE_FILE_ERROR_PREFIX}{error}"))?;
+        let cookie_jar = CookieJar::prepare(&app, cookies_path.as_deref(), &cancelled)
+            .map_err(|error| {
+                if crate::io_cancel::is_cancellation_error(&error) {
+                    error
+                } else {
+                    format!("{SOURCE_COOKIE_FILE_ERROR_PREFIX}{error}")
+                }
+            })?;
         let runtime_args = source_js_runtime_args(&safe_url, &active_pid, &cancelled)?;
         let output = {
             let mut attempt = 0;

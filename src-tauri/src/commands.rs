@@ -263,7 +263,7 @@ pub async fn start_transcription(
     completion_message: Option<String>,
     notifications: Option<completion_notifications::TranscriptionNotifications>,
 ) -> CommandResult<TranscriptResult> {
-    let job_guard = JobGuard::reserve(&state)?;
+    let mut job_guard = JobGuard::reserve(&state)?;
     let active_pid = state.active_pid.clone();
     let cancelled = state.cancelled.clone();
     let capability_probe = state.capability_probe.clone();
@@ -277,6 +277,7 @@ pub async fn start_transcription(
                 cancelled,
                 capability_probe,
                 request,
+                &mut job_guard,
             )
         });
         let result = completion_notifications::finish(

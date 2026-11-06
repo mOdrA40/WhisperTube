@@ -437,6 +437,36 @@ describe("useWhisperTube", () => {
     await waitFor(() => expect(result.current.resumeStage).toBe("audio"));
   });
 
+  it.each(["finalizing", "done"] as const)("does not send Cancel during %s, but permits cancellation of subsequent operations", async (stage) => {
+    let finish!: (value: TranscriptResult) => void;
+    services.startTranscription.mockReturnValueOnce(new Promise<TranscriptResult>((resolve) => { finish = resolve; }));
+    const { result } = renderHook(() => useWhisperTube(), { wrapper });
+    await waitFor(() => expect(result.current.system).toEqual(system));
+    act(() => result.current.setUrl(metadata.webpageUrl));
+    await act(async () => result.current.inspectVideo());
+    await waitFor(() => expect(result.current.checkingResume).toBe(false));
+    let pending!: Promise<void>;
+    act(() => { pending = result.current.startTranscription(); });
+    act(() => services.subscribeToProgress.mock.calls[0][0]({ ...result.current.progress, stage }));
+    await act(async () => result.current.cancelJob());
+    expect(services.cancelJob).not.toHaveBeenCalled();
+    expect(result.current.busy).toBe(true);
+    await act(async () => { finish(transcript); await pending; });
+    expect(result.current.result).toEqual(transcript);
+    expect(result.current.error).toBeNull();
+    // A retained done event must not suppress model/runtime cancellation.
+    await act(async () => result.current.cancelJob());
+    expect(services.cancelJob).toHaveBeenCalledOnce();
+  });
+
+  it("explains a finalization rejection when Cancel races the progress event", async () => {
+    services.cancelJob.mockRejectedValueOnce({ code: "job_finalizing", detail: "native detail" });
+    const { result } = renderHook(() => useWhisperTube(), { wrapper });
+    await waitFor(() => expect(result.current.system).toEqual(system));
+    await act(async () => result.current.cancelJob());
+    expect(result.current.error).toBe("Saving the result; cancellation is no longer available.");
+  });
+
   it("finds saved downloads after reopening and clears resume after cache discard", async () => {
     services.getTranscriptionResumeStage.mockResolvedValue("download");
     const first = renderHook(() => useWhisperTube(), { wrapper });

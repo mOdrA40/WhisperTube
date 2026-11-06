@@ -2,9 +2,38 @@
 
 WhisperTube is a local-first desktop app that turns local audio files and videos from supported platforms into transcripts using `yt-dlp`, FFmpeg, and local Whisper/Qwen engines. Audio and transcript processing stay on the user's device.
 
-Use **Choose local audio** to select MP3, WAV, M4A, AAC, FLAC, OGG, Opus, WMA, AIFF, WebM, or MP4 files (up to 4 GiB / 8 hours). FFmpeg verifies that the file contains decodable audio before transcription. Local files require FFmpeg and an installed transcription model/engine; no URL, cookies, yt-dlp, or JavaScript runtime is needed. The original file is never moved or deleted. Select the same unchanged file again to reuse saved audio/checkpoints after interruption; replacing or modifying the file invalidates its cache identity.
-
 Other languages: [Bahasa Indonesia](README_ID.md) · [中文（普通话）](README_CN.md)
+
+## App preview
+
+Take a look at the desktop interface before [downloading WhisperTube](https://github.com/mOdrA40/WhisperTube/releases/latest). These screenshots show the Windows app in English; the layout and available options may vary by version, operating system, and hardware.
+
+**Transcription workspace** — check a video link, choose a model, language, and compute backend, then start transcription.
+
+![WhisperTube transcription workspace with video preview, model selection, language, and compute backend](docs/screenshots/transcribe.png)
+
+<details>
+<summary>View History and Settings (4 screenshots)</summary>
+
+**History** — reopen saved transcription results and manage their files.
+
+![WhisperTube History page with a saved transcription and file management actions](docs/screenshots/history.png)
+
+**Settings: general, source access, and models** — choose the interface language, import an optional cookies.txt file, and manage Whisper models.
+
+![WhisperTube Settings showing interface language, optional cookies file, and Whisper models](docs/screenshots/settings-general.png)
+
+**Settings: compute engine** — inspect detected hardware, memory, and installed CPU/GPU components.
+
+![WhisperTube compute settings showing detected GPU, memory, CPU engine, CUDA, and Vulkan options](docs/screenshots/settings-compute.png)
+
+**Settings: storage, updates, and local data** — review unfinished work, check for updates, inspect external components, and reset application data.
+
+![WhisperTube Settings showing unfinished work, application updates, external components, and data reset](docs/screenshots/settings-storage-updates.png)
+
+</details>
+
+Use **Choose local audio** to select MP3, WAV, M4A, AAC, FLAC, OGG, Opus, WMA, AIFF, WebM, or MP4 files (up to 4 GiB / 8 hours). FFmpeg verifies that the file contains decodable audio before transcription. Local files require FFmpeg and an installed transcription model/engine; no URL, cookies, yt-dlp, or JavaScript runtime is needed. The original file is never moved or deleted. Select the same unchanged file again to reuse saved audio/checkpoints after interruption; replacing or modifying the file invalidates its cache identity.
 
 Local MP3 imports first use strict decoding. For recognized MP3 packet/decoder errors, inspection and conversion automatically retry with FFmpeg's decoding-frame failure limit set to 1%. Other formats, access failures, cancellation, and timeouts do not trigger recovery. Recovery must finish successfully with a valid, bounded audio duration and PCM WAV. The app displays a recovery warning before transcription and stores it in the result/history and retry cache; recovered audio may omit damaged sections or shift timestamps. No manual WAV conversion is needed, and the original file is unchanged. This limit measures decoder failures, not a guarantee that 99% of the original recording is intact. Files that cannot pass recovery still need re-exporting from their recording app.
 

@@ -2,11 +2,40 @@
 
 WhisperTube 是一款 local-first 桌面应用，使用 `yt-dlp`、FFmpeg 和本地 Whisper/Qwen 引擎将本地音频文件及受支持平台的视频转换为转录文本。音频和转录过程都保留在用户设备上。
 
+主文档：[README.md](README.md)（English）。印度尼西亚语文档：[README_ID.md](README_ID.md)。
+
+## 应用预览
+
+在[下载 WhisperTube](https://github.com/mOdrA40/WhisperTube/releases/latest) 之前，先了解桌面界面。以下截图展示 Windows 版应用的英文界面；实际布局和可用选项可能因版本、操作系统和硬件而异。
+
+**转录工作区** — 检查视频链接，选择模型、语言和计算后端，然后开始转录。
+
+![WhisperTube 转录工作区，显示视频预览、模型、语言和计算后端选项](docs/screenshots/transcribe.png)
+
+<details>
+<summary>查看历史记录与设置（4 张截图）</summary>
+
+**历史记录** — 重新打开已保存的转录结果并管理相关文件。
+
+![WhisperTube 历史记录页面，显示已保存的转录结果和文件管理操作](docs/screenshots/history.png)
+
+**设置：常规、来源访问与模型** — 选择界面语言，按需导入 cookies.txt，并管理 Whisper 模型。
+
+![WhisperTube 设置页面，显示界面语言、可选 cookies 文件和 Whisper 模型](docs/screenshots/settings-general.png)
+
+**设置：计算引擎** — 查看检测到的硬件、内存和已安装的 CPU/GPU 组件。
+
+![WhisperTube 计算设置，显示检测到的 GPU、内存、CPU 引擎以及 CUDA 和 Vulkan 选项](docs/screenshots/settings-compute.png)
+
+**设置：存储、更新与本地数据** — 查看未完成的任务，检查更新和外部组件状态，并重置应用数据。
+
+![WhisperTube 设置页面，显示未完成的任务、应用更新、外部组件和数据重置](docs/screenshots/settings-storage-updates.png)
+
+</details>
+
 选择 **Choose local audio** 可导入 MP3、WAV、M4A、AAC、FLAC、OGG、Opus、WMA、AIFF、WebM 或 MP4（最多 4 GiB、8 小时）。本地导入需要 FFmpeg 和已安装的转录模型及引擎，无需 URL、cookies、yt-dlp 或 JavaScript 运行环境。原文件不会被移动或删除；中断后可重新选择未改变的同一文件以继续。
 
 本地 MP3 首先严格解码。识别到特定 MP3 数据包或解码错误时，检查及转换会自动重试，并将 FFmpeg 解码帧失败比例上限设为 1%。其他格式、访问失败、取消及超时不会触发恢复。恢复仍须成功生成有效且时长合规的 PCM WAV。应用会显示恢复警告，并将警告保存在结果、历史和重试缓存中；损坏部分可能被省略，时间戳可能偏移。1% 是解码失败阈值，并不保证原录音的 99% 完好。恢复失败的文件仍需从录音软件重新导出。
-
-主文档：[README.md](README.md)（English）。印度尼西亚语文档：[README_ID.md](README_ID.md)。
 
 ## 模型提供方
 

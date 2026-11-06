@@ -30,15 +30,23 @@ path for a public application release.
 The workflow uses the native Tauri updater formats:
 
 - Windows: an .exe installer with an accompanying .exe.sig file;
-- Linux: an .AppImage with an accompanying .AppImage.sig file;
+- Linux AppImage: an .AppImage with an accompanying .AppImage.sig file;
+- Linux Debian: a .deb with an accompanying .deb.sig file;
 - macOS: an .app.tar.gz archive with an accompanying .app.tar.gz.sig file.
 
 The two macOS runners add -x64 and -arm64 to the collected archive names so
 the Intel and Apple Silicon artifacts remain distinct in the manifest.
 
 The published application release also contains the NSIS, DMG, Debian, and
-AppImage installers plus SHA-256 sidecar files. The updater targets the
-AppImage on Linux; the Debian package remains a direct-install distribution.
+AppImage installers plus SHA-256 sidecar files. The manifest publishes separate
+linux-x86_64-appimage and linux-x86_64-deb targets with their respective signed
+payloads. The generic linux-x86_64 target remains an AppImage fallback. The
+pinned Tauri updater 2.11.0 looks for the installed bundle's specific target
+before the generic target: a Debian installation uses the .deb updater path,
+while an AppImage installation uses the AppImage path. Debian installation
+uses dpkg and may require a system privilege prompt. This describes the
+implemented workflow and plugin contract; native installation QA is still
+required for a release.
 
 ## Updater endpoint
 

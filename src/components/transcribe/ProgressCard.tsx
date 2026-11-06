@@ -22,6 +22,7 @@ export function ProgressCard({ progress, selectedModel, backend, networkSpeedByt
   const percent = Math.max(0, Math.min(100, progress.percent));
   const actualBackend = progress.backend;
   const networkSpeed = networkSpeedBytesPerSecond ?? progress.networkBytesPerSecond;
+  const cancelDisabled = progress.stage === "finalizing" || progress.stage === "done";
 
   return (
     <div className="progress-card card">
@@ -84,8 +85,9 @@ export function ProgressCard({ progress, selectedModel, backend, networkSpeedByt
         <span>
           {selectedModel?.label} • {actualBackend ? actualBackend.toUpperCase() : t("workspace.pendingBackend")}
         </span>
-        <button type="button" className="danger-ghost" onClick={onCancel}>
-          <StopCircleIcon aria-hidden="true" size={16} /> {t("progress.cancel")}
+        <button type="button" className="danger-ghost" onClick={onCancel} disabled={cancelDisabled}
+          title={progress.stage === "finalizing" ? t("progress.cannotCancelFinalizing") : undefined}>
+          <StopCircleIcon aria-hidden="true" size={16} /> {cancelDisabled ? getProgressStageLabel(progress.stage, t) : t("progress.cancel")}
         </button>
       </div>
     </div>

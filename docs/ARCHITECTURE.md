@@ -20,7 +20,8 @@ explicitly registered by Tauri.
            │
            ├─ yt-dlp
            ├─ FFmpeg
-           └─ whisper.cpp CPU/CUDA/Metal/Vulkan engines
+           ├─ whisper.cpp CPU/CUDA/Metal/Vulkan engines
+           └─ application --qwen-worker → transcribe.cpp native library (FFI)
 
 Audio and transcript processing remain on the user's device. Network access is
 used for source inspection, media downloads, model downloads, accelerator
@@ -57,12 +58,18 @@ The Rust backend uses similar boundaries:
 - durable.rs publishes flushed files and synchronizes directory entries;
 - resources.rs performs memory, disk, and per-mount allocation checks;
 - transcription.rs owns the media-to-transcript pipeline;
+- checkpoint.rs shares section validation, resumable inference, and exports
+  between Whisper and Qwen;
+- qwen.rs selects Qwen CUDA candidates and defines the pinned GGUF model;
+- qwen/runtime.rs downloads, verifies, and activates the native Qwen library;
+- qwen/worker.rs implements the transcribe.cpp ABI and isolated worker entry;
 - history.rs owns SQLite history, result files, and exports;
 - history_files.rs owns file inventory, safe location reveal, and durable partial
   deletion of saved audio or transcripts;
 - accelerators.rs downloads and activates Metal/Vulkan packs;
 - system.rs detects hardware and collects telemetry;
 - user_data.rs implements the application-data reset;
+- main.rs dispatches --qwen-worker before initializing Tauri;
 - lib.rs bootstraps Tauri and registers the commands.
 
 ## Transcription pipeline
@@ -86,7 +93,7 @@ An external stage can terminate in FAILED or CANCELLED.
 
 The pipeline downloads bestaudio/best through yt-dlp, converts it with FFmpeg
 to signed 16-bit PCM WAV, mono, 16 kHz, and passes the WAV to the selected
-whisper.cpp engine. Results contain timestamped segments and are written as
+Whisper or Qwen provider. Results contain timestamped segments and are written as
 JSON, TXT, SRT, VTT, and a SQLite history row.
 
 Conversion aborts on FFmpeg decode errors. Result and history duration use the
@@ -117,6 +124,14 @@ whole-file inference. The converted WAV size is checked again
 before inference, and transcript text, segment count, serialized result size,
 and output files have hard limits.
 
+Qwen uses the same outer checkpoints, but divides each section into roughly
+20-second recognition windows. Its segment timestamps are approximate window
+boundaries, not forced alignment. The parent starts the current application
+executable with --qwen-worker; that child loads the versioned transcribe.cpp
+library and returns bounded JSON. ABI size/alignment and version checks precede
+parameter initialization and inference. A native driver/library crash is isolated from the WebView process;
+this is process isolation, not an OS sandbox with reduced user privileges.
+
 ## Operation coordination
 
 AppState exposes one exclusive OperationGuard for destructive and long-running
@@ -142,6 +157,14 @@ termination, not as the sole concurrency lock.
 The cancellation path sets the relevant cancellation flag and terminates the
 active process tree where supported. Child processes are also cleaned up during
 application shutdown.
+
+After inference, JobGuard atomically changes Transcribing to Finalizing under
+the same lock used by Cancel. If cancellation wins first, finalization does not
+start. If finalization wins, Cancel returns job_finalizing without setting the
+token; the UI disables Cancel while exports, result.json and history are saved.
+The reservation remains held through completion notification delivery and is
+released on success, failure, or unwind. Closing the main window during either
+Transcribing or Finalizing hides it to the tray and keeps the worker alive.
 
 OS process creation holds a shared spawn gate instead of the registry mutex,
 so a slow spawn cannot block status polling or cancellation of another child.
@@ -209,6 +232,7 @@ Tauri application-local-data directory:
       ggml-base.bin
       ggml-large-v3-turbo-q5_0.bin
       ggml-large-v3-q5_0.bin
+      Qwen3-ASR-1.7B-Q8_0.gguf
     jobs/
       <uuid>/
         audio.wav
@@ -218,6 +242,9 @@ Tauri application-local-data directory:
         transcript.vtt
         result.json
     runtime/
+      <platform>/
+        qwen-transcribe-0.4.1/
+          transcribe.dll / libtranscribe.dylib / libtranscribe.so
     whispertube.db
 
 Failed/cancelled jobs retain downloads, completed WAV conversion, and validated
@@ -299,7 +326,7 @@ explicit external prerequisite. The backend probes the runtime version and
 returns a dedicated source error when it is unavailable. Other supported
 sources and inference from a reusable WAV do not require this prerequisite.
 
-Development runtime binaries live under src-tauri/runtime/<platform> so Tauri
+Whisper development runtime binaries live under src-tauri/runtime/<platform> so Tauri
 can bundle them as resources. In packaged builds, the bundled runtime is
 resolved from the application resource directory. An installed user runtime
 under application-local-data takes precedence over the bundled engine only
@@ -312,6 +339,15 @@ runtime writes/deletion during the job; Unix checks include inode and ctime.
 Filesystems lacking stable identities retain full hash checks. This does not
 make a user-writable manifest an authenticated signature or eliminate every
 filesystem race against a malicious local actor.
+
+Qwen has a separate download-on-demand runtime under
+runtime/<platform>/qwen-transcribe-0.4.1, with no bundled Whisper-engine fallback.
+Its model download also ensures that runtime is installed. The transcribe.cpp
+0.4.1 TAR archive and GGUF model have pinned SHA-256 values. Extraction rejects
+links, unsafe paths and entries other than regular files/directories and limits
+file count/unpacked bytes.
+The activated library inventory uses the runtime manifest/snapshot checks;
+the worker separately checks the loaded library's ABI version and struct layouts.
 
 The Windows developer-only CUDA helper stores its optional engine under
 runtime-dev/windows/cuda. This directory is intentionally outside the bundled
@@ -364,7 +400,7 @@ temporary download directories older than 24 hours are cleaned at startup.
 
 ## Hardware and backend selection
 
-The application distinguishes execution backends from models:
+For Whisper, the application distinguishes execution backends from models:
 
 - CPU is the baseline fallback;
 - CUDA is supported on Windows x64 with a detected NVIDIA GPU and an installed
@@ -412,7 +448,7 @@ the application uses the downloaded whisper.cpp engine to enumerate devices;
 the UI warns about this and the backend runs a real capability probe before
 manual Vulkan inference.
 
-Auto and explicit GPU selection run a bounded capability probe with the
+Whisper Auto and explicit GPU selection run a bounded capability probe with the
 installed engine, model, and a generated one-second silent WAV. Only
 successful probes are cached for the backend/device/engine/model signature
 during the application session. Cancellation and timeout failures are retried.
@@ -425,10 +461,28 @@ For cross-vendor stability, Vulkan child processes disable the optional
 cooperative-matrix shader path and flash attention. This avoids known driver
 paths that can be exposed by some AMD devices but fail during inference.
 
+Qwen's backend contract is separate. Its catalog advertises Auto/CPU/CUDA on
+Windows and Linux x64, Auto/CPU/Metal on Apple Silicon, and Auto/CPU on Intel
+macOS and Linux ARM64. Vulkan is not exposed by the worker integration even
+when an upstream archive name mentions it. CUDA selection additionally requires
+compatible NVIDIA driver/VRAM telemetry, a verified existing Whisper CUDA
+runtime for its shared libraries, and compute capability of at least 7.5.
+The application's CUDA installer is Windows x64 only; the Linux catalog entry
+alone does not establish a usable shipping CUDA installation. Qwen Metal uses
+its own native runtime and does not require the Whisper Metal accelerator pack.
+Qwen Auto uses CPU when no suitable CUDA candidate is available, including an
+old or unverified compute capability; on Apple Silicon it selects Metal.
+It does not use Whisper's one-second probe cache or promise a CPU retry after
+every native worker failure. The worker verifies the actually resolved backend
+before accepting inference output.
+
 ## Browser and cookie handling
 
 The user can provide a Netscape-format cookies.txt file. WhisperTube validates
-the path and size and copies the file into cookie-jars/<uuid>/cookies.txt.
+the opened handle's regular-file type and size and copies the file into
+cookie-jars/<uuid>/cookies.txt in bounded, cancellable blocks. On Unix the
+source is opened with O_NONBLOCK before handle validation, so a FIFO without
+a writer is rejected instead of hanging during open.
 Only the internal copy is passed to local yt-dlp, which may update it.
 Normal completion removes the copy; startup removes stale copies left by a
 crash. Reset and Windows uninstall with data removal also remove internal jars

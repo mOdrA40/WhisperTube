@@ -76,6 +76,11 @@ The 2026-10-24 remediation raises the Tokio minimum and lockfile to 1.53.3 for
 RUSTSEC-2026-0386. No exception was added for this advisory. The stricter gate
 again reports only the five upstream residuals described below.
 
+The 2026-11-05 remediation updates the locked async-executor from the yanked
+1.14.0 release to 1.14.1, which fixes its upstream drop/wake use-after-free
+regression. No advisory-policy exception is added for that release. Runtime
+reproduction of that race within WhisperTube has not been established.
+
 Dependency status is a dated observation, not a permanent assurance. Run
 `npm audit --audit-level=moderate` and `cargo audit --file src-tauri/Cargo.lock`
 against the checked-in lockfiles and a current advisory database. Run both

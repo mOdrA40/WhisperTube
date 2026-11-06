@@ -26,6 +26,7 @@ impl From<String> for ErrorPayload {
             "media_source_runtime",
             "media_source_metadata",
             "operation_conflict",
+            "job_finalizing",
             "storage_quota_exceeded",
         ];
 
@@ -72,6 +73,13 @@ mod error_tests {
             assert_eq!(error.code, code);
             assert_eq!(error.detail.as_deref(), Some("safe detail"));
         }
+    }
+
+    #[test]
+    fn finalization_diagnostic_survives_the_ipc_boundary() {
+        let error = super::ErrorPayload::from("job_finalizing:Saving result");
+        assert_eq!(error.code, "job_finalizing");
+        assert_eq!(error.detail.as_deref(), Some("Saving result"));
     }
 }
 

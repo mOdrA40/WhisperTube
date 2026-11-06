@@ -64,7 +64,7 @@ fn intercept_close(
     background: impl FnOnce() -> Result<(), String>,
 ) -> Result<(), String> {
     match operation {
-        Ok(OperationState::Transcribing) => {
+        Ok(OperationState::Transcribing | OperationState::Finalizing) => {
             prevent_close();
             background()
         }
@@ -130,40 +130,45 @@ mod tests {
 
     #[test]
     fn active_job_close_hides_without_releasing_or_cancelling_the_worker() {
-        let state = AppState::default();
-        let guard = JobGuard::reserve(&state).unwrap();
-        let prevented = Cell::new(false);
-        let tray = Cell::new(false);
-        let visible = Cell::new(true);
-        intercept_close(
-            Ok(state.operation.lock().unwrap().clone()),
-            || prevented.set(true),
-            || {
-                enter_background(
-                    || {
-                        tray.set(true);
-                        Ok(())
-                    },
-                    || {
-                        assert!(tray.get());
-                        assert!(prevented.get());
-                        visible.set(false);
-                        Ok(())
-                    },
-                )
-            },
-        )
-        .unwrap();
-        assert!(!visible.get());
-        assert!(tray.get());
-        assert!(!state.cancelled.load(Ordering::SeqCst));
-        assert!(JobGuard::reserve(&state).is_err());
-        guard.mark_running().unwrap();
-        drop(guard);
-        // Finishing must not close/reopen the hidden window or lose the tray.
-        assert_eq!(*state.operation.lock().unwrap(), OperationState::Idle);
-        assert!(!visible.get());
-        assert!(tray.get());
+        for finalizing in [false, true] {
+            let state = AppState::default();
+            let mut guard = JobGuard::reserve(&state).unwrap();
+            if finalizing {
+                guard.begin_finalization().unwrap();
+            }
+            let prevented = Cell::new(false);
+            let tray = Cell::new(false);
+            let visible = Cell::new(true);
+            intercept_close(
+                Ok(state.operation.lock().unwrap().clone()),
+                || prevented.set(true),
+                || {
+                    enter_background(
+                        || {
+                            tray.set(true);
+                            Ok(())
+                        },
+                        || {
+                            assert!(tray.get());
+                            assert!(prevented.get());
+                            visible.set(false);
+                            Ok(())
+                        },
+                    )
+                },
+            )
+            .unwrap();
+            assert!(!visible.get());
+            assert!(tray.get());
+            assert!(!state.cancelled.load(Ordering::SeqCst));
+            assert!(JobGuard::reserve(&state).is_err());
+            guard.mark_running().unwrap();
+            drop(guard);
+            // Finishing must not close/reopen the hidden window or lose the tray.
+            assert_eq!(*state.operation.lock().unwrap(), OperationState::Idle);
+            assert!(!visible.get());
+            assert!(tray.get());
+        }
     }
 
     #[test]

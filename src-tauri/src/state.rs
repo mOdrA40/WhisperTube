@@ -11,6 +11,7 @@ pub enum OperationState {
     #[default]
     Idle,
     Transcribing,
+    Finalizing,
     ModelDownloading(String),
     RuntimeInstalling(String),
     ModelDeleting(String),
@@ -118,6 +119,11 @@ impl OperationGuard {
             .lock()
             .map_err(|_| "State operasi terkunci")?;
         let should_cancel = match &*active {
+            OperationState::Finalizing => {
+                return Err(
+                    "job_finalizing:Hasil sedang disimpan dan tidak dapat dibatalkan.".into(),
+                );
+            }
             OperationState::Transcribing => {
                 state.cancelled.store(true, Ordering::SeqCst);
                 true
@@ -186,6 +192,9 @@ fn operation_conflict_message(operation: &OperationState) -> String {
             "Transkripsi sedang berjalan. Tunggu sampai selesai atau batalkan terlebih dahulu."
                 .into()
         }
+        OperationState::Finalizing => {
+            "Hasil sedang disimpan. Tunggu sampai selesai terlebih dahulu.".into()
+        }
         OperationState::ModelDownloading(model_id) => {
             format!("Download model {model_id} sedang berjalan.")
         }
@@ -219,7 +228,7 @@ fn operation_conflict_message(operation: &OperationState) -> String {
 }
 
 pub struct JobGuard {
-    _operation: OperationGuard,
+    operation: OperationGuard,
     cancelled: Arc<AtomicBool>,
 }
 
@@ -231,7 +240,7 @@ impl JobGuard {
             Some(&app_state.cancelled),
         )?;
         Ok(Self {
-            _operation: operation,
+            operation,
             cancelled: app_state.cancelled.clone(),
         })
     }
@@ -242,6 +251,25 @@ impl JobGuard {
         } else {
             Ok(())
         }
+    }
+
+    /// Serialize the last cancellation check with request_cancel. Once this
+    /// boundary wins, persistence must finish without accepting a late cancel.
+    pub fn begin_finalization(&mut self) -> Result<(), String> {
+        let mut active = self
+            .operation
+            .state
+            .lock()
+            .map_err(|_| "State operasi terkunci")?;
+        if self.cancelled.load(Ordering::SeqCst) {
+            return Err("Job dibatalkan.".into());
+        }
+        if *active != OperationState::Transcribing {
+            return Err("Job tidak berada dalam tahap transkripsi.".into());
+        }
+        *active = OperationState::Finalizing;
+        self.operation.operation = OperationState::Finalizing;
+        Ok(())
     }
 }
 
@@ -282,6 +310,77 @@ mod tests {
         assert!(state.cancelled.load(std::sync::atomic::Ordering::SeqCst));
         drop(guard);
         assert_eq!(*state.operation.lock().unwrap(), OperationState::Idle);
+    }
+
+    #[test]
+    fn cancellation_before_finalization_prevents_persistence() {
+        let state = AppState::default();
+        let mut guard = JobGuard::reserve(&state).unwrap();
+        OperationGuard::request_cancel(&state).unwrap();
+        assert_eq!(guard.begin_finalization(), Err("Job dibatalkan.".into()));
+        assert_eq!(
+            *state.operation.lock().unwrap(),
+            OperationState::Transcribing
+        );
+        drop(guard);
+        assert_eq!(*state.operation.lock().unwrap(), OperationState::Idle);
+    }
+
+    #[test]
+    fn finalization_rejects_cancel_and_keeps_exclusive_reservation() {
+        let state = AppState::default();
+        let mut guard = JobGuard::reserve(&state).unwrap();
+        guard.begin_finalization().unwrap();
+        assert_eq!(*state.operation.lock().unwrap(), OperationState::Finalizing);
+        assert!(OperationGuard::request_cancel(&state)
+            .unwrap_err()
+            .starts_with("job_finalizing:"));
+        assert!(!state.cancelled.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(JobGuard::reserve(&state).is_err());
+        assert!(OperationGuard::reserve_model_download(&state, "base".into()).is_err());
+        assert!(OperationGuard::reserve_history_read(&state).is_err());
+        assert!(OperationGuard::reserve_data_reset(&state).is_err());
+        assert!(OperationGuard::reserve_app_update(&state).is_err());
+        drop(guard);
+        assert_eq!(*state.operation.lock().unwrap(), OperationState::Idle);
+        assert!(JobGuard::reserve(&state).is_ok());
+    }
+
+    #[test]
+    fn concurrent_cancel_and_finalization_have_exactly_one_winner() {
+        let state = Arc::new(AppState::default());
+        let barrier = Arc::new(Barrier::new(2));
+        let mut guard = JobGuard::reserve(&state).unwrap();
+        let worker_barrier = barrier.clone();
+        let worker = thread::spawn(move || {
+            worker_barrier.wait();
+            let result = guard.begin_finalization();
+            (guard, result)
+        });
+        barrier.wait();
+        let cancelled = OperationGuard::request_cancel(&state);
+        // Retain the guard until both results are observed so Idle cannot
+        // accept a no-op cancellation after the worker has finished.
+        let (guard, finalized) = worker.join().unwrap();
+        assert_ne!(cancelled.is_ok(), finalized.is_ok());
+        assert_eq!(
+            state.cancelled.load(std::sync::atomic::Ordering::SeqCst),
+            cancelled.is_ok()
+        );
+        drop(guard);
+        assert_eq!(*state.operation.lock().unwrap(), OperationState::Idle);
+    }
+
+    #[test]
+    fn panic_during_finalization_releases_reservation() {
+        let state = AppState::default();
+        let result = std::panic::catch_unwind(|| {
+            let mut guard = JobGuard::reserve(&state).unwrap();
+            guard.begin_finalization().unwrap();
+            panic!("simulated persistence panic");
+        });
+        assert!(result.is_err());
+        assert!(JobGuard::reserve(&state).is_ok());
     }
 
     #[test]

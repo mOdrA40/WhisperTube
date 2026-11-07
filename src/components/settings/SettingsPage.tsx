@@ -17,6 +17,7 @@ import { DesktopIcon } from "@phosphor-icons/react/dist/csr/Desktop";
 import { ArrowClockwiseIcon } from "@phosphor-icons/react/dist/csr/ArrowClockwise";
 import { TrashIcon } from "@phosphor-icons/react/dist/csr/Trash";
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useModalFocus } from "../../hooks/useModalFocus";
 import { formatBytes, formatMemory, friendlyError } from "../../lib/format";
 import { getAcceleratorCopy, getModelCopy, uiLanguageOptions, useI18n } from "../../i18n";
 import type { AcceleratorInfo, AppUpdateInfo, AppUpdateProgress, AppUpdateStatus, BackendChoice, ModelDownloadPayload, ModelInfo, SystemStatus } from "../../types";
@@ -139,6 +140,8 @@ export function SettingsPage({
   const modelDeleteTriggerRef = useRef<HTMLButtonElement | null>(null);
   const modelDeleteCancelRef = useRef<HTMLButtonElement>(null);
   const modelDeleteDialogWasOpen = useRef(false);
+  const activeDialogRef = cookiesDialogOpen ? cookiesDialogRef : resetDialogOpen ? resetDialogRef : modelDeleteDialogRef;
+  useModalFocus(activeDialogRef, cookiesDialogOpen || resetDialogOpen || pendingModelDelete !== null);
   const modelDownloadActive = Object.keys(downloadingModel).length > 0;
   const interfaceLanguageOptions: SelectOption[] = uiLanguageOptions.map((option) => ({
     value: option.value,
@@ -195,20 +198,6 @@ export function SettingsPage({
         setCookiesDialogOpen(false);
         return;
       }
-      if (event.key !== "Tab" || !cookiesDialogRef.current) return;
-      const focusable = [...cookiesDialogRef.current.querySelectorAll<HTMLElement>(
-        "button, a[href], input, select, textarea, [tabindex]:not([tabindex='-1'])",
-      )].filter((element) => !element.hasAttribute("disabled"));
-      if (focusable.length === 0) return;
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
     };
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
@@ -230,20 +219,6 @@ export function SettingsPage({
         setResetDialogOpen(false);
         return;
       }
-      if (event.key !== "Tab" || !resetDialogRef.current) return;
-      const focusable = [...resetDialogRef.current.querySelectorAll<HTMLElement>(
-        "button, a[href], input, select, textarea, [tabindex]:not([tabindex='-1'])",
-      )].filter((element) => !element.hasAttribute("disabled"));
-      if (focusable.length === 0) return;
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
     };
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
@@ -264,20 +239,6 @@ export function SettingsPage({
       if (event.key === "Escape" && !busy) {
         setPendingModelDelete(null);
         return;
-      }
-      if (event.key !== "Tab" || !modelDeleteDialogRef.current) return;
-      const focusable = [...modelDeleteDialogRef.current.querySelectorAll<HTMLElement>(
-        "button, a[href], input, select, textarea, [tabindex]:not([tabindex='-1'])",
-      )].filter((element) => !element.hasAttribute("disabled"));
-      if (focusable.length === 0) return;
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
       }
     };
     document.addEventListener("keydown", handleKeyDown);
@@ -376,6 +337,7 @@ export function SettingsPage({
           <div
             className="cookies-guide-modal"
             ref={cookiesDialogRef}
+            tabIndex={-1}
             role="dialog"
             aria-modal="true"
             aria-labelledby="cookies-guide-title"
@@ -457,6 +419,7 @@ export function SettingsPage({
           <div
             className="data-reset-modal"
             ref={resetDialogRef}
+            tabIndex={-1}
             role="dialog"
             aria-modal="true"
             aria-labelledby="data-reset-title"
@@ -571,6 +534,7 @@ export function SettingsPage({
           <div
             className="model-delete-modal"
             ref={modelDeleteDialogRef}
+            tabIndex={-1}
             role="dialog"
             aria-modal="true"
             aria-labelledby="model-delete-title"

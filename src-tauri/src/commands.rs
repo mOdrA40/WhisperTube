@@ -245,14 +245,39 @@ pub async fn inspect_media(
 #[tauri::command(rename_all = "camelCase")]
 pub async fn transcription_resume_stage(
     app: AppHandle,
+    state: State<'_, AppState>,
     url: String,
     duration: f64,
 ) -> CommandResult<Option<crate::types::TranscriptionResumeStage>> {
-    Ok(
-        tokio::task::spawn_blocking(move || transcription::resume_stage(&app, &url, duration))
-            .await
-            .map_err(|e| format!("Pemeriksaan progres tersimpan gagal: {e}"))??,
-    )
+    run_resume_lookup(&state, move || {
+        transcription::resume_stage(&app, &url, duration)
+    })
+    .await
+}
+
+async fn run_resume_lookup(
+    state: &AppState,
+    lookup: impl FnOnce() -> Result<Option<crate::types::TranscriptionResumeStage>, String>
+        + Send
+        + 'static,
+) -> CommandResult<Option<crate::types::TranscriptionResumeStage>> {
+    let operation = OperationGuard::reserve_history_read(state).map_err(|error| {
+        // A poisoned state is an internal failure, not a benign advisory
+        // conflict that the frontend may ignore.
+        if state.operation.is_poisoned() {
+            ErrorPayload::from(error)
+        } else {
+            ErrorPayload::from(format!("operation_conflict:{error}"))
+        }
+    })?;
+    Ok(tokio::task::spawn_blocking(move || {
+        // The reader must outlive its IPC future: Reset cannot delete storage
+        // while this worker still owns a SQLite connection or an audio handle.
+        let _operation = operation;
+        lookup()
+    })
+    .await
+    .map_err(|e| format!("Pemeriksaan progres tersimpan gagal: {e}"))??)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -372,6 +397,91 @@ pub fn reveal_audio(app: AppHandle, state: State<'_, AppState>, path: String) ->
 mod tests {
     use super::*;
     use std::sync::{atomic::Ordering, Arc};
+
+    #[tokio::test]
+    async fn resume_reader_blocks_reset_until_database_closes_even_if_ipc_is_dropped() {
+        for abort_ipc in [false, true] {
+            let state = Arc::new(AppState::default());
+            let database = std::env::temp_dir()
+                .join(format!("whispertube-resume-{}.db", uuid::Uuid::new_v4()));
+            let path = database.clone();
+            let reader_state = state.clone();
+            let (entered, waiting) = tokio::sync::oneshot::channel();
+            let (release, resume) = std::sync::mpsc::channel();
+            let reader = tokio::spawn(async move {
+                run_resume_lookup(&reader_state, move || {
+                    let _connection = rusqlite::Connection::open(path).unwrap();
+                    entered.send(()).unwrap();
+                    resume.recv().unwrap();
+                    Ok(None)
+                })
+                .await
+            });
+            waiting.await.unwrap();
+            assert!(OperationGuard::reserve_data_reset(&state).is_err());
+            assert!(OperationGuard::reserve_history_delete(&state).is_err());
+            if abort_ipc {
+                reader.abort();
+                assert!(reader.await.err().unwrap().is_cancelled());
+                assert!(OperationGuard::reserve_data_reset(&state).is_err());
+            } else {
+                release.send(()).unwrap();
+                assert!(reader.await.unwrap().is_ok());
+                assert!(OperationGuard::reserve_data_reset(&state).is_ok());
+                std::fs::remove_file(database).unwrap();
+                continue;
+            }
+            release.send(()).unwrap();
+            let operation = state.operation.clone();
+            tokio::task::spawn_blocking(move || {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while *operation.lock().unwrap() != crate::state::OperationState::Idle {
+                    assert!(std::time::Instant::now() < deadline);
+                    std::thread::yield_now();
+                }
+            })
+            .await
+            .unwrap();
+            assert!(OperationGuard::reserve_data_reset(&state).is_ok());
+            // On Windows this also proves that the blocking reader released
+            // its SQLite handle before reset became available again.
+            std::fs::remove_file(database).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn resume_lookup_rejects_competing_operations_and_releases_on_failure() {
+        let state = AppState::default();
+        let reset = OperationGuard::reserve_data_reset(&state).unwrap();
+        let error = run_resume_lookup(&state, || panic!("lookup must not run during reset"))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(error.code, "operation_conflict");
+        drop(reset);
+        let error = run_resume_lookup(&state, || Err("fixture read error".into()))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(error.detail.as_deref(), Some("fixture read error"));
+        assert!(OperationGuard::reserve_data_reset(&state).is_ok());
+    }
+
+    #[tokio::test]
+    async fn resume_lookup_preserves_internal_state_errors_instead_of_hiding_them_as_conflicts() {
+        let state = AppState::default();
+        assert!(std::panic::catch_unwind(|| {
+            let _operation = state.operation.lock().unwrap();
+            panic!("fixture poisoned operation state");
+        })
+        .is_err());
+        let error = run_resume_lookup(&state, || panic!("lookup must not run with poisoned state"))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(error.code, "backend_error");
+        assert_eq!(error.detail.as_deref(), Some("State operasi terkunci"));
+    }
 
     #[tokio::test]
     async fn cancellation_during_preflight_prevents_transfer_for_every_download_kind() {

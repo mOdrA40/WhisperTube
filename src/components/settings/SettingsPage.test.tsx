@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../../i18n";
 import type { SystemStatus } from "../../types";
@@ -54,14 +54,37 @@ function renderSettingsPage(overrides: Partial<SettingsPageProps> = {}) {
     ...overrides,
   };
 
-  return render(
+  const view = render(
     <I18nProvider>
       <SettingsPage {...props} />
     </I18nProvider>,
   );
+  return { ...view, props };
 }
 
 describe("SettingsPage local data reset", () => {
+  it.each(["reset", "model"] as const)("keeps keyboard focus inside the pending %s dialog", async (kind) => {
+    let finish!: () => void;
+    const pending = new Promise<void>((resolve) => { finish = resolve; });
+    const view = renderSettingsPage({ onResetUserData: vi.fn(() => pending), onRemoveModel: vi.fn(() => pending) });
+    const trigger = screen.getByRole("button", { name: kind === "reset" ? "Reset WhisperTube data" : "Delete model" });
+    trigger.focus();
+    fireEvent.click(trigger);
+    const dialog = screen.getByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: kind === "reset" ? "Delete permanently" : "Delete model" }));
+    view.rerender(<I18nProvider><SettingsPage {...view.props} busy resettingData={kind === "reset"} /></I18nProvider>);
+    await waitFor(() => expect(document.activeElement).toBe(dialog));
+    expect(trigger.closest("[inert]")).not.toBeNull();
+    for (const shiftKey of [true, false]) {
+      expect(fireEvent.keyDown(dialog, { key: "Tab", shiftKey })).toBe(false);
+      expect(document.activeElement).toBe(dialog);
+    }
+    await act(async () => finish());
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(trigger.closest("[inert]")).toBeNull();
+    // Parent operation state settles independently of the dialog promise.
+    view.rerender(<I18nProvider><SettingsPage {...view.props} /></I18nProvider>);
+  });
   it("lists a standalone Qwen runtime in reset confirmation without any model weights", () => {
     const system: SystemStatus = {
       qwenRuntime:true, qwenBackends:["auto","cpu"], ytDlp:false, ffmpeg:false,

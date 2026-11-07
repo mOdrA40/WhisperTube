@@ -462,20 +462,23 @@ export function useWhisperTube() {
 
   const modelDownloadActive = Object.keys(downloadingModel).length > 0;
   const appUpdateInstalling = appUpdateStatus === "installing";
-  const operationActive = Boolean(
+  const foregroundOperationActive = Boolean(
     busy || inspecting || resettingData || deletingModel || historyOperation || modelDownloadActive || installingCuda || installingAccelerator || appUpdateInstalling || refreshingSystem,
   );
   const resumeUrl = metadata?.webpageUrl;
   const resumeDuration = metadata?.duration;
   const resumeSource = JSON.stringify([resumeUrl, resumeDuration, resumeRevision]);
-  const checkingResume = Boolean(metadata && !operationActive &&
+  const checkingResume = Boolean(metadata && !foregroundOperationActive &&
     (resumeCheck?.source !== resumeSource || resumeCheck.pending));
+  const operationActive = foregroundOperationActive || checkingResume;
   const resumeStage = !operationActive && resumeCheck?.source === resumeSource
     ? resumeCheck.stage : null;
   const retryAvailable = !operationActive && metadata !== null &&
     retrySource === JSON.stringify([resumeUrl, resumeDuration]);
   useEffect(() => {
-    if (!resumeUrl || resumeDuration === undefined || operationActive) {
+    // The lookup itself blocks competing actions, but must not cancel its own
+    // effect when checkingResume becomes true.
+    if (!resumeUrl || resumeDuration === undefined || foregroundOperationActive) {
       setResumeCheck(null);
       return;
     }
@@ -487,10 +490,10 @@ export function useWhisperTube() {
     }).catch((cause) => {
       if (disposed) return;
       setResumeCheck({ source, pending: false, stage: null });
-      setError((previous) => previous ?? friendlyError(cause));
+      if (!isOperationConflict(cause)) setError((previous) => previous ?? friendlyError(cause));
     });
     return () => { disposed = true; };
-  }, [resumeUrl, resumeDuration, operationActive, resumeRevision]);
+  }, [resumeUrl, resumeDuration, foregroundOperationActive, resumeRevision]);
   const vramWarning = useMemo(() => {
     if (!selectedModel || backend !== "cuda" || !system) return null;
     if (backend === "cuda" && (!system.cudaSupported || !system.nvidia)) {

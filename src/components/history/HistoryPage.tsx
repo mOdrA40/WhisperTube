@@ -12,6 +12,7 @@ import { createPortal } from "react-dom";
 import { formatBytes, formatDuration, friendlyError } from "../../lib/format";
 import type { AppTab, HistoryFileInfo, HistoryFileKind, HistoryFileScope, HistoryItem } from "../../types";
 import { getModelLabel, useI18n } from "../../i18n";
+import { useModalFocus } from "../../hooks/useModalFocus";
 
 type HistoryPageProps = {
   history: HistoryItem[];
@@ -49,6 +50,7 @@ export function HistoryPage({ history, hasMore, loadingMore, operationActive, on
   const deleteDialogWasOpen = useRef(false);
   const selectableIds = history.slice(0, MAX_DELETE_SELECTION).map((item) => item.id);
   const allSelected = selectableIds.length > 0 && selectableIds.every((id) => selectedIds.has(id));
+  useModalFocus(deleteDialogRef, Boolean(pendingDeleteIds || filesTarget));
   useEffect(() => () => { filesRequest.current += 1; }, []);
 
   useEffect(() => {
@@ -136,21 +138,6 @@ export function HistoryPage({ history, hasMore, loadingMore, operationActive, on
         setPendingDeleteIds(null);
         closeFiles();
         return;
-      }
-      if (event.key !== "Tab" || !deleteDialogRef.current) return;
-      const focusable = [...deleteDialogRef.current.querySelectorAll<HTMLElement>(
-        "button, a[href], input, select, textarea, [tabindex]:not([tabindex='-1'])",
-      )].filter((element) => !element.matches(":disabled") &&
-        (!element.matches("input[type='radio']") || (element as HTMLInputElement).checked));
-      if (focusable.length === 0) return;
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
       }
     };
     document.addEventListener("keydown", handleKeyDown);
@@ -286,6 +273,7 @@ export function HistoryPage({ history, hasMore, loadingMore, operationActive, on
           <div
             className="history-delete-modal"
             ref={deleteDialogRef}
+            tabIndex={-1}
             role="dialog"
             aria-modal="true"
             aria-labelledby="history-delete-title"
@@ -296,7 +284,7 @@ export function HistoryPage({ history, hasMore, loadingMore, operationActive, on
             <div className="history-delete-content">
               <h3 id="history-delete-title">{t("history.confirmTitle")}</h3>
               <div className="dialog-scroll-body">
-              <fieldset className="history-delete-scope" disabled={operationActive}>
+              <fieldset className="history-delete-scope" disabled={operationActive || deleting}>
                 <legend>{t("history.deleteScope")}</legend>
                 {(["audio", "transcript", "all"] as const).map((scope) => <label key={scope}>
                   <input type="radio" name="history-delete-scope" checked={deleteScope === scope} onChange={() => setDeleteScope(scope)} />
@@ -331,7 +319,7 @@ export function HistoryPage({ history, hasMore, loadingMore, operationActive, on
         </div>, document.body
       )}
       {filesTarget && createPortal(<div className="modal-backdrop history-modal-backdrop" role="presentation">
-        <div className="history-delete-modal history-files-modal" ref={deleteDialogRef} role="dialog" aria-modal="true" aria-labelledby="history-files-title">
+        <div className="history-delete-modal history-files-modal" ref={deleteDialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="history-files-title">
           <div className="history-files-body">
           <header className="history-files-header">
             <h3 id="history-files-title">{t("history.filesFor", { title: filesTarget.title })}</h3>

@@ -142,6 +142,7 @@ operations. The guard covers:
 - model download and deletion;
 - runtime installation;
 - history reads, deletion, export, and audio reveal;
+- advisory resume lookup (including its SQLite and audio-cache reads);
 - application update;
 - application-data reset.
 
@@ -153,6 +154,17 @@ work, so cancelling during preflight prevents the subsequent transfer. The
 guard also remains held until that worker finishes if its IPC future is dropped.
 The guard releases its reservation on every return path, so an active child-process PID is used for
 termination, not as the sole concurrency lock.
+
+Resume lookup owns its history-read reservation inside the blocking worker,
+including after its awaiting IPC future is dropped. The UI holds competing
+actions while checking the current source; a rejected advisory conflict is
+benign, while actual read/state failures remain visible. Reset and deletion
+cannot begin while that reader still holds storage handles.
+
+History and Settings dialogs share focus containment. Their containers remain
+focusable when every action is disabled, and background siblings are inert
+until the dialog closes. Focus listeners and observers are removed on cleanup;
+existing inert state and the dialog's trigger-focus behavior are preserved.
 
 The cancellation path sets the relevant cancellation flag and terminates the
 active process tree where supported. Child processes are also cleaned up during

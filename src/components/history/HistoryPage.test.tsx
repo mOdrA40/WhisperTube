@@ -41,8 +41,16 @@ describe("HistoryPage", () => {
     fireEvent.keyDown(document, {key:"Escape"});
     expect(screen.getByRole("dialog")).toBeTruthy();
     expect(props.onDelete).toHaveBeenCalledTimes(1);
+    const dialog = screen.getByRole("dialog");
+    await waitFor(() => expect(document.activeElement).toBe(dialog));
+    expect(document.querySelector(".history-card")?.closest("[inert]")).not.toBeNull();
+    for (const shiftKey of [false, true]) {
+      expect(fireEvent.keyDown(dialog, { key: "Tab", shiftKey })).toBe(false);
+      expect(document.activeElement).toBe(dialog);
+    }
     finish();
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(document.querySelector(".history-card")?.closest("[inert]")).toBeNull();
   });
   it.each(["Saved files: Video 1", "Delete history: Video 1"])("opens %s outside the filtered card and restores focus and page scrolling", async (name) => {
     renderHistory();

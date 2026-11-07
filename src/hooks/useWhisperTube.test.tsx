@@ -500,6 +500,41 @@ describe("useWhisperTube", () => {
     expect(result.current.result).toEqual(transcript);
   });
 
+  it("blocks storage mutations while the resume reader is still pending", async () => {
+    let finish!: (stage: string | null) => void;
+    services.getTranscriptionResumeStage.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    const { result } = renderHook(() => useWhisperTube(), { wrapper });
+    await waitFor(() => expect(result.current.system).toEqual(system));
+    act(() => result.current.setUrl(metadata.webpageUrl));
+    await act(async () => result.current.inspectVideo());
+    expect(result.current.checkingResume).toBe(true);
+    expect(result.current.operationActive).toBe(true);
+    await act(async () => {
+      await result.current.resetUserData();
+      await result.current.deleteHistory([1]);
+    });
+    expect(services.resetUserData).not.toHaveBeenCalled();
+    expect(services.deleteHistory).not.toHaveBeenCalled();
+    await act(async () => finish(null));
+    expect(result.current.operationActive).toBe(false);
+    expect(result.current.checkingResume).toBe(false);
+    expect(services.getTranscriptionResumeStage).toHaveBeenCalledOnce();
+    await act(async () => result.current.resetUserData());
+    expect(services.resetUserData).toHaveBeenCalledOnce();
+  });
+
+  it.each(["operation_conflict", "backend_error"])("handles a resume lookup rejected with %s", async (code) => {
+    services.getTranscriptionResumeStage.mockRejectedValueOnce({ code, detail: "fixture lookup failure" });
+    const { result } = renderHook(() => useWhisperTube(), { wrapper });
+    await waitFor(() => expect(result.current.system).toEqual(system));
+    act(() => result.current.setUrl(metadata.webpageUrl));
+    await act(async () => result.current.inspectVideo());
+    await waitFor(() => expect(result.current.checkingResume).toBe(false));
+    expect(result.current.operationActive).toBe(false);
+    expect(result.current.error).toBe(code === "operation_conflict" ? null : "fixture lookup failure");
+    expect(result.current.canStart).toBe(true);
+  });
+
   it("ignores a late resume lookup for a different video", async () => {
     let finishOld!: (stage: string) => void;
     services.getTranscriptionResumeStage.mockReturnValueOnce(new Promise((resolve) => { finishOld = resolve; }));

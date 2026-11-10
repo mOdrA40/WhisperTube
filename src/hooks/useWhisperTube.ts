@@ -838,6 +838,8 @@ export function useWhisperTube() {
             ? t("error.sourceCookiesFile")
             : errorCode(cause) === "media_source_js_runtime"
               ? t("error.sourceJsRuntime")
+            : errorCode(cause) === "media_source_runtime"
+              ? t("error.runtimeIncomplete")
             : errorCode(cause) === "storage_quota_exceeded"
               ? t("error.storageQuotaExceeded")
               : message,

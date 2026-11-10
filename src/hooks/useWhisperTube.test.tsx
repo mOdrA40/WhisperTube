@@ -914,6 +914,24 @@ describe("useWhisperTube", () => {
     expect(result.current.error).not.toContain("native detail");
   });
 
+  it.each([
+    ["en", "Reinstall WhisperTube"], ["id", "Pasang ulang WhisperTube"], ["zh", "重新安装 WhisperTube"],
+  ])("localizes missing media tools after inspection without Windows-only advice in %s", async (language, repair) => {
+    window.localStorage.setItem("whispertube.ui-language", language);
+    const { result } = renderHook(() => useWhisperTube(), { wrapper });
+    await waitFor(() => expect(result.current.system).toEqual(system));
+    act(() => result.current.setUrl(metadata.webpageUrl));
+    await act(async () => result.current.inspectVideo());
+    await waitFor(() => expect(result.current.canStart).toBe(true));
+    services.startTranscription.mockRejectedValueOnce({
+      code: "media_source_runtime", detail: "Runtime belum lengkap. Jalankan scripts/setup-windows.ps1.",
+    });
+    await act(async () => result.current.startTranscription());
+    expect(result.current.error).toContain(repair);
+    expect(result.current.error).not.toContain("setup-windows.ps1");
+    expect(result.current.busy).toBe(false);
+  });
+
   it("accepts available replay audio and preserves its coverage note in the result", async () => {
     services.inspectMedia.mockResolvedValueOnce({ ...metadata, duration: 3788 });
     const availableReplay = { ...transcript, duration: 3780, sourceDuration: 3788 };

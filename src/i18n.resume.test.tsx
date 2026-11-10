@@ -4,6 +4,23 @@ import { I18nProvider, getProgressMessage, getRecommendation, useI18n } from "./
 import type { SystemStatus } from "./types";
 
 describe("resume progress copy", () => {
+  it.each(["en", "id", "zh"] as const)("distinguishes exhausted and unknown VRAM in recommendations in %s", (language) => {
+    const { result } = renderHook(useI18n, { wrapper: I18nProvider });
+    act(() => result.current.setLanguage(language));
+    const system = {
+      gpuName: "NVIDIA GPU", nvidia: true, cudaSupported: true, cudaInstallable: true,
+      cudaEngine: true, recommendedModelId: "base", gpuMemoryMb: null,
+      computeDevices: [{ backend: "cuda" }], accelerators: [], cpuThreads: 8,
+    } as unknown as SystemStatus;
+    for (const free of [0, null]) {
+      system.gpuFreeMemoryMb = free;
+      expect(getRecommendation(system, result.current.t)).toBe(result.current.t("hardware.recommendation.cudaReady", {
+        gpu: "NVIDIA GPU", vram: free === 0 ? "0.0 GB" : result.current.t("hardware.notDetected"),
+        model: result.current.t("model.fast.label"),
+      }));
+    }
+  });
+
   it.each(["en", "id", "zh"] as const)("requires a visible device before recommending CUDA in %s", (language) => {
     const { result } = renderHook(useI18n, { wrapper: I18nProvider });
     act(() => result.current.setLanguage(language));

@@ -63,6 +63,22 @@ function renderSettingsPage(overrides: Partial<SettingsPageProps> = {}) {
 }
 
 describe("SettingsPage local data reset", () => {
+  it.each([[0, "0.0 GB"], [null, "Not detected"], [1024, "1.0 GB"]] as const)(
+    "renders measured free VRAM %s separately from unavailable telemetry", (free, expected) => {
+      const system: SystemStatus = {
+        qwenBackends: ["auto", "cpu"], ytDlp: true, ffmpeg: true, cpuEngine: true,
+        cudaEngine: true, cudaSupported: true, nvidia: true, gpuName: "Fixture GPU",
+        gpuMemoryMb: 8192, gpuFreeMemoryMb: free, availableMemoryMb: 8192,
+        nvidiaDriverVersion: "fixture", cudaInstallable: true, cpuThreads: 4,
+        recommendation: "", recommendedModelId: "base", recommendedBackend: "auto",
+        accelerators: [], computeDevices: [], jobStorageBytes: 0, jobStorageLimitBytes: 21474836480,
+      };
+      renderSettingsPage({ system });
+      const row = screen.getByText("Free VRAM").parentElement!;
+      expect(row.querySelector("strong")?.textContent).toBe(expected);
+    },
+  );
+
   it.each(["reset", "model"] as const)("keeps keyboard focus inside the pending %s dialog", async (kind) => {
     let finish!: () => void;
     const pending = new Promise<void>((resolve) => { finish = resolve; });

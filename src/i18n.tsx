@@ -8,6 +8,7 @@ import {
   type ReactNode,
 } from "react";
 import type { AcceleratorInfo, ModelInfo, ProgressPayload, ProgressStage, SystemStatus } from "./types";
+import { formatMemory } from "./lib/format";
 
 export type UiLanguage = "en" | "id" | "zh";
 
@@ -347,7 +348,7 @@ const english = {
   "error.installerBusy": "Another runtime installer is running. Wait for it to finish or cancel it first.",
   "error.videoCheckFirst": "Check the video first.",
   "error.modelNotDownloaded": "The selected model has not been downloaded.",
-  "error.runtimeIncomplete": "The runtime is incomplete. Run the setup script first.",
+  "error.runtimeIncomplete": "The transcription runtime is incomplete. Reinstall WhisperTube, or use the setup script for your platform if running from source.",
   "error.cudaRequired": "CUDA acceleration is not installed. Install CUDA first so the job does not fall back to CPU.",
   "error.cudaUnavailable": "CUDA requires a detected NVIDIA GPU and is only available on supported Windows builds.",
   "error.cudaDeviceUnavailable": "The selected CUDA device is unavailable. Select an available device, Auto, or CPU.",
@@ -710,7 +711,7 @@ const messages: Record<UiLanguage, Record<TranslationKey, string>> = {
     "error.installerBusy": "Installer runtime lain sedang berjalan. Tunggu sampai selesai atau batalkan terlebih dahulu.",
     "error.videoCheckFirst": "Periksa video terlebih dahulu.",
     "error.modelNotDownloaded": "Model yang dipilih belum diunduh.",
-    "error.runtimeIncomplete": "Runtime belum lengkap. Jalankan script setup terlebih dahulu.",
+    "error.runtimeIncomplete": "Runtime transkripsi belum lengkap. Pasang ulang WhisperTube, atau gunakan script setup sesuai platform jika menjalankan dari source.",
     "error.cudaRequired": "Akselerasi CUDA belum terpasang. Pasang CUDA terlebih dahulu agar job tidak kembali ke CPU.",
     "error.cudaUnavailable": "CUDA membutuhkan GPU NVIDIA yang terdeteksi dan hanya tersedia pada build Windows yang didukung.",
     "error.cudaDeviceUnavailable": "Perangkat CUDA yang dipilih tidak tersedia. Pilih perangkat yang tersedia, Auto, atau CPU.",
@@ -1064,7 +1065,7 @@ const messages: Record<UiLanguage, Record<TranslationKey, string>> = {
     "error.installerBusy": "另一个运行环境安装程序正在运行。请等待完成或先取消。",
     "error.videoCheckFirst": "请先检查视频。",
     "error.modelNotDownloaded": "所选模型尚未下载。",
-    "error.runtimeIncomplete": "运行环境不完整。请先运行设置脚本。",
+    "error.runtimeIncomplete": "转录运行环境不完整。请重新安装 WhisperTube；如果从源代码运行，请使用适合当前平台的设置脚本。",
     "error.cudaRequired": "尚未安装 CUDA 加速。请先安装 CUDA，以免任务退回 CPU。",
     "error.cudaUnavailable": "CUDA 需要检测到 NVIDIA GPU，并且仅适用于受支持的 Windows 构建版本。",
     "error.cudaDeviceUnavailable": "所选 CUDA 设备不可用。请选择可用的设备、自动或 CPU。",
@@ -1180,7 +1181,7 @@ export function getAcceleratorCopy(accelerator: Pick<AcceleratorInfo, "backend" 
 export function getRecommendation(system: SystemStatus | null, t: Translate) {
   if (!system) return t("hardware.detecting");
   const model = getModelLabel(system.recommendedModelId, t);
-  const vram = formatMemoryText(system.gpuFreeMemoryMb ?? system.gpuMemoryMb, t("hardware.notDetected"));
+  const vram = formatMemory(system.gpuFreeMemoryMb ?? system.gpuMemoryMb, t("hardware.notDetected"));
   if (system.nvidia && system.cudaSupported && system.cudaInstallable && system.cudaEngine &&
     system.computeDevices.some((device) => device.backend === "cuda")) {
     return t("hardware.recommendation.cudaReady", {
@@ -1210,11 +1211,6 @@ export function getRecommendation(system: SystemStatus | null, t: Translate) {
   return system.cpuThreads >= 12
     ? t("hardware.recommendation.cpuStrong")
     : t("hardware.recommendation.cpuFast");
-}
-
-function formatMemoryText(megabytes: number | null | undefined, fallback: string) {
-  if (megabytes === null || megabytes === undefined || megabytes <= 0) return fallback;
-  return `${(megabytes / 1024).toFixed(1)} GB`;
 }
 
 const stageKeys: Record<ProgressStage, TranslationKey> = {

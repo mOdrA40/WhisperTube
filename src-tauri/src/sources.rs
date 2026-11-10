@@ -151,7 +151,7 @@ const SOURCE_DURATION_ERROR_PREFIX: &str = "media_source_duration:";
 const SOURCE_UNKNOWN_DURATION_ERROR_PREFIX: &str = "media_source_duration_unknown:";
 const SOURCE_COOKIE_FILE_ERROR_PREFIX: &str = "media_source_cookie_file:";
 const SOURCE_JS_RUNTIME_ERROR_PREFIX: &str = "media_source_js_runtime:";
-const SOURCE_RUNTIME_ERROR_PREFIX: &str = "media_source_runtime:";
+pub(crate) const SOURCE_RUNTIME_ERROR_PREFIX: &str = "media_source_runtime:";
 const SOURCE_METADATA_ERROR_PREFIX: &str = "media_source_metadata:";
 const SOURCE_BLOCKED_ERROR_PREFIX: &str = "media_source_blocked:";
 const SOURCE_EXTRACTOR_ERROR_PREFIX: &str = "media_source_extractor:";
@@ -839,7 +839,7 @@ pub async fn inspect_media(
     let yt_dlp = tool_path(&app, "yt-dlp")?;
     if !is_regular_file(&yt_dlp) {
         return Err(format!(
-            "{SOURCE_RUNTIME_ERROR_PREFIX}yt-dlp belum terpasang. Jalankan scripts/setup-windows.ps1."
+            "{SOURCE_RUNTIME_ERROR_PREFIX}yt-dlp belum terpasang. Pasang ulang WhisperTube atau gunakan script setup sesuai platform jika menjalankan dari source."
         ));
     }
     tokio::task::spawn_blocking(move || {

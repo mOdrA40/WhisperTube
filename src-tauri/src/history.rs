@@ -106,8 +106,12 @@ pub fn init_db(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 pub(crate) fn initialize_schema(conn: &Connection) -> Result<(), String> {
-    conn.execute_batch(
-        "
+    let transaction = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("Gagal memulai migrasi database: {e}"))?;
+    transaction
+        .execute_batch(
+            "
         CREATE TABLE IF NOT EXISTS pending_job_deletions (job_name TEXT PRIMARY KEY NOT NULL);
         CREATE TABLE IF NOT EXISTS history_file_deletions (
             history_id INTEGER NOT NULL,
@@ -127,10 +131,30 @@ pub(crate) fn initialize_schema(conn: &Connection) -> Result<(), String> {
             backend TEXT NOT NULL,
             result_path TEXT NOT NULL
         );
+        CREATE INDEX IF NOT EXISTS history_file_deletions_pending
+            ON history_file_deletions(history_id, kind) WHERE pending=1;
         ",
-    )
-    .map_err(|e| format!("Gagal inisialisasi database: {e}"))?;
-    Ok(())
+        )
+        .map_err(|e| format!("Gagal inisialisasi database: {e}"))?;
+    let version: i64 = transaction
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(|e| format!("Gagal membaca versi database: {e}"))?;
+    if version < 1 {
+        // Older cleanup omitted transcript.json. Queue completed legacy intents
+        // once; pending work survives a crash before filesystem cleanup runs.
+        transaction
+            .execute(
+                "UPDATE history_file_deletions SET pending=1 WHERE kind='transcript' AND pending=0",
+                [],
+            )
+            .map_err(|e| format!("Gagal menjadwalkan cleanup transkrip legacy: {e}"))?;
+        transaction
+            .pragma_update(None, "user_version", 1)
+            .map_err(|e| format!("Gagal menyimpan versi database: {e}"))?;
+    }
+    transaction
+        .commit()
+        .map_err(|e| format!("Gagal menyelesaikan migrasi database: {e}"))
 }
 
 pub(crate) fn open_connection(app: &AppHandle) -> Result<Connection, String> {

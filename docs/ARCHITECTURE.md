@@ -283,8 +283,12 @@ only when Keep audio after completion is enabled.
 
 History offers audio-only deletion, transcript-only deletion, and deletion of
 the complete history item. Partial deletion records a tombstone and pending
-cleanup in `history_file_deletions` before unlinking files. Cleanup retries on
-startup and reports locked files as pending. Audio-only deletion preserves
+cleanup in `history_file_deletions` before unlinking files. Only pending cleanup
+retries on startup and reports locked files as pending. Schema version 1 queues
+legacy completed transcript intents once to remove previously omitted JSON;
+the migration and version update commit together. Completed tombstones remain
+for logical deletion, while a partial index keeps pending lookup independent
+of completed intents. Audio-only deletion preserves
 JSON/TXT/SRT/VTT; transcript-only deletion removes those plus recognized result/
 export staging files and residual checkpoint text, while retaining WAV and the
 SQLite metadata row. Loading a transcript-only

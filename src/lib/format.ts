@@ -44,7 +44,7 @@ export function isOperationConflict(error: unknown) {
 }
 
 export function formatMemory(megabytes: number | null | undefined, notDetected = "Not detected") {
-  if (megabytes === null || megabytes === undefined || megabytes <= 0) return notDetected;
+  if (megabytes === null || megabytes === undefined || !Number.isFinite(megabytes) || megabytes < 0) return notDetected;
   return `${(megabytes / 1024).toFixed(1)} GB`;
 }
 

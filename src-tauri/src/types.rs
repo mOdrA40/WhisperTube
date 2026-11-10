@@ -68,6 +68,7 @@ mod error_tests {
             "media_source_duration_unknown",
             "media_source_blocked",
             "media_source_extractor",
+            "media_source_runtime",
         ] {
             let error = super::ErrorPayload::from(format!("{code}:safe detail"));
             assert_eq!(error.code, code);

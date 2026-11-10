@@ -129,9 +129,10 @@ fn queue_deletion(
     Ok(ids.into_iter().collect())
 }
 pub(crate) fn cleanup_pending(conn: &Connection, root: &Path) -> Result<Vec<String>, String> {
-    // Replay completed transcript intents too: older versions omitted transcript.json.
+    // Schema migration queues legacy completed intents once. Retain completed
+    // tombstones for logical deletion without revisiting their payload files.
     let rows = conn
-        .prepare("SELECT history_id,kind FROM history_file_deletions WHERE pending=1 OR kind='transcript'")
+        .prepare("SELECT history_id,kind FROM history_file_deletions WHERE pending=1")
         .and_then(|mut q| {
             q.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
                 .collect::<Result<Vec<_>, _>>()
@@ -330,14 +331,126 @@ mod tests {
     }
 
     #[test]
+    fn legacy_cleanup_migration_is_durable_and_does_not_requeue_audio() {
+        let fixture = Fixture::new();
+        let mut conn = fixture.open();
+        for scope in [HistoryFileScope::Audio, HistoryFileScope::Transcript] {
+            queue_deletion(&mut conn, &fixture.root, &[1], scope).unwrap();
+        }
+        conn.execute("UPDATE history_file_deletions SET pending=0", [])
+            .unwrap();
+        conn.pragma_update(None, "user_version", 0).unwrap();
+        history::initialize_schema(&conn).unwrap();
+        assert_eq!(
+            conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        // Simulate a restart after migration commits but before cleanup runs.
+        drop(conn);
+        let conn = fixture.open();
+        history::initialize_schema(&conn).unwrap();
+        for (kind, expected) in [("audio", 0), ("transcript", 1)] {
+            assert_eq!(
+                conn.query_row(
+                    "SELECT pending FROM history_file_deletions WHERE kind=?1",
+                    [kind],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+                expected
+            );
+            assert!(is_deleted(&conn, 1, kind).unwrap());
+        }
+        assert!(cleanup_pending(&conn, &fixture.root).unwrap().is_empty());
+        assert!(!fixture.job.join("transcript.json").exists());
+        assert!(fixture.job.join("audio.wav").exists());
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM history_file_deletions WHERE pending=1",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn failed_legacy_cleanup_migration_rolls_back_and_can_be_retried() {
+        let fixture = Fixture::new();
+        let mut conn = fixture.open();
+        queue_deletion(&mut conn, &fixture.root, &[1], HistoryFileScope::Transcript).unwrap();
+        conn.execute("UPDATE history_file_deletions SET pending=0", [])
+            .unwrap();
+        conn.pragma_update(None, "user_version", 0).unwrap();
+        conn.execute_batch(
+            "DROP INDEX history_file_deletions_pending;
+             CREATE TRIGGER reject_legacy_cleanup BEFORE UPDATE ON history_file_deletions
+             BEGIN SELECT RAISE(ABORT, 'injected migration failure'); END;",
+        )
+        .unwrap();
+        let error = history::initialize_schema(&conn).unwrap_err();
+        assert!(error.contains("Gagal menjadwalkan cleanup transkrip legacy"));
+        assert_eq!(
+            conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row("SELECT pending FROM history_file_deletions", [], |row| row
+                .get::<_, i64>(
+                0
+            ))
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='history_file_deletions_pending'", [], |row| row.get::<_, i64>(0)).unwrap(),
+            0
+        );
+        assert!(is_deleted(&conn, 1, "transcript").unwrap());
+        conn.execute_batch("DROP TRIGGER reject_legacy_cleanup")
+            .unwrap();
+        history::initialize_schema(&conn).unwrap();
+        assert!(cleanup_pending(&conn, &fixture.root).unwrap().is_empty());
+        assert!(!fixture.job.join("transcript.json").exists());
+    }
+
+    #[test]
+    fn completed_transcript_cleanup_is_not_replayed_after_schema_reopen() {
+        let fixture = Fixture::new();
+        let mut conn = fixture.open();
+        queue_deletion(&mut conn, &fixture.root, &[1], HistoryFileScope::Transcript).unwrap();
+        assert!(cleanup_pending(&conn, &fixture.root).unwrap().is_empty());
+        // A completed intent must not revisit the payload. A directory here
+        // would make another unlink fail and incorrectly reopen the intent.
+        fs::create_dir(fixture.job.join("transcript.json")).unwrap();
+        drop(conn);
+        let conn = fixture.open();
+        history::initialize_schema(&conn).unwrap();
+        assert!(cleanup_pending(&conn, &fixture.root).unwrap().is_empty());
+        assert!(is_deleted(&conn, 1, "transcript").unwrap());
+        assert_eq!(
+            conn.query_row("SELECT pending FROM history_file_deletions", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert!(fixture.job.join("audio.wav").exists());
+    }
+
+    #[test]
     fn completed_legacy_tombstone_is_reconciled_after_reopen() {
         let fixture = Fixture::new();
         let mut conn = fixture.open();
         queue_deletion(&mut conn, &fixture.root, &[1], HistoryFileScope::Transcript).unwrap();
         conn.execute("UPDATE history_file_deletions SET pending=0", [])
             .unwrap();
+        conn.pragma_update(None, "user_version", 0).unwrap(); // Pre-migration database.
         drop(conn);
         let conn = fixture.open();
+        history::initialize_schema(&conn).unwrap();
         assert!(cleanup_pending(&conn, &fixture.root).unwrap().is_empty());
         assert!(!fixture.job.join("transcript.json").exists());
         assert!(fixture.job.join("audio.wav").exists());
@@ -354,6 +467,8 @@ mod tests {
         queue_deletion(&mut conn, &fixture.root, &[1], HistoryFileScope::Transcript).unwrap();
         conn.execute("UPDATE history_file_deletions SET pending=0", [])
             .unwrap();
+        conn.pragma_update(None, "user_version", 0).unwrap();
+        history::initialize_schema(&conn).unwrap();
         let lock = fs::OpenOptions::new()
             .read(true)
             .share_mode(0)

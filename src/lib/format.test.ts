@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { errorCode, formatElapsedDuration, friendlyError } from "./format";
+import { errorCode, formatElapsedDuration, formatMemory, friendlyError } from "./format";
 
 describe("structured backend errors", () => {
   it("reads a Tauri error payload without exposing its protocol shape", () => {
@@ -20,5 +20,17 @@ describe("formatElapsedDuration", () => {
     expect(formatElapsedDuration(0)).toBe("00:00");
     expect(formatElapsedDuration(65_000)).toBe("01:05");
     expect(formatElapsedDuration(3_661_000)).toBe("1:01:01");
+  });
+});
+
+describe("formatMemory", () => {
+  it.each([[0, "0.0 GB"], [1024, "1.0 GB"], [5632, "5.5 GB"]] as const)(
+    "preserves measured memory %s as %s", (value, expected) => {
+      expect(formatMemory(value, "unknown")).toBe(expected);
+    },
+  );
+
+  it.each([null, undefined, -1, NaN, Infinity, -Infinity])("keeps invalid or absent memory %s unknown", (value) => {
+    expect(formatMemory(value, "unknown")).toBe("unknown");
   });
 });

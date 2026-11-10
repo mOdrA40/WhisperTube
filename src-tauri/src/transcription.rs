@@ -23,7 +23,7 @@ use crate::{
     process, resources,
     sources::{
         local::{local_path_cancelable, validate_source, validate_source_cancelable},
-        source_js_runtime_args, validate_media_duration,
+        source_js_runtime_args, validate_media_duration, SOURCE_RUNTIME_ERROR_PREFIX,
     },
     system::{
         configure_cuda_command, cuda_driver_is_compatible, detect_gpu, detect_nvidia,
@@ -2004,6 +2004,13 @@ fn inference_error(error: String) -> String {
     }
 }
 
+fn validate_media_runtime(yt_dlp: &Path, ffmpeg: &Path, local_audio: bool) -> Result<(), String> {
+    if (!local_audio && !is_regular_file(yt_dlp)) || !is_regular_file(ffmpeg) {
+        return Err(format!("{SOURCE_RUNTIME_ERROR_PREFIX}Runtime transkripsi belum lengkap. Pasang ulang WhisperTube atau gunakan script setup sesuai platform jika menjalankan dari source."));
+    }
+    Ok(())
+}
+
 pub fn pipeline(
     app: AppHandle,
     active_pid: Arc<Mutex<Option<u32>>>,
@@ -2021,9 +2028,7 @@ pub fn pipeline(
     validate_media_duration(request.duration, false)?;
     let yt_dlp = tool_path(&app, "yt-dlp")?;
     let ffmpeg = tool_path(&app, "ffmpeg")?;
-    if (local_audio.is_none() && !is_regular_file(&yt_dlp)) || !is_regular_file(&ffmpeg) {
-        return Err("Runtime belum lengkap. Jalankan scripts/setup-windows.ps1.".into());
-    }
+    validate_media_runtime(&yt_dlp, &ffmpeg, local_audio.is_some())?;
     let model = model_path(&app, &request.model_id)?;
     if !is_regular_file(&model) {
         return Err("Model belum diunduh. Unduh model dari UI terlebih dahulu.".into());
@@ -2366,6 +2371,36 @@ pub fn pipeline(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn missing_media_runtime_has_platform_neutral_structured_error() {
+        let root = std::env::temp_dir().join(format!("media-runtime-{}", Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let yt_dlp = root.join("yt-dlp");
+        let ffmpeg = root.join("ffmpeg");
+        fs::write(&yt_dlp, b"fixture; never execute").unwrap();
+        fs::write(&ffmpeg, b"fixture; never execute").unwrap();
+        for local_audio in [false, true] {
+            assert!(super::validate_media_runtime(&yt_dlp, &ffmpeg, local_audio).is_ok());
+        }
+        fs::remove_file(&yt_dlp).unwrap();
+        assert!(super::validate_media_runtime(&yt_dlp, &ffmpeg, true).is_ok());
+        let error = super::validate_media_runtime(&yt_dlp, &ffmpeg, false).unwrap_err();
+        let error = crate::types::ErrorPayload::from(error);
+        assert_eq!(error.code, "media_source_runtime");
+        let detail = error.detail.unwrap();
+        assert!(detail.contains("Pasang ulang WhisperTube"));
+        assert!(detail.contains("setup sesuai platform"));
+        assert!(!detail.contains("setup-windows.ps1"));
+        fs::remove_file(&ffmpeg).unwrap();
+        for local_audio in [false, true] {
+            assert!(super::validate_media_runtime(&yt_dlp, &ffmpeg, local_audio).is_err());
+        }
+        fs::create_dir(&ffmpeg).unwrap();
+        assert!(super::validate_media_runtime(&yt_dlp, &ffmpeg, true).is_err());
+        assert_eq!(root.parent(), Some(std::env::temp_dir().as_path()));
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn whisper_engine_rejects_runtime_changes_during_probe_before_first_inference() {
         let root = std::env::temp_dir().join(format!("whisper-probe-change-{}", Uuid::new_v4()));

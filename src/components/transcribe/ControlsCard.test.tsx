@@ -38,6 +38,28 @@ function Fixture({ disabled = false, downloading = false, resumeStage = null, ch
 }
 
 describe("model radio keyboard interaction", () => {
+  it.each([
+    ["en", "Not detected"],
+    ["id", "Tidak terdeteksi"],
+    ["zh", "未检测到"],
+  ] as const)("keeps unknown free VRAM out of the total capacity in %s", (language, unknown) => {
+    window.localStorage.setItem("whispertube.ui-language", language);
+    try {
+      const system: SystemStatus = { ...macSystem, nvidia: true, cudaSupported: true,
+        cudaInstallable: true, cudaEngine: true, gpuName: "NVIDIA GPU",
+        gpuMemoryMb: 8192, gpuFreeMemoryMb: null, accelerators: [],
+        computeDevices: [{ id: "cuda:0", backend: "cuda", name: "NVIDIA GPU", vendor: "nvidia",
+          deviceIndex: 0, integrated: false, totalMemoryMb: 8192, freeMemoryMb: null }],
+      };
+      const { container } = render(<Fixture system={system} />);
+      const recommendation = container.querySelector(".recommendation")!;
+      expect(recommendation.textContent).toContain(unknown);
+      expect(recommendation.textContent).not.toContain("8.0 GB");
+    } finally {
+      window.localStorage.removeItem("whispertube.ui-language");
+    }
+  });
+
   it.each([false, true])("offers Qwen Metal only when its native runtime supports it (Apple Silicon: %s)", (appleSilicon) => {
     const status: SystemStatus = { ...macSystem,
       qwenBackends: appleSilicon ? ["auto", "cpu", "metal"] : ["auto", "cpu"],

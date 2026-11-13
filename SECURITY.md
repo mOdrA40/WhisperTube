@@ -81,6 +81,20 @@ The 2026-11-05 remediation updates the locked async-executor from the yanked
 regression. No advisory-policy exception is added for that release. Runtime
 reproduction of that race within WhisperTube has not been established.
 
+The 2026-11-13 remediation upgrades rusqlite to 0.41.1 with bundled
+libsqlite3-sys 0.39.1 (SQLite 3.54.1) for RUSTSEC-2026-0459. Building this
+dependency requires Rust 1.89 or newer. Native SQLite and statement caching
+remain enabled; the optional Wasm backend is not enabled. The history schema
+is unchanged, and a fixture created with the previous bundled SQLite tests
+migration, metadata, rollback, autoincrement and reopening.
+
+The same remediation updates locked quinn-udp to 0.5.16 for
+RUSTSEC-2026-0538, without enabling reqwest HTTP/3, and updates rustix to
+1.1.6 together with xattr 1.7.0 for RUSTSEC-2026-0486. Updating xattr keeps
+its size-query/retry path compatible with Rustix's explicit query APIs.
+No advisory exception is added. These dependency matches did not establish
+an exploitable Quinn receiver or Rustix xattr call path in WhisperTube.
+
 Dependency status is a dated observation, not a permanent assurance. Run
 `npm audit --audit-level=moderate` and `cargo audit --file src-tauri/Cargo.lock`
 against the checked-in lockfiles and a current advisory database. Run both

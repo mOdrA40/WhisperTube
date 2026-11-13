@@ -1181,7 +1181,7 @@ export function getAcceleratorCopy(accelerator: Pick<AcceleratorInfo, "backend" 
 export function getRecommendation(system: SystemStatus | null, t: Translate) {
   if (!system) return t("hardware.detecting");
   const model = getModelLabel(system.recommendedModelId, t);
-  const vram = formatMemory(system.gpuFreeMemoryMb ?? system.gpuMemoryMb, t("hardware.notDetected"));
+  const vram = formatMemory(system.gpuFreeMemoryMb, t("hardware.notDetected"));
   if (system.nvidia && system.cudaSupported && system.cudaInstallable && system.cudaEngine &&
     system.computeDevices.some((device) => device.backend === "cuda")) {
     return t("hardware.recommendation.cudaReady", {

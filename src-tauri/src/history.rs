@@ -988,6 +988,78 @@ mod tests {
     }
 
     #[test]
+    fn bundled_sqlite_meets_the_wal_security_floor() {
+        assert!(rusqlite::version_number() >= 3_054_000);
+    }
+
+    #[test]
+    fn legacy_sqlite_database_preserves_history_and_transactions_after_upgrade() {
+        let fixture = Fixture::new();
+        // Created by rusqlite 0.32.1, before the bundled SQLite upgrade.
+        fs::write(
+            &fixture.database,
+            include_bytes!("../tests/fixtures/history-rusqlite-0.32.db"),
+        )
+        .unwrap();
+        let mut conn = Connection::open(&fixture.database).unwrap();
+        super::configure_connection(&conn).unwrap();
+        initialize_schema(&conn).unwrap();
+        let row: (i64, String, f64, String) = conn
+            .query_row(
+                "SELECT id,title,duration,result_path FROM history",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            row,
+            (
+                41,
+                "Riwayat lama — 中文".into(),
+                12.5,
+                "fixture-job/result.json".into()
+            )
+        );
+        let transaction = conn.transaction().unwrap();
+        transaction
+            .execute("UPDATE history SET title='uncommitted' WHERE id=41", [])
+            .unwrap();
+        drop(transaction);
+        assert_eq!(fixture.insert(&conn, "next"), 42);
+        drop(conn);
+
+        let conn = fixture.open();
+        assert_eq!(
+            conn.query_row("SELECT title FROM history WHERE id=41", [], |row| row
+                .get::<_, String>(0))
+                .unwrap(),
+            "Riwayat lama — 中文"
+        );
+        assert_eq!(
+            conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        let intents = conn
+            .prepare("SELECT kind,pending FROM history_file_deletions ORDER BY kind")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(intents, [("audio".into(), 0), ("transcript".into(), 1)]);
+        assert_eq!(
+            conn.query_row("SELECT job_name FROM pending_job_deletions", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap(),
+            "fixture-orphan"
+        );
+    }
+
+    #[test]
     fn reference_lookup_retains_containment_and_missing_job_behavior() {
         let fixture = Fixture::new();
         let conn = fixture.open();

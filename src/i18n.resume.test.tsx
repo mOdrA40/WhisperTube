@@ -4,7 +4,7 @@ import { I18nProvider, getProgressMessage, getRecommendation, useI18n } from "./
 import type { SystemStatus } from "./types";
 
 describe("resume progress copy", () => {
-  it.each(["en", "id", "zh"] as const)("distinguishes exhausted and unknown VRAM in recommendations in %s", (language) => {
+  it.each(["en", "id", "zh"] as const)("keeps free VRAM distinct from total capacity in recommendations in %s", (language) => {
     const { result } = renderHook(useI18n, { wrapper: I18nProvider });
     act(() => result.current.setLanguage(language));
     const system = {
@@ -12,10 +12,16 @@ describe("resume progress copy", () => {
       cudaEngine: true, recommendedModelId: "base", gpuMemoryMb: null,
       computeDevices: [{ backend: "cuda" }], accelerators: [], cpuThreads: 8,
     } as unknown as SystemStatus;
-    for (const free of [0, null]) {
+    for (const [total, free, expected] of [
+      [8192, null, null],
+      [8192, 0, "0.0 GB"],
+      [8192, 4096, "4.0 GB"],
+      [null, null, null],
+    ] as const) {
+      system.gpuMemoryMb = total;
       system.gpuFreeMemoryMb = free;
       expect(getRecommendation(system, result.current.t)).toBe(result.current.t("hardware.recommendation.cudaReady", {
-        gpu: "NVIDIA GPU", vram: free === 0 ? "0.0 GB" : result.current.t("hardware.notDetected"),
+        gpu: "NVIDIA GPU", vram: expected ?? result.current.t("hardware.notDetected"),
         model: result.current.t("model.fast.label"),
       }));
     }

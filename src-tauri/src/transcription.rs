@@ -22,8 +22,8 @@ use crate::{
     paths::{is_regular_file, jobs_dir, model_path, tool_path},
     process, resources,
     sources::{
-        local::{local_path_cancelable, validate_source, validate_source_cancelable},
-        source_js_runtime_args, validate_media_duration, SOURCE_RUNTIME_ERROR_PREFIX,
+        local::local_path_cancelable, source_js_runtime_args, validate_media_duration,
+        validate_media_url, SOURCE_RUNTIME_ERROR_PREFIX,
     },
     system::{
         configure_cuda_command, cuda_driver_is_compatible, detect_gpu, detect_nvidia,
@@ -43,6 +43,7 @@ struct JobContext<'a> {
     active_pid: &'a Arc<Mutex<Option<u32>>>,
     cancelled: &'a Arc<AtomicBool>,
     capability_probe: &'a Arc<Mutex<HashSet<String>>>,
+    storage: &'a history::JobStorageBudget<'a>,
     progress_start: f64,
     progress_end: f64,
 }
@@ -74,10 +75,11 @@ impl JobContext<'_> {
                 stage: update.stage.to_string(),
                 message_code: update.message_code.into(),
                 percent: if update.stage == "transcribing" {
-                    self.progress_start
+                    (self.progress_start
                         + (self.progress_end - self.progress_start)
                             * update.percent.clamp(0.0, 100.0)
-                            / 100.0
+                            / 100.0)
+                        * (FINALIZING_PERCENT / 100.0)
                 } else {
                     update.percent.clamp(0.0, 100.0)
                 },
@@ -105,20 +107,6 @@ fn process_failed(cancelled: &Arc<AtomicBool>, stderr: String, stage: &str) -> S
     } else {
         format!("{stage}: {}", stderr.trim())
     }
-}
-
-fn normalize_utf8_bytes(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).into_owned()
-}
-
-fn normalize_output_utf8(path: &Path, max_bytes: u64) -> Result<(), String> {
-    let bytes = read_bounded_file(path, max_bytes, "output Whisper")?;
-    let normalized = normalize_utf8_bytes(&bytes);
-    if normalized.as_bytes() != bytes.as_slice() {
-        fs::write(path, normalized.as_bytes())
-            .map_err(|e| format!("Gagal menormalkan output Whisper: {e}"))?;
-    }
-    Ok(())
 }
 
 fn read_bounded_file(path: &Path, max_bytes: u64, label: &str) -> Result<Vec<u8>, String> {
@@ -312,6 +300,7 @@ fn find_reusable_audio_job_cancelable(
         request.duration,
         committed_jobs,
         cancelled,
+        || false,
     )?;
     Ok(job.map(|(path, cache)| {
         if cache.audio_ready {
@@ -329,6 +318,7 @@ fn find_reusable_audio_job_for_source(
     duration: f64,
     committed_jobs: &HashSet<PathBuf>,
     cancelled: &AtomicBool,
+    hint_expired: impl Fn() -> bool,
 ) -> Result<Option<(PathBuf, AudioCacheMetadata)>, String> {
     crate::io_cancel::check(cancelled)?;
     let canonical_root = fs::canonicalize(jobs_dir)
@@ -337,6 +327,9 @@ fn find_reusable_audio_job_for_source(
     for entry in fs::read_dir(&canonical_root)
         .map_err(|error| format!("Gagal membaca folder cache audio: {error}"))?
     {
+        if hint_expired() {
+            return Ok(None);
+        }
         let entry = entry.map_err(|error| format!("Gagal membaca cache audio: {error}"))?;
         let path = entry.path();
         let file_type = entry
@@ -359,10 +352,12 @@ fn find_reusable_audio_job_for_source(
         else {
             continue;
         };
-        let cache_source = validate_source_cancelable(&cache.url, cancelled);
-        crate::io_cancel::check(cancelled)?;
+        // A local cache key already contains the inspected file identity.
+        // Validate the current source at pipeline entry, never open other inputs.
+        let source_matches = cache.url == url
+            || validate_media_url(&cache.url).is_ok_and(|canonical| canonical == url);
         if !matches!(cache.version, 1 | AUDIO_CACHE_METADATA_VERSION)
-            || cache_source.ok().as_deref() != Some(url)
+            || !source_matches
             || !cache.duration.is_finite()
             || cache.duration <= 0.0
             || cache.duration > MAX_MEDIA_DURATION_SECONDS
@@ -377,7 +372,11 @@ fn find_reusable_audio_job_for_source(
         }
         if cache.audio_ready {
             let audio = canonical_job_dir.join("audio.wav");
-            if checkpoint::PcmAudio::inspect(&audio, cache.duration, || false).is_err() {
+            let inspected = checkpoint::PcmAudio::inspect(&audio, cache.duration, || {
+                cancelled.load(Ordering::SeqCst)
+            });
+            crate::io_cancel::check(cancelled)?;
+            if inspected.is_err() {
                 continue;
             }
         } else if !has_saved_download(&canonical_job_dir)? {
@@ -395,11 +394,22 @@ fn find_reusable_audio_job_for_source(
         .map(|(_, path, cache)| (path, cache)))
 }
 
+#[cfg(test)]
 fn resume_stage_in(
     root: &Path,
     url: &str,
     duration: f64,
     committed: &HashSet<PathBuf>,
+) -> Result<Option<crate::types::TranscriptionResumeStage>, String> {
+    resume_stage_before(root, url, duration, committed, || false)
+}
+
+fn resume_stage_before(
+    root: &Path,
+    url: &str,
+    duration: f64,
+    committed: &HashSet<PathBuf>,
+    hint_expired: impl Fn() -> bool,
 ) -> Result<Option<crate::types::TranscriptionResumeStage>, String> {
     use crate::types::TranscriptionResumeStage;
     let Some((job, cache)) = find_reusable_audio_job_for_source(
@@ -408,6 +418,7 @@ fn resume_stage_in(
         duration,
         committed,
         &AtomicBool::new(false),
+        hint_expired,
     )?
     else {
         return Ok(None);
@@ -442,20 +453,28 @@ pub fn resume_stage(
     url: &str,
     duration: f64,
 ) -> Result<Option<crate::types::TranscriptionResumeStage>, String> {
-    let url = validate_source(url)?;
+    let deadline = Instant::now() + std::time::Duration::from_millis(350);
+    // This is a hint for an already inspected source. The execution path
+    // checks the local file identity again before claiming a checkpoint.
+    let url = if url::Url::parse(url).is_ok_and(|parsed| parsed.scheme() == "file") {
+        url.to_owned()
+    } else {
+        validate_media_url(url)?
+    };
     validate_media_duration(duration, false)?;
-    resume_stage_in(
-        &jobs_dir(app)?,
-        &url,
-        duration,
-        &history::referenced_job_directories(app)?,
-    )
+    let root = jobs_dir(app)?;
+    let Some(excluded) = history::resume_exclusions(app, &root, deadline)? else {
+        return Ok(None);
+    };
+    resume_stage_before(&root, &url, duration, &excluded, || {
+        Instant::now() >= deadline
+    })
 }
 
 const MAX_CAPTURED_STDERR_BYTES: usize = 64 * 1024;
+const FINALIZING_PERCENT: f64 = 92.0;
 pub(crate) const MAX_MEDIA_DURATION_SECONDS: f64 = 8.0 * 60.0 * 60.0;
 pub(crate) const MEDIA_DURATION_TOLERANCE_SECONDS: f64 = 2.0;
-const MAX_MEDIA_DOWNLOAD_BYTES: &str = "4G";
 const MAX_MEDIA_DOWNLOAD_BYTES_VALUE: u64 = 4 * 1024 * 1024 * 1024;
 const AUDIO_CACHE_METADATA_FILE: &str = ".audio-cache.json";
 const AUDIO_CACHE_METADATA_VERSION: u8 = 2;
@@ -547,15 +566,8 @@ fn reconciled_audio_duration(audio: &checkpoint::PcmAudio, source: f64) -> (f64,
     (actual, source)
 }
 
-fn media_disk_reservation(duration: f64, local_audio: bool) -> u64 {
-    let download_bytes = if local_audio {
-        0
-    } else {
-        MAX_MEDIA_DOWNLOAD_BYTES_VALUE
-    };
-    download_bytes
-        .saturating_add(pcm_wav_bytes(duration))
-        .saturating_add(DISK_SAFETY_BUFFER_BYTES)
+fn media_disk_reservation(duration: f64) -> u64 {
+    pcm_wav_bytes(duration).saturating_add(DISK_SAFETY_BUFFER_BYTES)
 }
 
 fn remaining_disk_reservation(already_written: u64, maximum: u64, future: u64) -> u64 {
@@ -565,41 +577,30 @@ fn remaining_disk_reservation(already_written: u64, maximum: u64, future: u64) -
         .saturating_add(DISK_SAFETY_BUFFER_BYTES)
 }
 
-fn directory_file_bytes(path: &Path) -> Result<u64, String> {
-    let mut total = 0u64;
+fn largest_download_file_bytes(path: &Path) -> Result<u64, String> {
+    let mut largest = 0u64;
     for entry in fs::read_dir(path).map_err(|e| format!("Gagal memeriksa pemakaian disk: {e}"))? {
         let entry = entry.map_err(|e| format!("Gagal membaca entry pemakaian disk: {e}"))?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("source.") || name.ends_with(".ytdl") || name.contains(".part-Frag") {
+            continue;
+        }
         let file_type = entry
             .file_type()
             .map_err(|e| format!("Gagal membaca tipe entry pemakaian disk: {e}"))?;
         if file_type.is_symlink() {
             return Err("Folder job berisi symbolic link yang tidak diizinkan.".into());
         }
-        let metadata = entry
-            .metadata()
-            .map_err(|e| format!("Gagal membaca metadata pemakaian disk: {e}"))?;
         if file_type.is_file() {
-            total = total.saturating_add(metadata.len());
-        } else if file_type.is_dir() {
-            total = total.saturating_add(directory_file_bytes(&entry.path())?);
+            let size = entry
+                .metadata()
+                .map_err(|e| format!("Gagal membaca metadata pemakaian disk: {e}"))?
+                .len();
+            largest = largest.max(size);
         }
     }
-    Ok(total)
-}
-
-fn ensure_job_storage_quota(app: &AppHandle) -> Result<(), String> {
-    let used = history::job_storage_bytes(app)?;
-    ensure_job_storage_budget(used, history::MAX_JOB_STORAGE_BYTES)
-}
-
-pub(crate) fn ensure_job_storage_budget(used: u64, limit: u64) -> Result<(), String> {
-    if used >= limit {
-        return Err(format!(
-            "storage_quota_exceeded:Penyimpanan job WhisperTube sudah melewati batas {:.1} GB.",
-            limit as f64 / 1024_f64.powi(3),
-        ));
-    }
-    Ok(())
+    Ok(largest)
 }
 
 fn ffmpeg_target_duration(duration: f64) -> f64 {
@@ -642,7 +643,9 @@ fn media_command_error(
     stderr: &[u8],
     cancelled: bool,
 ) -> String {
-    if crate::io_cancel::is_cancellation_error(&error) {
+    if crate::io_cancel::is_cancellation_error(&error)
+        || error.starts_with("storage_quota_exceeded:")
+    {
         return error;
     }
     let detail = String::from_utf8_lossy(stderr);
@@ -669,6 +672,7 @@ fn run_media_command(
     let mut stderr = Vec::with_capacity(MAX_CAPTURED_STDERR_BYTES);
     let mut truncated = false;
     let mut last_activity = Instant::now();
+    let mut last_quota_check = Instant::now();
     let mut monitor = None;
     let mut active = None;
     let outcome = process::run_piped(
@@ -696,6 +700,10 @@ fn run_media_command(
                     }
                 }
                 process::OutputEvent::Tick => {
+                    if last_quota_check.elapsed() >= std::time::Duration::from_millis(250) {
+                        context.storage.check_growth(0)?;
+                        last_quota_check = Instant::now();
+                    }
                     if let Some(error) = context.usage.memory_pressure() {
                         return Err(error);
                     }
@@ -729,6 +737,27 @@ fn run_media_command(
     Ok((status, stderr))
 }
 
+fn verify_external_growth<T>(
+    context: &JobContext,
+    result: Result<T, String>,
+    cleanup: impl FnOnce() -> Result<(), String>,
+) -> Result<T, String> {
+    if let Err(error) = context.storage.check_growth(0) {
+        if error.starts_with("storage_quota_exceeded:") {
+            if let Err(cleanup_error) = cleanup() {
+                return Err(format!(
+                    "{error} Pembersihan output belum selesai: {cleanup_error}"
+                ));
+            }
+            if context.is_cancelled() {
+                return Err("Job dibatalkan.".into());
+            }
+        }
+        return Err(error);
+    }
+    result
+}
+
 fn download_needs_duration_probe(value: &str, inspected: f64) -> Result<bool, String> {
     let Some(duration) = value
         .parse::<f64>()
@@ -752,6 +781,36 @@ const YOUTUBE_DOWNLOAD_METADATA_TEMPLATE: &str = concat!(
     r#""is_live":%(is_live|null)j,"live_status":%(live_status|null)j,"#,
     r#""extractor_key":%(extractor_key|null)j}"#,
 );
+const DOWNLOADED_FILE_MARKER: &str = "WT_DOWNLOADED_FILE=";
+const DOWNLOADED_FILE_TEMPLATE: &str = "after_move:WT_DOWNLOADED_FILE=%(filepath)j";
+
+fn verified_download_path(job_dir: &Path, reported_path: &str) -> Result<PathBuf, String> {
+    let source = PathBuf::from(reported_path);
+    let file_name = source
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .ok_or("Nama file hasil download tidak valid.")?;
+    if !source.is_absolute()
+        || !file_name.starts_with("source.")
+        || file_name.ends_with(".part")
+        || file_name.ends_with(".ytdl")
+        || !is_regular_file(&source)
+    {
+        return Err("File hasil download tidak valid.".into());
+    }
+    let root = fs::canonicalize(job_dir).map_err(|e| format!("Folder download: {e}"))?;
+    let canonical = fs::canonicalize(&source).map_err(|e| format!("File hasil download: {e}"))?;
+    if canonical.parent() != Some(&root) || canonical.file_name() != source.file_name() {
+        return Err("File hasil download berada di luar folder job.".into());
+    }
+    let size = fs::metadata(&canonical)
+        .map_err(|e| format!("Ukuran file hasil download: {e}"))?
+        .len();
+    if size == 0 || size > MAX_MEDIA_DOWNLOAD_BYTES_VALUE {
+        return Err("Ukuran audio sumber berada di luar batas yang diizinkan.".into());
+    }
+    Ok(canonical)
+}
 
 fn validate_youtube_download_metadata(raw: &str, url: &str, inspected: f64) -> Result<(), String> {
     let metadata: serde_json::Value = serde_json::from_str(raw)
@@ -772,10 +831,25 @@ fn run_download(
     let probe_eligible = crate::sources::supports_duration_probe(&request.url);
     let youtube = crate::sources::is_youtube_url(&request.url);
     let mut youtube_metadata_seen = false;
+    let mut downloaded_file: Option<String> = None;
+    let mut known_download_total = None;
     // Fail closed if the marker is absent. A known extractor duration keeps
     // the existing long-VOD path, without an extra full decode under 10 seconds.
     let mut needs_duration_probe = probe_eligible;
     let template = job_dir.join("source.%(ext)s");
+    let existing_bytes = largest_download_file_bytes(job_dir)?;
+    let transfer_budget = context
+        .storage
+        .remaining()?
+        .saturating_sub(pcm_wav_bytes(request.duration))
+        .saturating_add(existing_bytes)
+        .min(MAX_MEDIA_DOWNLOAD_BYTES_VALUE);
+    if transfer_budget == 0 {
+        context
+            .storage
+            .check_growth(pcm_wav_bytes(request.duration).saturating_add(1))?;
+    }
+    let transfer_limit = transfer_budget.to_string();
     let mut command = Command::new(yt_dlp);
     process::hide_console(&mut command);
     let cookie_jar = CookieJar::prepare(
@@ -795,10 +869,13 @@ fn run_download(
         .arg(crate::sources::download_media_filter(&request.url))
         .args([
             "--max-filesize",
-            MAX_MEDIA_DOWNLOAD_BYTES,
+            &transfer_limit,
             "--newline",
             "--quiet",
             "--progress",
+            "--no-simulate",
+            "--print",
+            DOWNLOADED_FILE_TEMPLATE,
             "--progress-template",
             "download:WT_PROGRESS=%(progress._percent_str)s|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s|%(progress.speed)s",
             "-f",
@@ -822,13 +899,21 @@ fn run_download(
         Regex::new(r"WT_PROGRESS=\s*([0-9.]+)%\|([0-9]+|NA)\|([0-9]+|NA)\|([0-9]+|NA)\|([^\s|]+)")
             .unwrap();
     let mut last_disk_check = Instant::now() - DISK_CHECK_INTERVAL;
-    let (status, stderr) = run_media_command(
+    let mut reported_downloaded_bytes = None;
+    let transfer = run_media_command(
         context,
         &mut command,
         process::OutputStream::Stdout,
         PROCESS_INACTIVITY_TIMEOUT,
         None,
         |line| {
+            if let Some(raw) = line.strip_prefix(DOWNLOADED_FILE_MARKER) {
+                let path = serde_json::from_str::<String>(raw)
+                    .map_err(|e| format!("Path hasil download tidak valid: {e}"))?;
+                if downloaded_file.replace(path).is_some() {
+                    return Err("yt-dlp melaporkan lebih dari satu file hasil download.".into());
+                }
+            }
             if youtube {
                 if let Some(raw) = line.strip_prefix("WT_YOUTUBE_METADATA=") {
                     validate_youtube_download_metadata(raw, &request.url, request.duration)?;
@@ -842,9 +927,19 @@ fn run_download(
             }
             if let Some(caps) = progress_re.captures(line) {
                 let downloaded_bytes = caps.get(2).and_then(|value| value.as_str().parse().ok());
-                let total_bytes = caps
+                reported_downloaded_bytes = downloaded_bytes.or(reported_downloaded_bytes);
+                let exact_total = caps
                     .get(3)
-                    .and_then(|value| value.as_str().parse().ok())
+                    .and_then(|value| value.as_str().parse::<u64>().ok());
+                if [downloaded_bytes, exact_total]
+                    .into_iter()
+                    .flatten()
+                    .any(|bytes| bytes > transfer_budget)
+                {
+                    return Err("storage_quota_exceeded:Download melebihi kapasitas yang tersedia untuk job.".into());
+                }
+                known_download_total = exact_total.or(known_download_total);
+                let total_bytes = exact_total
                     .or_else(|| caps.get(4).and_then(|value| value.as_str().parse().ok()));
                 // yt-dlp subtracts the resume offset when calculating speed.
                 // downloaded_bytes includes cached bytes and cannot be used
@@ -865,25 +960,25 @@ fn run_download(
                 }
             }
             if last_disk_check.elapsed() >= DISK_CHECK_INTERVAL {
-                let written = directory_file_bytes(job_dir)?;
-                if written > MAX_MEDIA_DOWNLOAD_BYTES_VALUE {
-                    return Err("Download media melebihi batas ukuran yang diizinkan.".into());
-                }
+                let written = reported_downloaded_bytes.unwrap_or(existing_bytes);
                 resources::require_disk(
                     job_dir,
                     remaining_disk_reservation(
                         written,
-                        MAX_MEDIA_DOWNLOAD_BYTES_VALUE,
+                        known_download_total
+                            .unwrap_or(written)
+                            .min(MAX_MEDIA_DOWNLOAD_BYTES_VALUE),
                         pcm_wav_bytes(request.duration),
                     ),
                     "download dan konversi media",
                 )?;
-                ensure_job_storage_quota(context.app)?;
                 last_disk_check = Instant::now();
             }
             Ok(())
         },
-    )?;
+    );
+    let (status, stderr) =
+        verify_external_growth(context, transfer, || history::cleanup_source_audio(job_dir))?;
     if !status.success() {
         return Err(process_failed(context.cancelled, stderr, "Download"));
     }
@@ -891,32 +986,12 @@ fn run_download(
         return Err("Metadata download YouTube tidak ditemukan; audio belum dapat diverifikasi. Periksa ulang URL.".into());
     }
 
-    let mut candidates = fs::read_dir(job_dir)
-        .map_err(|e| format!("Gagal membaca folder job: {e}"))?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .map(|name| {
-                    name.starts_with("source.")
-                        && !name.ends_with(".part")
-                        && !name.ends_with(".ytdl")
-                })
-                .unwrap_or(false)
-        })
-        .collect::<Vec<_>>();
-    candidates.sort();
-    let source = candidates
-        .into_iter()
-        .next()
-        .ok_or("yt-dlp selesai tetapi file audio sumber tidak ditemukan.")?;
-    let source_size = fs::metadata(&source)
-        .map_err(|e| format!("Gagal membaca ukuran audio sumber: {e}"))?
-        .len();
-    if source_size > MAX_MEDIA_DOWNLOAD_BYTES_VALUE {
-        return Err("Audio sumber melebihi batas ukuran download yang diizinkan.".into());
-    }
+    let source = verified_download_path(
+        job_dir,
+        downloaded_file
+            .as_deref()
+            .ok_or("yt-dlp selesai tanpa melaporkan file audio sumber.")?,
+    )?;
     Ok((source, needs_duration_probe))
 }
 
@@ -975,6 +1050,12 @@ fn run_ffmpeg(
     allow_recovery: bool,
 ) -> Result<bool, String> {
     let ffmpeg = tool_path(context.app, "ffmpeg")?;
+    let already_written = fs::metadata(output).map_or(0, |metadata| metadata.len());
+    context.storage.check_growth(
+        pcm_wav_bytes(ffmpeg_target_duration(duration))
+            .saturating_add(4096)
+            .saturating_sub(already_written),
+    )?;
     for recovering in [false, true] {
         let mut command = if recovering {
             ffmpeg_decode_command(&ffmpeg, input, output, duration, true)
@@ -982,7 +1063,7 @@ fn run_ffmpeg(
             ffmpeg_command(&ffmpeg, input, output, duration)
         };
         let mut last_disk_check = Instant::now() - DISK_CHECK_INTERVAL;
-        let (status, stderr) = run_media_command(
+        let conversion = run_media_command(
             context,
             &mut command,
             process::OutputStream::Stdout,
@@ -1025,12 +1106,14 @@ fn run_ffmpeg(
                         remaining_disk_reservation(written, maximum_wav, 0),
                         "konversi media",
                     )?;
-                    ensure_job_storage_quota(context.app)?;
                     last_disk_check = Instant::now();
                 }
                 Ok(())
             },
-        )?;
+        );
+        let (status, stderr) = verify_external_growth(context, conversion, || {
+            remove_file_if_present(output, "WAV yang belum selesai")
+        })?;
         if !status.success() {
             if !recovering
                 && allow_recovery
@@ -1076,7 +1159,7 @@ fn write_probe_wav(path: &Path) -> Result<(), String> {
         .map_err(|e| format!("Gagal menulis input probe Vulkan: {e}"))
 }
 
-fn vulkan_probe_signature(engine: &Path, model: &Path) -> String {
+fn probe_file_signature(engine: &Path, model: &Path) -> String {
     fn file_signature(path: &Path) -> String {
         let metadata = fs::metadata(path);
         let length = metadata.as_ref().map(|value| value.len()).unwrap_or(0);
@@ -1102,6 +1185,7 @@ fn run_engine_probe(
     engine: &Path,
     model: &Path,
     device_index: Option<usize>,
+    cuda_gpu: Option<&crate::system::GpuInfo>,
 ) -> Result<(), String> {
     let probe_dir =
         std::env::temp_dir().join(format!("whispertube-{backend}-probe-{}", Uuid::new_v4()));
@@ -1114,12 +1198,8 @@ fn run_engine_probe(
         let mut command = Command::new(engine);
         process::hide_console(&mut command);
         let probe_device_index = if backend == "cuda" {
-            let index = device_index.ok_or_else(|| {
-                "Capability probe CUDA tidak menerima indeks perangkat NVIDIA.".to_string()
-            })?;
-            let gpu = detect_nvidia_device(index)
-                .ok_or_else(|| format!("NVIDIA device {index} tidak lagi terdeteksi."))?;
-            configure_cuda_command(&mut command, &gpu)?;
+            let gpu = cuda_gpu.ok_or("Capability probe CUDA tidak menerima perangkat NVIDIA.")?;
+            configure_cuda_command(&mut command, gpu)?;
             Some(0)
         } else {
             device_index
@@ -1206,35 +1286,28 @@ pub(crate) fn require_gpu_backend_attestation(
     Ok(())
 }
 
-fn ensure_vulkan_probe(
+fn ensure_cuda_probe(
     context: &JobContext,
     engine: &Path,
     model: &Path,
-    device_index: usize,
+    runtime: &crate::runtime_snapshot::RuntimeSnapshot,
+    gpu: &crate::system::GpuInfo,
 ) -> Result<(), String> {
-    let signature = format!(
-        "backend=vulkan|{}|device={device_index}",
-        vulkan_probe_signature(engine, model)
-    );
-    run_cached_probe(context.capability_probe, signature, || {
-        run_engine_probe(context, "vulkan", engine, model, Some(device_index))
-    })
-}
-
-fn ensure_backend_probe(
-    context: &JobContext,
-    backend: &str,
-    engine: &Path,
-    model: &Path,
-    device_index: Option<usize>,
-) -> Result<(), String> {
-    let signature = format!(
-        "backend={backend}|{}|device={device_index:?}",
-        vulkan_probe_signature(engine, model)
-    );
-    run_cached_probe(context.capability_probe, signature, || {
-        run_engine_probe(context, backend, engine, model, device_index)
-    })
+    let probe = || run_engine_probe(context, "cuda", engine, model, None, Some(gpu));
+    match (
+        runtime.probe_fingerprint(),
+        gpu.uuid.as_deref(),
+        detect_nvidia_driver_version(),
+    ) {
+        (Some(files), Some(uuid), Some(driver)) => {
+            let signature = format!(
+                "{files}|{}|{uuid}|{driver}",
+                probe_file_signature(engine, model)
+            );
+            run_cached_probe(context.capability_probe, signature, probe)
+        }
+        _ => probe(),
+    }
 }
 
 fn run_cached_probe<F>(
@@ -1255,10 +1328,14 @@ where
 
     let result = probe();
     if result.is_ok() {
-        cache
+        let mut cache = cache
             .lock()
-            .map_err(|_| "Cache capability probe terkunci")?
-            .insert(signature);
+            .map_err(|_| "Cache capability probe terkunci")?;
+        const MAX_CACHED_PROBES: usize = 64;
+        if cache.len() >= MAX_CACHED_PROBES {
+            cache.clear();
+        }
+        cache.insert(signature);
     }
     result
 }
@@ -1344,11 +1421,14 @@ fn probe_vulkan_devices(
     }
     let mut errors = Vec::new();
     for device_index in &device_indices {
+        crate::io_cancel::check(context.cancelled)?;
         if let Err(error) = ensure_vulkan_host_memory(devices, model_id, wav, *device_index) {
             errors.push(format!("device {device_index}: {error}"));
             continue;
         }
-        match ensure_vulkan_probe(context, engine, model, *device_index) {
+        // GPU driver identity is not available reliably across Vulkan hosts.
+        // The chosen device remains cached in the verified job runtime.
+        match run_engine_probe(context, "vulkan", engine, model, Some(*device_index), None) {
             Ok(()) => return Ok(*device_index),
             Err(error) => errors.push(format!("device {device_index}: {error}")),
         }
@@ -1369,6 +1449,7 @@ where
 }
 
 type BackendSelection = (String, PathBuf, Option<String>, Option<usize>);
+type RejectedDevices = HashSet<(String, Option<usize>)>;
 
 fn try_cuda_devices<T>(
     devices: &[crate::system::GpuInfo],
@@ -1398,6 +1479,7 @@ fn try_cuda_devices<T>(
 struct ResolvedEngine {
     selection: BackendSelection,
     runtime: crate::runtime_snapshot::RuntimeSnapshot,
+    cuda_uuid: Option<String>,
 }
 
 fn resolve_engine(
@@ -1429,6 +1511,7 @@ fn choose_backend(
     model: &Path,
     wav: &Path,
     model_id: &str,
+    rejected: &RejectedDevices,
 ) -> Result<ResolvedEngine, String> {
     let app = context.app;
     match requested {
@@ -1439,6 +1522,7 @@ fn choose_backend(
             } else {
                 Ok(ResolvedEngine {
                     selection: ("cpu".into(), cpu, None, None),
+                    cuda_uuid: None,
                     runtime,
                 })
             }
@@ -1470,10 +1554,11 @@ fn choose_backend(
                     )
                 })?;
                 run_cuda_probe_with_vram_guard(model_id, &gpu, || {
-                    ensure_backend_probe(context, "cuda", &cuda, model, Some(device_index))
+                    ensure_cuda_probe(context, &cuda, model, &runtime, &gpu)
                 })?;
                 Ok(ResolvedEngine {
                     selection: ("cuda".into(), cuda, None, Some(device_index)),
+                    cuda_uuid: gpu.uuid,
                     runtime,
                 })
             }
@@ -1486,9 +1571,10 @@ fn choose_backend(
             } else if !is_regular_file(&metal) {
                 Err("Metal engine belum terpasang. Install Apple Metal dari Settings terlebih dahulu.".into())
             } else {
-                ensure_backend_probe(context, "metal", &metal, model, None)?;
+                run_engine_probe(context, "metal", &metal, model, None, None)?;
                 Ok(ResolvedEngine {
                     selection: ("metal".into(), metal, None, None),
+                    cuda_uuid: None,
                     runtime,
                 })
             }
@@ -1508,7 +1594,9 @@ fn choose_backend(
                 )
             } else {
                 let requested_device_index = requested_device_index(requested_device_id, "vulkan")?;
-                let devices = crate::system::detect_vulkan_devices_from_engine(&vulkan);
+                let mut devices = crate::system::detect_vulkan_devices_from_engine(&vulkan);
+                devices
+                    .retain(|device| !rejected.contains(&("vulkan".into(), device.device_index)));
                 let device_index = probe_vulkan_devices(
                     context,
                     &vulkan,
@@ -1527,12 +1615,14 @@ fn choose_backend(
                 })?;
                 Ok(ResolvedEngine {
                     selection: ("vulkan".into(), vulkan, None, Some(device_index)),
+                    cuda_uuid: None,
                     runtime,
                 })
             }
         }
         "auto" => {
-            let cuda_devices = crate::system::cuda_devices_by_preference();
+            let mut cuda_devices = crate::system::cuda_devices_by_preference();
+            cuda_devices.retain(|device| !rejected.contains(&("cuda".into(), device.device_index)));
             let nvidia = !cuda_devices.is_empty();
             let gpu_detected = nvidia || detect_gpu().is_some();
             let mut candidates = Vec::new();
@@ -1544,7 +1634,7 @@ fn choose_backend(
             {
                 candidates.push("cuda");
             }
-            if cfg!(target_os = "macos") {
+            if cfg!(target_os = "macos") && !rejected.contains(&("metal".into(), None)) {
                 candidates.push("metal");
             }
             if cfg!(any(target_os = "windows", target_os = "linux")) && gpu_detected {
@@ -1574,6 +1664,7 @@ fn choose_backend(
                                 model,
                                 wav,
                                 model_id,
+                                rejected,
                             )?;
                             Ok(selection)
                         },
@@ -1591,7 +1682,7 @@ fn choose_backend(
                 }
                 // Resolve and hash only the candidate we are about to use.
                 // Explicit selection keeps its normal integrity/VRAM/probe guards.
-                match choose_backend(context, backend, None, model, wav, model_id) {
+                match choose_backend(context, backend, None, model, wav, model_id, rejected) {
                     Ok(mut selection) => {
                         let backend = &selection.selection.0;
                         let message = (!failures.is_empty())
@@ -1612,16 +1703,36 @@ fn choose_backend(
     }
 }
 
+#[derive(Default)]
+struct WhisperEngines {
+    selected: Option<ResolvedEngine>,
+    rejected: RejectedDevices,
+}
+
+enum WhisperAttemptError {
+    Backend(String),
+    Job(String),
+}
+
+impl From<String> for WhisperAttemptError {
+    fn from(error: String) -> Self {
+        Self::Job(error)
+    }
+}
+
 fn run_whisper(
     context: &JobContext,
     wav: &Path,
     output_prefix: &Path,
     model: &Path,
     config: WhisperConfig<'_>,
-    resolved: &mut Option<ResolvedEngine>,
+    engines: &mut WhisperEngines,
 ) -> Result<String, String> {
-    let (resolved_backend, engine, fallback_message, device_index) =
-        resolve_engine(resolved, context.cancelled, || {
+    try_whisper_backends(
+        engines,
+        config.backend,
+        context.cancelled,
+        |rejected| {
             choose_backend(
                 context,
                 config.backend,
@@ -1629,44 +1740,188 @@ fn run_whisper(
                 model,
                 wav,
                 config.model_id,
+                rejected,
             )
-        })?;
-    if let Some(message) = fallback_message {
-        context.emit(ProgressUpdate {
-            stage: "transcribing",
-            message_code: "backend_fallback",
-            percent: 0.0,
-            message,
-            backend: Some(&resolved_backend),
-            downloaded_bytes: None,
-            total_bytes: None,
-            network_bytes_per_second: None,
-        });
+        },
+        |selection, cuda_uuid, fallback| {
+            if let Some(message) = fallback {
+                context.emit(ProgressUpdate {
+                    stage: "transcribing",
+                    message_code: "backend_fallback",
+                    percent: 0.0,
+                    message,
+                    backend: None,
+                    downloaded_bytes: None,
+                    total_bytes: None,
+                    network_bytes_per_second: None,
+                });
+            }
+            // A failed GPU can leave output which the next attempt cannot claim.
+            remove_file_if_present(
+                &output_prefix.with_extension("json"),
+                "output potongan Whisper",
+            )?;
+            run_whisper_attempt(
+                context,
+                wav,
+                output_prefix,
+                model,
+                &config,
+                selection,
+                cuda_uuid,
+            )
+        },
+    )
+}
+
+fn try_whisper_backends(
+    engines: &mut WhisperEngines,
+    requested: &str,
+    cancelled: &AtomicBool,
+    mut choose: impl FnMut(&RejectedDevices) -> Result<ResolvedEngine, String>,
+    mut attempt: impl FnMut(
+        &BackendSelection,
+        Option<&str>,
+        Option<String>,
+    ) -> Result<(), WhisperAttemptError>,
+) -> Result<String, String> {
+    let mut failures = Vec::new();
+    loop {
+        crate::io_cancel::check(cancelled)?;
+        let selection = resolve_engine(&mut engines.selected, cancelled, || {
+            choose(&engines.rejected)
+        })
+        .map_err(|error| combine_failures(&failures, error))?;
+        let (backend, _, preflight_message, device_index) = &selection;
+        let fallback = if failures.is_empty() {
+            preflight_message.clone()
+        } else {
+            let detail = failures.join("; ");
+            Some(match preflight_message {
+                Some(message) => format!("{message}; {detail}"),
+                None => format!("Auto beralih ke {backend}: {detail}"),
+            })
+        };
+        let cuda_uuid = engines
+            .selected
+            .as_ref()
+            .and_then(|engine| engine.cuda_uuid.as_deref());
+        match attempt(&selection, cuda_uuid, fallback) {
+            Ok(()) => {
+                if let Some(resolved) = engines.selected.as_mut() {
+                    resolved.selection.2 = None;
+                }
+                return Ok(backend.clone());
+            }
+            Err(WhisperAttemptError::Backend(error)) if requested == "auto" && backend != "cpu" => {
+                crate::io_cancel::check(cancelled)?;
+                let key = (backend.clone(), *device_index);
+                if !engines.rejected.insert(key) {
+                    return Err(combine_failures(&failures, error));
+                }
+                failures.push(format!("{backend}: {error}"));
+                engines.selected = None;
+            }
+            Err(WhisperAttemptError::Backend(error) | WhisperAttemptError::Job(error)) => {
+                return Err(combine_failures(&failures, error));
+            }
+        }
     }
+}
+
+fn combine_failures(failures: &[String], error: String) -> String {
+    if failures.is_empty() || crate::io_cancel::is_cancellation_error(&error) {
+        error
+    } else {
+        format!("{}; {error}", failures.join("; "))
+    }
+}
+
+fn gpu_execution_failure(exit_code: Option<i32>, stderr: &str, backend: &str) -> bool {
+    if backend == "cpu" {
+        return false;
+    }
+    let stderr = stderr.to_ascii_lowercase();
+    if [
+        "no space left",
+        "disk full",
+        "permission denied",
+        "failed to open",
+        "failed to read",
+    ]
+    .iter()
+    .any(|pattern| stderr.contains(pattern))
+    {
+        return false;
+    }
+    // Unix signals and Windows exception status codes indicate that the
+    // selected native engine died without returning a normal CLI error.
+    if exit_code.is_none_or(|code| code <= -0x10000) {
+        return true;
+    }
+    stderr.lines().any(|line| {
+        let gpu_related = ["cuda", "vulkan", "metal", "mtl", "gpu"]
+            .iter()
+            .any(|name| line.contains(name));
+        gpu_related
+            && [
+                "error",
+                "failed",
+                "out of memory",
+                "device lost",
+                "no gpu found",
+            ]
+            .iter()
+            .any(|failure| line.contains(failure))
+    })
+}
+
+fn run_whisper_attempt(
+    context: &JobContext,
+    wav: &Path,
+    output_prefix: &Path,
+    model: &Path,
+    config: &WhisperConfig<'_>,
+    selection: &BackendSelection,
+    cuda_uuid: Option<&str>,
+) -> Result<(), WhisperAttemptError> {
+    let (resolved_backend, engine, _, device_index) = selection;
+    let resolved_backend = resolved_backend.as_str();
+    let device_index = *device_index;
     let mut usage_device_index = device_index;
     let mut selected_cuda_gpu = None;
     if resolved_backend == "cuda" {
         let gpu = match device_index {
-            Some(index) => detect_nvidia_device(index).ok_or_else(|| {
-                format!(
+            Some(index) => detect_nvidia_device(index)
+                .ok_or_else(|| {
+                    format!(
                     "NVIDIA device {index} tidak lagi terdeteksi. Pilih CPU atau periksa driver."
                 )
-            })?,
-            None => detect_nvidia().ok_or_else(|| {
-                "NVIDIA GPU tidak lagi terdeteksi. Pilih CPU atau periksa driver.".to_string()
-            })?,
+                })
+                .map_err(WhisperAttemptError::Backend)?,
+            None => detect_nvidia()
+                .ok_or_else(|| {
+                    "NVIDIA GPU tidak lagi terdeteksi. Pilih CPU atau periksa driver.".to_string()
+                })
+                .map_err(WhisperAttemptError::Backend)?,
         };
-        models::ensure_vram_available(config.model_id, gpu.available_memory_mb())?;
+        if cuda_uuid.is_some() && gpu.uuid.as_deref() != cuda_uuid {
+            return Err(WhisperAttemptError::Backend(
+                "Perangkat NVIDIA pada indeks terpilih berubah setelah capability probe.".into(),
+            ));
+        }
+        models::ensure_vram_available(config.model_id, gpu.available_memory_mb())
+            .map_err(WhisperAttemptError::Backend)?;
         usage_device_index = gpu.device_index;
         selected_cuda_gpu = Some(gpu);
     }
     context
         .usage
-        .set_target(&resolved_backend, usage_device_index);
+        .set_target(resolved_backend, usage_device_index);
     let available_threads = std::thread::available_parallelism()
         .map(|value| value.get())
         .unwrap_or(4);
-    let threads = whisper_thread_count(available_threads, &resolved_backend);
+    let threads = whisper_thread_count(available_threads, resolved_backend);
     let mut command = Command::new(engine);
     process::hide_console(&mut command);
     command
@@ -1687,7 +1942,7 @@ fn run_whisper(
         let gpu = selected_cuda_gpu
             .as_ref()
             .ok_or_else(|| "CUDA tidak memiliki perangkat NVIDIA terpilih.".to_string())?;
-        configure_cuda_command(&mut command, gpu)?;
+        configure_cuda_command(&mut command, gpu).map_err(WhisperAttemptError::Backend)?;
         command.arg("-dev").arg("0");
     } else if resolved_backend == "vulkan" {
         configure_vulkan_command(&mut command);
@@ -1699,11 +1954,11 @@ fn run_whisper(
         }
     }
     let progress_re = Regex::new(r"progress\s*=\s*([0-9]+)%").unwrap();
-    let (status, stderr) = run_media_command(
+    let inference = run_media_command(
         context,
         &mut command,
         process::OutputStream::Stderr,
-        whisper_inactivity_timeout(&resolved_backend),
+        whisper_inactivity_timeout(resolved_backend),
         None,
         |line| {
             if let Some(caps) = progress_re.captures(line) {
@@ -1716,7 +1971,7 @@ fn run_whisper(
                             "Whisper sedang bekerja via {}…",
                             resolved_backend.to_uppercase()
                         ),
-                        backend: Some(&resolved_backend),
+                        backend: Some(resolved_backend),
                         downloaded_bytes: None,
                         total_bytes: None,
                         network_bytes_per_second: None,
@@ -1725,9 +1980,22 @@ fn run_whisper(
             }
             Ok(())
         },
-    )?;
+    );
+    let (status, stderr) = verify_external_growth(context, inference, || {
+        remove_file_if_present(
+            &output_prefix.with_extension("json"),
+            "output Whisper sementara",
+        )
+    })?;
     if !status.success() {
-        return Err(process_failed(context.cancelled, stderr, "Whisper"));
+        let retry = !context.is_cancelled()
+            && gpu_execution_failure(status.code(), &stderr, resolved_backend);
+        let error = process_failed(context.cancelled, stderr, "Whisper");
+        return Err(if retry {
+            WhisperAttemptError::Backend(error)
+        } else {
+            WhisperAttemptError::Job(error)
+        });
     }
     if resolved_backend != "cpu" {
         let engine_device_index = if resolved_backend == "cuda" {
@@ -1735,9 +2003,10 @@ fn run_whisper(
         } else {
             device_index
         };
-        require_gpu_backend_attestation(&stderr, &resolved_backend, engine_device_index)?;
+        require_gpu_backend_attestation(&stderr, resolved_backend, engine_device_index)
+            .map_err(WhisperAttemptError::Backend)?;
     }
-    Ok(resolved_backend)
+    Ok(())
 }
 
 fn run_qwen(
@@ -1787,6 +2056,7 @@ fn run_qwen(
                     crate::paths::engine_with_snapshot(context.app, "cuda", context.cancelled)?;
                 Ok(ResolvedEngine {
                     selection: ("cuda".into(), engine, None, None),
+                    cuda_uuid: None,
                     runtime,
                 })
             });
@@ -1850,7 +2120,7 @@ fn run_qwen(
     context
         .usage
         .set_target(backend, gpu.as_ref().and_then(|gpu| gpu.device_index));
-    let (status, stderr) = run_media_command(
+    let inference = run_media_command(
         context,
         &mut command,
         process::OutputStream::Stderr,
@@ -1874,7 +2144,10 @@ fn run_qwen(
             }
             Ok(())
         },
-    )?;
+    );
+    let (status, stderr) = verify_external_growth(context, inference, || {
+        remove_file_if_present(&prefix.with_extension("json"), "output Qwen sementara")
+    })?;
     // The reservation retains CUDA dependency handles across all sections.
     if !status.success() {
         return Err(process_failed(context.cancelled, stderr, "Qwen"));
@@ -1900,7 +2173,6 @@ fn run_qwen(
 struct WhisperOutput {
     #[serde(default)]
     result: Option<WhisperResultMetadata>,
-    #[serde(default)]
     transcription: Vec<WhisperOutputSegment>,
 }
 
@@ -1914,8 +2186,7 @@ struct WhisperResultMetadata {
 struct WhisperOutputSegment {
     #[serde(default)]
     timestamps: Option<WhisperTimestamps>,
-    #[serde(default)]
-    text: Option<String>,
+    text: String,
 }
 
 #[derive(Deserialize)]
@@ -1926,25 +2197,11 @@ struct WhisperTimestamps {
     to: Option<String>,
 }
 
-fn parse_whisper_result(path: &Path) -> Result<(String, Vec<Segment>, String), String> {
-    let metadata = fs::metadata(path)
-        .map_err(|error| format!("Gagal membaca ukuran output JSON Whisper: {error}"))?;
-    if metadata.len() > MAX_TRANSCRIPT_RESULT_BYTES {
-        return Err("Output JSON Whisper melebihi batas ukuran aman.".into());
-    }
-    let file =
-        File::open(path).map_err(|error| format!("Gagal membuka output JSON Whisper: {error}"))?;
-    let mut bounded_reader = file.take(MAX_TRANSCRIPT_RESULT_BYTES.saturating_add(1));
-    let mut deserializer = serde_json::Deserializer::from_reader(&mut bounded_reader);
-    let output = WhisperOutput::deserialize(&mut deserializer)
+fn parse_whisper_result(path: &Path) -> Result<(String, Vec<Segment>), String> {
+    let bytes = read_bounded_file(path, checkpoint::MAX_CHECKPOINT_BYTES, "output Whisper")?;
+    let json = String::from_utf8_lossy(&bytes);
+    let output: WhisperOutput = serde_json::from_str(&json)
         .map_err(|error| format!("Output JSON Whisper rusak: {error}"))?;
-    deserializer
-        .end()
-        .map_err(|error| format!("Output JSON Whisper memiliki data tambahan: {error}"))?;
-    drop(deserializer);
-    if bounded_reader.limit() == 0 {
-        return Err("Output JSON Whisper melebihi batas ukuran aman.".into());
-    }
 
     let language = output
         .result
@@ -1956,7 +2213,7 @@ fn parse_whisper_result(path: &Path) -> Result<(String, Vec<Segment>, String), S
     let mut segments = Vec::new();
     let mut total_text_bytes = 0usize;
     for item in output.transcription {
-        let text = item.text.unwrap_or_default().trim().to_string();
+        let text = item.text.trim();
         if text.is_empty() {
             continue;
         }
@@ -1975,25 +2232,22 @@ fn parse_whisper_result(path: &Path) -> Result<(String, Vec<Segment>, String), S
         if from.len() > MAX_TIMESTAMP_BYTES || to.len() > MAX_TIMESTAMP_BYTES {
             return Err("Timestamp hasil Whisper terlalu panjang.".into());
         }
-        if !text.is_empty() {
-            if segments.len() >= MAX_TRANSCRIPT_SEGMENTS {
-                return Err("Output Whisper memiliki terlalu banyak segment.".into());
-            }
-            total_text_bytes = total_text_bytes
-                .saturating_add(text.len())
-                .saturating_add(usize::from(!segments.is_empty()));
-            if total_text_bytes > MAX_TRANSCRIPT_TEXT_BYTES {
-                return Err("Teks output Whisper melebihi batas ukuran aman.".into());
-            }
-            segments.push(Segment { from, to, text });
+        if segments.len() >= MAX_TRANSCRIPT_SEGMENTS {
+            return Err("Output Whisper memiliki terlalu banyak segment.".into());
         }
+        total_text_bytes = total_text_bytes
+            .saturating_add(text.len())
+            .saturating_add(usize::from(!segments.is_empty()));
+        if total_text_bytes > MAX_TRANSCRIPT_TEXT_BYTES {
+            return Err("Teks output Whisper melebihi batas ukuran aman.".into());
+        }
+        segments.push(Segment {
+            from,
+            to,
+            text: text.into(),
+        });
     }
-    let text = segments
-        .iter()
-        .map(|segment| segment.text.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-    Ok((language, segments, text))
+    Ok((language, segments))
 }
 
 fn inference_error(error: String) -> String {
@@ -2022,8 +2276,10 @@ pub fn pipeline(
     if cancelled.load(Ordering::SeqCst) {
         return Err("Job dibatalkan.".into());
     }
-    request.url = validate_source_cancelable(&request.url, &cancelled)?;
     let local_audio = local_path_cancelable(&request.url, &cancelled)?;
+    if local_audio.is_none() {
+        request.url = validate_media_url(&request.url)?;
+    }
     validate_transcript_request(&request)?;
     validate_media_duration(request.duration, false)?;
     let yt_dlp = tool_path(&app, "yt-dlp")?;
@@ -2067,19 +2323,12 @@ pub fn pipeline(
     }
     let disk_reservation = if audio_ready {
         DISK_SAFETY_BUFFER_BYTES
-    } else if local_audio.is_some() {
-        // The original stays outside the job directory. A partial conversion
-        // is overwritten, so reserve the full WAV even when resuming a job.
-        media_disk_reservation(request.duration, true)
-    } else if let Some(path) = &reusable_job_dir {
-        media_disk_reservation(request.duration, false)
-            .saturating_sub(directory_file_bytes(path)?)
-            .max(DISK_SAFETY_BUFFER_BYTES)
     } else {
-        media_disk_reservation(request.duration, false)
+        // A partial conversion is overwritten. Keep room for the full WAV;
+        // the download checks known bytes and live free space separately.
+        media_disk_reservation(request.duration)
     };
     crate::resources::require_disk(&jobs_dir, disk_reservation, "transkripsi")?;
-    ensure_job_storage_quota(&app)?;
     let (job_dir, mut job_guard) = match reusable_job_dir {
         Some(path) => (path.clone(), JobDirectoryGuard::resume(path)?),
         None => {
@@ -2088,9 +2337,12 @@ pub fn pipeline(
             (path, guard)
         }
     };
+    let storage =
+        history::JobStorageBudget::new(&jobs_dir, &job_dir, history::MAX_JOB_STORAGE_BYTES)?;
     // Preserve stage files on failure/cancel regardless of the final keep-audio
     // preference. Startup expires abandoned jobs after 24 hours.
     if !audio_ready {
+        storage.check_growth(MAX_AUDIO_CACHE_METADATA_BYTES)?;
         write_audio_cache_metadata(&job_dir, &request, false)?;
     }
     job_guard.preserve_on_failure();
@@ -2101,6 +2353,7 @@ pub fn pipeline(
         active_pid: &active_pid,
         cancelled: &cancelled,
         capability_probe: &capability_probe,
+        storage: &storage,
         progress_start: 0.0,
         progress_end: 100.0,
     };
@@ -2150,6 +2403,7 @@ pub fn pipeline(
             // padding. Convert the measured audio length, never truncate it to
             // the earlier estimate after accepting this small difference.
             request.duration = actual;
+            storage.check_growth(MAX_AUDIO_CACHE_METADATA_BYTES)?;
             write_audio_cache_metadata(&job_dir, &request, false)?;
         }
 
@@ -2166,7 +2420,6 @@ pub fn pipeline(
         let audio_recovered =
             run_ffmpeg(&context, &source, &wav, request.duration, allow_recovery)?;
         local_path_cancelable(&request.url, &cancelled)?;
-        ensure_job_storage_quota(&app)?;
         validate_audio_wav(&wav, request.duration)?;
         if context.is_cancelled() {
             return Err("Job dibatalkan.".into());
@@ -2177,6 +2430,7 @@ pub fn pipeline(
         // decode. Preserve its actual coverage through reconciled_audio_duration
         // and the existing result/history warning rather than rejecting it.
         checkpoint::PcmAudio::inspect(&wav, request.duration, || context.is_cancelled())?;
+        storage.check_growth(MAX_AUDIO_CACHE_METADATA_BYTES)?;
         write_audio_cache_metadata_with_recovery(&job_dir, &request, true, audio_recovered)?;
     };
     // Retry cleanup even when a completed WAV bypasses download/conversion.
@@ -2195,9 +2449,9 @@ pub fn pipeline(
     });
     let audio = checkpoint::PcmAudio::open(&wav, request.duration, || context.is_cancelled())?;
     let (audio_duration, source_duration) = reconciled_audio_duration(&audio, request.duration);
-    let mut resolved_engine = None;
+    let mut resolved_engine = WhisperEngines::default();
     let mut qwen_cuda_engine = None;
-    let completed = checkpoint::transcribe(
+    let completed = checkpoint::transcribe_with_budget(
         &audio,
         &job_dir,
         &request,
@@ -2243,11 +2497,7 @@ pub fn pipeline(
                 },
                 &mut resolved_engine,
             )?;
-            normalize_output_utf8(
-                &prefix.with_extension("json"),
-                checkpoint::MAX_CHECKPOINT_BYTES,
-            )?;
-            let (language, segments, _) = parse_whisper_result(&prefix.with_extension("json"))?;
+            let (language, segments) = parse_whisper_result(&prefix.with_extension("json"))?;
             Ok(checkpoint::ChunkOutput {
                 language,
                 backend,
@@ -2275,20 +2525,24 @@ pub fn pipeline(
                 network_bytes_per_second: None,
             });
         },
+        |bytes| storage.check_growth(bytes),
     )
     .map_err(inference_error)?;
     reservation.begin_finalization()?;
     context.emit(ProgressUpdate {
         stage: "finalizing",
         message_code: "finalizing_result",
-        percent: 92.0,
+        percent: FINALIZING_PERCENT,
         message: "Merapikan transcript dan menyimpan history…".into(),
         backend: Some(&completed.backend),
         downloaded_bytes: None,
         total_bytes: None,
         network_bytes_per_second: None,
     });
-    checkpoint::write_exports(&output_prefix, &completed)?;
+    checkpoint::cleanup_audio(&job_dir)?;
+    checkpoint::write_exports_with_budget(&output_prefix, &completed, |bytes| {
+        storage.check_growth(bytes)
+    })?;
     let resolved_backend = completed.backend;
     let language = completed.language;
     let segments = completed.segments;
@@ -2296,7 +2550,6 @@ pub fn pipeline(
     let txt_path = output_prefix.with_extension("txt");
     let srt_path = output_prefix.with_extension("srt");
     let vtt_path = output_prefix.with_extension("vtt");
-    ensure_job_storage_quota(&app)?;
     let result_store_path = job_dir.join("result.json");
     let mut result = TranscriptResult {
         audio_recovered: read_audio_cache_metadata(&job_dir.join(AUDIO_CACHE_METADATA_FILE))
@@ -2337,6 +2590,7 @@ pub fn pipeline(
             if bytes.len() as u64 > MAX_TRANSCRIPT_RESULT_BYTES {
                 return Err("Hasil transcript melebihi batas ukuran aman.".into());
             }
+            storage.check_growth(bytes.len() as u64)?;
             write_file_atomically(&result_store_path, &bytes)
         },
     )?;
@@ -2421,6 +2675,7 @@ mod tests {
             fs::write(root.join("unexpected.dll"), b"changed during probe").unwrap();
             Ok(super::ResolvedEngine {
                 selection: ("vulkan".into(), engine.clone(), None, Some(0)),
+                cuda_uuid: None,
                 runtime,
             })
         });
@@ -2449,6 +2704,7 @@ mod tests {
         let first = super::resolve_engine(&mut resolved, &cancelled, || {
             Ok(super::ResolvedEngine {
                 selection: expected.clone(),
+                cuda_uuid: None,
                 runtime: crate::runtime_snapshot::RuntimeSnapshot::capture(
                     &engine,
                     Some("test"),
@@ -2492,6 +2748,7 @@ mod tests {
                 captures += 1;
                 Ok(super::ResolvedEngine {
                     selection: ("cuda".into(), engine.clone(), None, None),
+                    cuda_uuid: None,
                     runtime: crate::runtime_snapshot::RuntimeSnapshot::capture(
                         &engine,
                         Some("test"),
@@ -2529,6 +2786,7 @@ mod tests {
             1.0,
             &HashSet::new(),
             &cancelled,
+            || false,
         )
         .err()
         .unwrap();
@@ -2563,6 +2821,27 @@ mod tests {
                 assert!(failure.contains(program.to_str().unwrap()));
                 assert_eq!(failure.contains("native log"), !token);
             }
+        }
+    }
+
+    #[test]
+    fn download_uses_the_reported_final_file_instead_of_an_old_source() {
+        let root = tempfile::tempdir().unwrap();
+        let job = root.path().join("job");
+        fs::create_dir(&job).unwrap();
+        let stale = job.join("source.aaa");
+        let current = job.join("source.wav");
+        let partial = job.join("source.wav.part");
+        let external = root.path().join("source.wav");
+        for path in [&stale, &current, &partial, &external] {
+            fs::write(path, b"audio").unwrap();
+        }
+        assert_eq!(
+            super::verified_download_path(&job, current.to_str().unwrap()).unwrap(),
+            fs::canonicalize(current).unwrap()
+        );
+        for path in [&partial, &external] {
+            assert!(super::verified_download_path(&job, path.to_str().unwrap()).is_err());
         }
     }
 
@@ -2695,12 +2974,11 @@ mod tests {
         }
     }
     use super::{
-        ffmpeg_target_duration, find_reusable_audio_job, normalize_utf8_bytes,
-        parse_whisper_result, remaining_disk_reservation, run_cached_probe,
-        run_cuda_probe_with_vram_guard, validate_transcript_request, vulkan_device_indices,
-        whisper_inactivity_timeout, whisper_thread_count, write_audio_cache_metadata,
-        ComputeDeviceInfo, JobDirectoryGuard, CPU_INACTIVITY_TIMEOUT, DISK_SAFETY_BUFFER_BYTES,
-        PROCESS_INACTIVITY_TIMEOUT,
+        ffmpeg_target_duration, find_reusable_audio_job, parse_whisper_result,
+        remaining_disk_reservation, run_cached_probe, run_cuda_probe_with_vram_guard,
+        validate_transcript_request, vulkan_device_indices, whisper_inactivity_timeout,
+        whisper_thread_count, write_audio_cache_metadata, ComputeDeviceInfo, JobDirectoryGuard,
+        CPU_INACTIVITY_TIMEOUT, DISK_SAFETY_BUFFER_BYTES, PROCESS_INACTIVITY_TIMEOUT,
     };
     use crate::{checkpoint, types::TranscriptRequest};
     use std::{
@@ -2932,10 +3210,15 @@ mod tests {
 
     #[test]
     fn replaces_invalid_utf8_without_panicking() {
+        let path = std::env::temp_dir().join(format!("whispertube-result-{}.json", Uuid::new_v4()));
+        let mut json = br#"{"transcription":[{"timestamps":{"from":"00:00:00,000","to":"00:00:01,000"},"text":"# .to_vec();
+        json.extend_from_slice(b"\"text: \xAE misalnya\"}]}");
+        fs::write(&path, json).unwrap();
         assert_eq!(
-            normalize_utf8_bytes(b"text: \xAE misalnya"),
+            parse_whisper_result(&path).unwrap().1[0].text,
             "text: � misalnya"
         );
+        fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -3120,7 +3403,7 @@ mod tests {
         let parsed = parse_whisper_result(&path).expect("bounded result should parse");
         assert_eq!(parsed.0, "en");
         assert_eq!(parsed.1.len(), 1);
-        assert_eq!(parsed.2, "hello");
+        assert_eq!(parsed.1[0].text, "hello");
         fs::remove_file(path).unwrap();
     }
 
@@ -3167,8 +3450,21 @@ mod tests {
             .unwrap();
             assert!(parse_whisper_result(&path).is_err());
         }
-        fs::write(&path, br#"{"transcription":[{"text":" "}]}"#).unwrap();
-        assert!(parse_whisper_result(&path).unwrap().1.is_empty());
+        for invalid in [
+            r#"{}"#,
+            r#"{"transcription":[{}]}"#,
+            r#"{"transcription":[]}true"#,
+        ] {
+            fs::write(&path, invalid).unwrap();
+            assert!(parse_whisper_result(&path).is_err());
+        }
+        for silence in [
+            r#"{"transcription":[]}"#,
+            r#"{"transcription":[{"text":" "}]}"#,
+        ] {
+            fs::write(&path, silence).unwrap();
+            assert!(parse_whisper_result(&path).unwrap().1.is_empty());
+        }
         fs::remove_file(path).unwrap();
     }
 
@@ -3659,7 +3955,7 @@ mod tests {
     }
 
     #[test]
-    fn successful_vulkan_probe_is_cached() {
+    fn successful_cuda_probe_is_cached() {
         let cache = Arc::new(Mutex::new(HashSet::new()));
         let mut attempts = 0;
         let signature = "engine:model".to_string();
@@ -3679,6 +3975,108 @@ mod tests {
     }
 
     #[test]
+    fn successful_probe_cache_is_bounded() {
+        let cache = Arc::new(Mutex::new(HashSet::new()));
+        for index in 0..100 {
+            run_cached_probe(&cache, index.to_string(), || Ok(())).unwrap();
+            assert!(cache.lock().unwrap().len() <= 64);
+        }
+    }
+
+    #[test]
+    fn whisper_retries_inference_on_another_backend_for_auto_only() {
+        let fixtures = tempfile::tempdir().unwrap();
+        let engine = fixtures.path().join("whisper-cli");
+        fs::write(&engine, b"test engine").unwrap();
+        for (requested, job_error, cancel_after_gpu) in [
+            ("auto", false, false),
+            ("vulkan", false, false),
+            ("auto", true, false),
+            ("auto", false, true),
+        ] {
+            let cancelled = AtomicBool::new(false);
+            let mut engines = super::WhisperEngines::default();
+            let mut attempted = Vec::new();
+            let result = super::try_whisper_backends(
+                &mut engines,
+                requested,
+                &cancelled,
+                |rejected| {
+                    let (backend, index) = if rejected.contains(&("vulkan".into(), Some(1))) {
+                        ("cpu", None)
+                    } else {
+                        ("vulkan", Some(1))
+                    };
+                    Ok(super::ResolvedEngine {
+                        selection: (backend.into(), engine.clone(), None, index),
+                        runtime: crate::runtime_snapshot::RuntimeSnapshot::capture(
+                            &engine, None, &cancelled,
+                        )?,
+                        cuda_uuid: None,
+                    })
+                },
+                |selection, _, fallback| {
+                    attempted.push(selection.0.clone());
+                    if selection.0 == "cpu" {
+                        assert!(fallback.unwrap().contains("device lost"));
+                        return Ok(());
+                    }
+                    assert!(fallback.is_none());
+                    if job_error {
+                        return Err(super::WhisperAttemptError::Job("Disk penuh".into()));
+                    }
+                    cancelled.store(cancel_after_gpu, std::sync::atomic::Ordering::SeqCst);
+                    Err(super::WhisperAttemptError::Backend("device lost".into()))
+                },
+            );
+            if requested == "auto" && !job_error && !cancel_after_gpu {
+                assert_eq!(result.unwrap(), "cpu");
+                assert_eq!(attempted, ["vulkan", "cpu"]);
+                assert!(engines.rejected.contains(&("vulkan".into(), Some(1))));
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(attempted, ["vulkan"]);
+                assert!(engines.rejected.is_empty());
+                assert_eq!(
+                    crate::io_cancel::is_cancellation_error(&error),
+                    cancel_after_gpu
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gpu_log_failure_is_distinguished_from_shared_job_errors() {
+        for (backend, device, error) in [
+            ("cuda", "CUDA0", "ggml_cuda: CUDA error: out of memory"),
+            (
+                "metal",
+                "MTL0",
+                "ggml_metal: error: failed to allocate buffer",
+            ),
+            ("vulkan", "Vulkan1", "ggml_vulkan: vk::DeviceLostError"),
+        ] {
+            assert!(super::gpu_execution_failure(Some(1), error, backend));
+            assert!(!super::gpu_execution_failure(
+                Some(1),
+                "failed to open WAV input",
+                backend
+            ));
+            assert!(!super::gpu_execution_failure(Some(1), error, "cpu"));
+            let log = format!("whisper_backend_init_gpu: using {device} backend");
+            let ordinal = if backend == "vulkan" { 1 } else { 0 };
+            assert!(super::require_gpu_backend_attestation(&log, backend, Some(ordinal)).is_ok());
+            assert!(
+                super::require_gpu_backend_attestation(&log, backend, Some(ordinal + 1)).is_err()
+            );
+            let failed = format!("{log}\nfailed to initialize {device} backend");
+            assert!(
+                super::require_gpu_backend_attestation(&failed, backend, Some(ordinal)).is_err()
+            );
+        }
+    }
+
+    #[test]
     fn conversion_limit_includes_a_sentinel_beyond_the_accepted_duration() {
         assert_eq!(ffmpeg_target_duration(0.25), 3.25);
         assert_eq!(ffmpeg_target_duration(12.0), 15.0);
@@ -3689,18 +4087,14 @@ mod tests {
     }
 
     #[test]
-    fn local_audio_reserves_wav_and_safety_buffer_without_a_download() {
+    fn media_preflight_reserves_wav_and_safety_buffer_without_assuming_a_maximum_download() {
         for duration in [1.0, 60.0, super::MAX_MEDIA_DURATION_SECONDS] {
-            let local = super::media_disk_reservation(duration, true);
+            let local = super::media_disk_reservation(duration);
             assert_eq!(
                 local,
                 super::pcm_wav_bytes(duration) + DISK_SAFETY_BUFFER_BYTES
             );
             assert!(local < 1024 * 1024 * 1024 + DISK_SAFETY_BUFFER_BYTES);
-            assert_eq!(
-                super::media_disk_reservation(duration, false),
-                local + super::MAX_MEDIA_DOWNLOAD_BYTES_VALUE
-            );
         }
     }
 

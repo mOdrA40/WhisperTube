@@ -45,6 +45,18 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     if (run.error) throw run.error;
     if (run.stderr.trim()) console.error(run.stderr.trim());
     const result = evaluateAudit(JSON.parse(run.stdout), policy);
+    if (policy.knownRisks.some((risk) => risk.lockfileOnly)) {
+      const tree = spawnSync("cargo", ["tree", "--locked", "--manifest-path", "src-tauri/Cargo.toml",
+        "--all-features", "--target", "all", "--prefix", "none", "--format", "{p}"], {
+        encoding: "utf8", timeout: 120_000, maxBuffer: 8 * 1024 * 1024, windowsHide: true,
+      });
+      if (tree.error) throw tree.error;
+      if (tree.status !== 0) throw new Error(`Failed to verify enabled dependencies: ${tree.stderr.trim()}`);
+      const packages = new Set(tree.stdout.split(/\r?\n/).map((line) => line.split(" ")[0]));
+      for (const risk of policy.knownRisks.filter((risk) => risk.lockfileOnly)) {
+        if (packages.has(risk.package)) result.failures.push(`Lockfile-only dependency is enabled: ${risk.package}`);
+      }
+    }
     for (const warning of result.known) console.warn(`OPEN upstream risk: ${warning}`);
     for (const failure of result.failures) console.error(failure);
     if (run.status !== 0 || result.failures.length) process.exitCode = 1;

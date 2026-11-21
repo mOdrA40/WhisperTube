@@ -121,8 +121,10 @@ gate. It prints every tracked residual, fails for any
 vulnerability or unavailable audit, and rejects new advisories or changes to
 their package version/kind. `scripts/cargo-advisory-policy.json` records the
 exact residuals, owner, upstream dependency path and resolution requirements.
-This is not a blanket advisory ignore: the four unmaintained packages and glib
-unsoundness remain open until a compatible upstream migration is verified.
+Four unmaintained runtime packages and the glib advisory remain open until a
+compatible upstream migration is verified. The gate also tracks the optional
+`chrono 0.4.45` lockfile entry (RUSTSEC-2026-0543) and fails if `chrono` enters
+the enabled dependency graph for any target. Application timestamps use `time`.
 
 The application ZIP reader uses ZIP 9.0.5 or newer. The updater's optional
 Windows ZIP / Linux gzip support is disabled: the application release workflow
@@ -147,3 +149,12 @@ is absent; the unaffected emSign roots are not indiscriminately removed.
 See the [upstream release advisory](https://github.com/yt-dlp/yt-dlp/releases/tag/2026.10.21).
 This validates the artifact update and packaging controls, not a reproduced
 MITM attack or a guarantee about every platform's runtime TLS behavior.
+
+The 2026-11-20 runtime update pins yt-dlp 2026.10.26 and FFmpeg 9.0.2.
+The verified Windows yt-dlp executable reports Brotli 1.2.1 and curl-cffi
+0.17.0, which address the issues documented in the upstream release.
+FFmpeg's Windows binary is pinned to the hash derived from the verified
+Gyan.dev archive. Unix setup scripts verify the pinned source archive and
+record the version and hash of the staged build. Packaging rejects a stale
+FFmpeg binary or mismatched build record.
+[yt-dlp 2026.10.26 release](https://github.com/yt-dlp/yt-dlp/releases/tag/2026.10.26)

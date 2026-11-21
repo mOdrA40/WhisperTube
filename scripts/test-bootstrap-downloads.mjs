@@ -142,6 +142,11 @@ test("Windows FFmpeg URL uses the versioned official mirror and keeps its approv
   const url = source.match(/Download-File "([^"]+)" \$FfmpegZip/)?.[1]
     ?.replaceAll("$FfmpegVersion", version);
   assert.equal(url, `https://github.com/GyanD/codexffmpeg/releases/download/${version}/ffmpeg-${version}-essentials_build.zip`);
-  assert.equal(version, "9.0.1");
-  assert.equal(hash, "fec81ae03971d9dd4be3ebe02e263bd2ec1d789483f931bdba5f5715e65da2e9");
+  assert.equal(version, "9.0.2");
+  assert.equal(hash, "60f467265b1e312373dbcd92200c2618a74850f98d3d078e94296bb3fa2047ba");
+  const pins = JSON.parse(readFileSync("src-tauri/runtime-pins.json", "utf8")).ffmpeg;
+  assert.equal(version, pins.version);
+  assert.equal(hash, pins.windowsArchiveSha256);
+  assert.equal(source.match(/\$FfmpegBinarySha256 = "([a-f0-9]+)"/)?.[1], pins.windowsBinarySha256);
+  assert.match(source, /Assert-Sha256 \$StagedFfmpeg \$FfmpegBinarySha256[\s\S]+Assert-Process \$StagedFfmpeg/);
 });

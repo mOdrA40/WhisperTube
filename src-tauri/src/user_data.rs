@@ -45,7 +45,7 @@ fn cleanup_targets(root: &Path) -> Vec<String> {
     errors
 }
 
-fn ensure_recovery_files_removed(root: &Path) -> Result<(), String> {
+pub(crate) fn ensure_recovery_files_removed(root: &Path) -> Result<(), String> {
     for name in [
         "whispertube.db-journal",
         "whispertube.db-wal",
@@ -54,7 +54,11 @@ fn ensure_recovery_files_removed(root: &Path) -> Result<(), String> {
         match fs::symlink_metadata(root.join(name)) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(format!("Gagal memeriksa file recovery {name}: {error}")),
-            Ok(_) => return Err(format!("Database belum dibuat ulang karena {name} belum terhapus. Tutup aplikasi lain lalu ulangi reset.")),
+            Ok(_) => {
+                return Err(format!(
+                    "Database baru tidak dibuat karena file pemulihan {name} masih ada."
+                ))
+            }
         }
     }
     Ok(())

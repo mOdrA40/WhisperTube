@@ -8,10 +8,10 @@ source "$ROOT/scripts/activate-runtime.sh"
 STAGED_CPU=""
 STAGED_FFMPEG=""
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/whispertube-linux.XXXXXX")"
-FFMPEG_VERSION="9.0.1"
-FFMPEG_SOURCE_SHA256="cf38e0e28c7e5605942c4a77755349b0145804a397af37eb1fb4c77cb237f635"
-YT_DLP_VERSION="2026.10.21"
-YT_DLP_SHA256="d8bd33fca9d5b23bd5b9952b3fca36db5c46331933fda9f598a3da14ce2c243f"
+FFMPEG_VERSION="9.0.2"
+FFMPEG_SOURCE_SHA256="8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e"
+YT_DLP_VERSION="2026.10.26"
+YT_DLP_SHA256="767ba9dce7052aa196f8b12652f433d76de128ba168966fa84b6394d5e6c6795"
 YT_DLP_TMP="$RUNTIME/.yt-dlp.tmp"
 
 cleanup() {
@@ -106,8 +106,10 @@ fi
 STAGED_FFMPEG="$(mktemp "$RUNTIME/.ffmpeg-staging.XXXXXX")"
 cp -p "$ffmpeg_prefix/bin/ffmpeg" "$STAGED_FFMPEG"
 "$STAGED_FFMPEG" -version >/dev/null
+ffmpeg_digest="$(sha256sum "$STAGED_FFMPEG" | awk '{print $1}')"
 mv -f "$STAGED_FFMPEG" "$RUNTIME/ffmpeg"
 STAGED_FFMPEG=""
+printf '%s %s\n' "$FFMPEG_VERSION" "$ffmpeg_digest" > "$RUNTIME/.ffmpeg-pin"
 chmod +x "$RUNTIME/ffmpeg"
 
 curl --fail --location --retry 3 --connect-timeout 30 \

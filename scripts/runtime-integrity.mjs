@@ -35,3 +35,21 @@ export function verifyPinnedYtDlp(root, platform) {
   if (!pin) throw new Error(`Platform runtime tidak didukung: ${platform}`);
   assertRuntimeDigest(join(root, pin.file), pin.sha256);
 }
+
+export function verifyPinnedFfmpeg(root, platform) {
+  const pin = runtimePins.ffmpeg;
+  if (platform === "windows") {
+    assertRuntimeDigest(join(root, "ffmpeg.exe"), pin.windowsBinarySha256);
+    return;
+  }
+  if (platform !== "macos" && platform !== "linux") {
+    throw new Error(`Platform runtime tidak didukung: ${platform}`);
+  }
+  const receipt = join(root, ".ffmpeg-pin");
+  if (statSync(receipt).size > 128) throw new Error("Pin build FFmpeg tidak valid.");
+  const [version, digest, ...extra] = readFileSync(receipt, "utf8").trim().split(/\s+/);
+  if (version !== pin.version || !/^[a-f0-9]{64}$/.test(digest ?? "") || extra.length) {
+    throw new Error("Pin build FFmpeg tidak cocok. Jalankan setup runtime platform ulang.");
+  }
+  assertRuntimeDigest(join(root, "ffmpeg"), digest);
+}

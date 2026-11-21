@@ -23,6 +23,6 @@
     },
     "process:allow-restart",
     "process:allow-exit",
-    "updater:default"
+    "updater:allow-check"
   ]
 }

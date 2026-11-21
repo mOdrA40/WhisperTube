@@ -1,11 +1,13 @@
 use std::{
+    collections::hash_map::DefaultHasher,
     fs::{self, File},
+    hash::{Hash, Hasher},
     path::{Path, PathBuf},
     sync::atomic::AtomicBool,
     time::SystemTime,
 };
 
-#[derive(PartialEq, Eq)]
+#[derive(Hash, PartialEq, Eq)]
 struct FileStamp {
     path: PathBuf,
     size: u64,
@@ -25,6 +27,23 @@ pub struct RuntimeSnapshot {
 }
 
 impl RuntimeSnapshot {
+    pub fn probe_fingerprint(&self) -> Option<u64> {
+        // A bundled or dev engine may load dependencies outside the
+        // executable snapshot. Only reuse a probe across jobs when its
+        // complete, verified inventory can be identified.
+        self.version.as_ref()?;
+        if self
+            .stamps
+            .iter()
+            .any(|file| file.identity.is_none() || file.modified.is_none())
+        {
+            return None;
+        }
+        let mut hash = DefaultHasher::new();
+        (&self.root, &self.version, &self.stamps).hash(&mut hash);
+        Some(hash.finish())
+    }
+
     pub fn capture(
         executable: &Path,
         version: Option<&str>,

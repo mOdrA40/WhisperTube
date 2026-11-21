@@ -382,8 +382,8 @@ the UI instead.
 
 Windows bootstrap:
 
-- yt-dlp 2026.10.21;
-- FFmpeg 9.0.1 from the pinned Gyan.dev essentials archive;
+- yt-dlp 2026.10.26;
+- FFmpeg 9.0.2 from the pinned Gyan.dev essentials archive;
 - whisper.cpp v1.9.2 CPU binaries from the pinned upstream release;
 - optional CUDA runtime installed on demand.
 
@@ -473,10 +473,14 @@ the UI warns about this and the backend runs a real capability probe before
 manual Vulkan inference.
 
 Whisper Auto and explicit GPU selection run a bounded capability probe with the
-installed engine, model, and a generated one-second silent WAV. Only
-successful probes are cached for the backend/device/engine/model signature
-during the application session. Cancellation and timeout failures are retried.
-If Auto CUDA fails, the application tries Vulkan and then CPU where available.
+installed engine, model, and a generated one-second silent WAV. Successful CUDA
+probes can be reused across jobs when the verified runtime inventory, model,
+GPU UUID and driver version match. The cache is bounded. Vulkan and Metal run
+their first probe for each job because their driver identity is not tracked.
+Auto skips devices that fail GPU initialization, lose VRAM or fail backend
+attestation during inference. It retries that chunk with the next candidate
+without losing previously completed chunks. Cancellation and unrelated
+storage or input failures end the attempt.
 If CUDA is not installed, Auto can use CPU directly; CUDA remains an optional
 performance accelerator. An explicitly selected GPU target fails closed with
 a diagnostic error.

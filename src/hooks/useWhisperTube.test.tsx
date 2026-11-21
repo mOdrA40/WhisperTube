@@ -7,6 +7,7 @@ import { useWhisperTube } from "./useWhisperTube";
 
 const services = vi.hoisted(() => ({
   getSystemStatus: vi.fn(),
+  getJobStorageUsage: vi.fn().mockResolvedValue(0),
   getTranscriptionResumeStage: vi.fn(),
   cancelJob: vi.fn(),
   listModels: vi.fn(),
@@ -321,14 +322,21 @@ describe("useWhisperTube", () => {
     act(() => { pending = result.current.startTranscription(); });
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "performance"] });
     try {
-      act(() => services.subscribeToProgress.mock.calls[0][0]({ ...result.current.progress, stage: "transcribing" }));
+      const emit = services.subscribeToProgress.mock.calls[0][0];
+      act(() => emit({ ...result.current.progress, stage: "transcribing", backend: "vulkan", percent: 64 }));
       expect(result.current.transcriptionElapsedMs).toBe(0);
+      act(() => emit({ ...result.current.progress, backend: null, percent: 60 }));
+      expect(result.current.progress).toMatchObject({ backend: "vulkan", percent: 64 });
+      act(() => emit({ ...result.current.progress, backend: "cpu", percent: 70 }));
+      expect(result.current.progress).toMatchObject({ backend: "cpu", percent: 70 });
       act(() => vi.advanceTimersByTime(999));
       expect(result.current.transcriptionElapsedMs).toBe(0);
       act(() => vi.advanceTimersByTime(1));
       expect(result.current.transcriptionElapsedMs).toBe(1000);
       await act(async () => { finish(transcript); await pending; });
       expect(vi.getTimerCount()).toBe(0);
+      expect(services.getSystemStatus).toHaveBeenCalledOnce();
+      expect(services.getJobStorageUsage).toHaveBeenCalledOnce();
       act(() => vi.advanceTimersByTime(5000));
       expect(result.current.transcriptionElapsedMs).toBe(1000);
     } finally {
@@ -565,7 +573,9 @@ describe("useWhisperTube", () => {
     expect(services.resetUserData).not.toHaveBeenCalled();
     expect(services.deleteHistory).not.toHaveBeenCalled();
     expect(services.deleteModel).not.toHaveBeenCalled();
-    expect(services.getSystemStatus).toHaveBeenCalledTimes(2);
+    expect(services.getSystemStatus).toHaveBeenCalledOnce();
+    expect(services.getJobStorageUsage).toHaveBeenCalledOnce();
+    expect(services.listHistory).toHaveBeenCalledOnce();
   });
 
   it("does not let a late update check overwrite the installing status", async () => {

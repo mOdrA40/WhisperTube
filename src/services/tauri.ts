@@ -1,9 +1,9 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { check, type DownloadEvent, type Update } from "@tauri-apps/plugin-updater";
+import { check, type Update } from "@tauri-apps/plugin-updater";
 import type {
   AppUpdateInfo,
   AppUpdateProgress,
@@ -34,7 +34,6 @@ let installingAppUpdate = false;
 let updateCheckGeneration = 0;
 let pendingUpdateCheck: Promise<AppUpdateInfo | null> | null = null;
 const UPDATE_CHECK_TIMEOUT_MS = 30_000;
-const UPDATE_DOWNLOAD_TIMEOUT_MS = 15 * 60_000;
 
 function appUpdateInfo(update: Update | null): AppUpdateInfo | null {
   if (!update) return null;
@@ -105,16 +104,7 @@ export async function installAppUpdate(onProgress: (progress: AppUpdateProgress)
     // No longer available is a normal outcome; the hook clears the stale offer.
     if (!update) return;
 
-    await invoke("begin_app_update");
-    try {
-      await installPendingUpdate(update, onProgress);
-    } finally {
-      try {
-        await invoke("end_app_update");
-      } catch (cause) {
-        console.warn("Gagal melepaskan reservation update aplikasi.", cause);
-      }
-    }
+    await installPendingUpdate(update, onProgress);
   } finally {
     await closeAppUpdate(update);
     activeAppUpdate = null;
@@ -123,24 +113,9 @@ export async function installAppUpdate(onProgress: (progress: AppUpdateProgress)
 }
 
 async function installPendingUpdate(update: Update, onProgress: (progress: AppUpdateProgress) => void) {
-
-  let downloadedBytes = 0;
-  let totalBytes: number | null = null;
-  onProgress({ downloadedBytes, totalBytes, percent: 0 });
-
-  await update.downloadAndInstall((event: DownloadEvent) => {
-    if (event.event === "Started") {
-      totalBytes = event.data.contentLength ?? null;
-    } else if (event.event === "Progress") {
-      downloadedBytes += event.data.chunkLength;
-    }
-
-    onProgress({
-      downloadedBytes,
-      totalBytes,
-      percent: totalBytes && totalBytes > 0 ? Math.min(100, (downloadedBytes / totalBytes) * 100) : 0,
-    });
-  }, { timeout: UPDATE_DOWNLOAD_TIMEOUT_MS });
+  onProgress({ downloadedBytes: 0, totalBytes: null, percent: 0 });
+  const progress = new Channel<AppUpdateProgress>(onProgress);
+  await invoke("install_app_update", { rid: update.rid, onProgress: progress });
 
   const isWindows = navigator.userAgent.toLowerCase().includes("windows");
   if (!isWindows) await relaunch();
@@ -148,6 +123,10 @@ async function installPendingUpdate(update: Update, onProgress: (progress: AppUp
 
 export function getSystemStatus() {
   return invoke<SystemStatus>("system_status");
+}
+
+export function getJobStorageUsage() {
+  return invoke<number>("job_storage_usage");
 }
 
 export function installAccelerator(backend: Exclude<BackendChoice, "auto" | "cpu" | "cuda">) {

@@ -407,13 +407,14 @@ fn normalize_engine_output(output: &mut ChunkOutput, chunk: &AudioChunk) -> Resu
 
 /// The callback runs only missing/invalid chunks. It must return only after the
 /// native child exits successfully and its complete JSON has been decoded.
-pub fn transcribe<F, C, P>(
+pub fn transcribe_with_budget<F, C, P>(
     audio: &PcmAudio,
     job_dir: &Path,
     request: &TranscriptRequest,
     mut run: F,
     cancelled: C,
     mut progress: P,
+    check_growth: impl Fn(u64) -> Result<(), String>,
 ) -> Result<CompletedTranscript, String>
 where
     F: FnMut(&Path, &Path, &str, (f64, f64)) -> Result<ChunkOutput, String>,
@@ -500,17 +501,12 @@ where
             saved.output
         } else {
             progress(start_percent, false);
+            // An interrupted child can leave scratch outputs from a prior attempt.
+            clear_chunk_output(&prefix)?;
+            let current_bytes = fs::metadata(&chunk_audio).map_or(0, |metadata| metadata.len());
+            let chunk_bytes = (chunk.end - chunk.start) * 2 + 44;
+            check_growth(chunk_bytes.saturating_sub(current_bytes))?;
             audio.write_chunk(&chunk, &chunk_audio)?;
-            // Remove previous process outputs before launching: an interrupted
-            // CLI must never be mistaken for a fresh successful transcript.
-            for extension in ["json", "txt", "srt", "vtt"] {
-                let output = prefix.with_extension(extension);
-                match fs::remove_file(output) {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(format!("Gagal membersihkan output potongan: {e}")),
-                }
-            }
             let mut output = run(
                 &chunk_audio,
                 &prefix,
@@ -518,6 +514,11 @@ where
                 (start_percent, end_percent),
             )?;
             normalize_engine_output(&mut output, &chunk)?;
+            // The source WAV and prior checkpoints are sufficient for resume.
+            // Reclaim scratch space before allocating the durable checkpoint.
+            clear_chunk_output(&prefix)?;
+            fs::remove_file(&chunk_audio)
+                .map_err(|e| format!("Gagal membersihkan audio potongan: {e}"))?;
             let saved = SavedChunk {
                 version: CHECKPOINT_VERSION,
                 key: key.clone(),
@@ -530,9 +531,11 @@ where
             if bytes.len() as u64 > MAX_CHECKPOINT_BYTES {
                 return Err("Checkpoint terlalu besar.".into());
             }
+            check_growth(bytes.len() as u64)?;
             atomic_write(&path, &bytes)?;
             // Rename in the parent job directory renews its retention age.
             // Writes inside the nested checkpoint directory alone do not.
+            check_growth(b"checkpoint".len() as u64)?;
             atomic_write(&job_dir.join(".in-progress"), b"checkpoint")?;
             saved.output
         };
@@ -571,7 +574,47 @@ where
     })
 }
 
-pub fn write_exports(prefix: &Path, result: &CompletedTranscript) -> Result<(), String> {
+fn clear_chunk_output(prefix: &Path) -> Result<(), String> {
+    for extension in ["json", "txt", "srt", "vtt"] {
+        match fs::remove_file(prefix.with_extension(extension)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("Gagal membersihkan output potongan: {e}")),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub fn transcribe<F, C, P>(
+    audio: &PcmAudio,
+    job_dir: &Path,
+    request: &TranscriptRequest,
+    run: F,
+    cancelled: C,
+    progress: P,
+) -> Result<CompletedTranscript, String>
+where
+    F: FnMut(&Path, &Path, &str, (f64, f64)) -> Result<ChunkOutput, String>,
+    C: Fn() -> bool,
+    P: FnMut(f64, bool),
+{
+    transcribe_with_budget(
+        audio,
+        job_dir,
+        request,
+        run,
+        cancelled,
+        progress,
+        |_| Ok(()),
+    )
+}
+
+pub fn write_exports_with_budget(
+    prefix: &Path,
+    result: &CompletedTranscript,
+    check_growth: impl Fn(u64) -> Result<(), String>,
+) -> Result<(), String> {
     let mut srt = String::new();
     let mut vtt = String::from("WEBVTT\n\n");
     for (index, segment) in result.segments.iter().enumerate() {
@@ -597,9 +640,15 @@ pub fn write_exports(prefix: &Path, result: &CompletedTranscript) -> Result<(), 
         if bytes.len() as u64 > MAX_TRANSCRIPT_RESULT_BYTES {
             return Err("Export gabungan terlalu besar.".into());
         }
+        check_growth(bytes.len() as u64)?;
         atomic_write(&prefix.with_extension(extension), bytes)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+fn write_exports(prefix: &Path, result: &CompletedTranscript) -> Result<(), String> {
+    write_exports_with_budget(prefix, result, |_| Ok(()))
 }
 
 /// Remove temporary PCM without discarding checkpoint text used for recovery.

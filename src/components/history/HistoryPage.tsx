@@ -170,7 +170,11 @@ export function HistoryPage({ history, hasMore, loadingMore, operationActive, on
           {history.length > 0 && (
             <button type="button" className="secondary-button" onClick={toggleAll} disabled={operationActive} aria-pressed={allSelected}>
               {allSelected ? <CheckSquareIcon aria-hidden="true" size={16} /> : <SquareIcon aria-hidden="true" size={16} />}
-              {allSelected ? t("history.clearSelection") : t("history.selectAll")}
+              {allSelected
+                ? t("history.clearSelection")
+                : history.length > MAX_DELETE_SELECTION
+                  ? t("history.selectFirst", { count: MAX_DELETE_SELECTION })
+                  : t("history.selectAll")}
             </button>
           )}
         </div>

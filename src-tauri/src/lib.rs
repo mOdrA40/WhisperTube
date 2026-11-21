@@ -1,4 +1,5 @@
 mod accelerators;
+mod app_update;
 mod archive;
 mod background_tray;
 mod checkpoint;
@@ -59,17 +60,24 @@ pub fn run() {
         .manage(state::AppState::default())
         .setup(|app| {
             let handle = app.handle().clone();
-            history::init_db(&handle).map_err(std::io::Error::other)?;
+            let history_ready = match history::init_db(&handle) {
+                Ok(_) => true,
+                Err(error) => {
+                    eprintln!("WhisperTube history startup warning: {error}");
+                    false
+                }
+            };
             if let Err(error) = cookies::cleanup_stale(&handle) {
                 eprintln!("WhisperTube cookie storage cleanup warning: {error}");
             }
-            if let Err(error) = history::cleanup_job_storage(&handle) {
-                eprintln!("WhisperTube startup cleanup warning: {error}");
+            if history_ready {
+                if let Err(error) = history::cleanup_job_storage(&handle) {
+                    eprintln!("WhisperTube startup cleanup warning: {error}");
+                }
             }
             if let Err(error) = paths::cleanup_stale_transient_storage(&handle) {
                 eprintln!("WhisperTube transient storage cleanup warning: {error}");
             }
-            paths::models_dir(&handle).map_err(std::io::Error::other)?;
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             if let Some(window) = app.get_webview_window("main") {
                 window
@@ -80,14 +88,14 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::system_status,
+            commands::job_storage_usage,
             commands::list_models,
             commands::download_model,
             commands::install_cuda_engine,
             commands::install_accelerator,
             commands::delete_model,
             commands::reset_user_data,
-            commands::begin_app_update,
-            commands::end_app_update,
+            app_update::install_app_update,
             commands::inspect_media,
             commands::inspect_local_audio,
             commands::start_transcription,

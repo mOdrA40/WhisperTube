@@ -91,7 +91,7 @@ YouTube prerequisite for installed applications: install [Node.js 22+](https://n
 - Progress reporting, cancellation, timestamped transcripts, TXT/SRT/VTT export, and local SQLite history.
 - Model and source-video download progress show transferred bytes, with cancellable model downloads.
 - Transcription progress shows CPU/GPU utilization when the platform exposes those metrics, plus download network speed.
-- Clear the current URL, preview, and transcript from the workspace; permanently delete one, multiple, or all visible history items.
+- Clear the current URL, preview, and transcript from the workspace. Permanently delete individual history items or batches of up to 100.
 - Failed/cancelled jobs automatically retain temporary progress. Retry the same source and settings to resume unfinished sections.
 - After success, the WAV is removed unless `Keep audio after completion` is enabled.
 - Native notifications distinguish successful transcription, completion with a duration note, failure, and cancellation when the main window is not focused, for both Whisper and Qwen. Cancellation is silent on Windows. Messages follow the interface language without video titles or transcript content. OS notification settings or Do Not Disturb can suppress banners; delivery failure never changes the job result.

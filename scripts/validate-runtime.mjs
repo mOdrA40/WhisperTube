@@ -1,8 +1,9 @@
 import { lstatSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join, relative, sep } from "node:path";
-import { verifyPinnedYtDlp } from "./runtime-integrity.mjs";
+import { verifyPinnedFfmpeg, verifyPinnedYtDlp } from "./runtime-integrity.mjs";
 
-const root = join(process.cwd(), "src-tauri", "runtime", process.platform === "win32" ? "windows" : process.platform === "darwin" ? "macos" : "linux");
+const platform = process.platform === "win32" ? "windows" : process.platform === "darwin" ? "macos" : "linux";
+const root = join(process.cwd(), "src-tauri", "runtime", platform);
 
 function filesUnder(directory, root = directory) {
   if (!lstatSafe(directory)?.isDirectory()) return [];
@@ -57,7 +58,7 @@ function allowed(relativePath) {
   const value = relativePath.split(sep).join("/");
   if (value === ".gitkeep") return true;
   if (process.platform === "win32" && (value === "ffmpeg.exe" || value === "yt-dlp.exe")) return true;
-  if (process.platform !== "win32" && (value === "ffmpeg" || value === "yt-dlp")) return true;
+  if (process.platform !== "win32" && (value === "ffmpeg" || value === "yt-dlp" || value === ".ffmpeg-pin")) return true;
   if (process.platform === "win32") {
     return value === "cpu/.gitkeep"
       || value === "cpu/whisper-cli.exe"
@@ -121,9 +122,10 @@ if (unexpected.length > 0) {
 }
 
 try {
-  verifyPinnedYtDlp(root, process.platform === "win32" ? "windows" : process.platform === "darwin" ? "macos" : "linux");
+  verifyPinnedYtDlp(root, platform);
+  verifyPinnedFfmpeg(root, platform);
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error));
   process.exit(1);
 }
-console.log(`Runtime ${process.platform} bundle allowlist dan pinned yt-dlp SHA-256 OK.`);
+console.log(`Runtime ${process.platform} bundle allowlist dan pin yt-dlp/FFmpeg OK.`);

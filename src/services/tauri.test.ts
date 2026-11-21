@@ -9,6 +9,7 @@ import { checkForAppUpdate, disposeAppUpdate, deleteModel, discardJobCache, down
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn().mockResolvedValue(undefined),
+  Channel: class<T> { constructor(public onmessage: (payload: T) => void) {} },
 }));
 vi.mock("@tauri-apps/plugin-process", () => ({ relaunch: vi.fn().mockResolvedValue(undefined) }));
 vi.mock("@tauri-apps/plugin-updater", () => ({ check: vi.fn() }));
@@ -98,20 +99,22 @@ describe("Tauri IPC contracts", () => {
     expect(invoke).toHaveBeenLastCalledWith("start_transcription", { request, notifications });
   });
 
-  it("reserves and releases the shared operation around app updates", async () => {
+  it("installs through the native bounded updater and forwards its progress", async () => {
     const update = {
-      downloadAndInstall: vi.fn().mockResolvedValue(undefined),
+      rid: 42,
       close: vi.fn().mockResolvedValue(undefined),
     } as unknown as Update;
     vi.mocked(check).mockResolvedValue(update);
-
-    await installAppUpdate(vi.fn());
-
-    expect(invoke).toHaveBeenNthCalledWith(1, "begin_app_update");
-    expect(update.downloadAndInstall).toHaveBeenCalledOnce();
+    const progress = vi.fn();
+    const done = { downloadedBytes: 10, totalBytes: 10, percent: 100 };
+    vi.mocked(invoke).mockImplementationOnce(async (_command, args) => {
+      (args as { onProgress: { onmessage: (payload: typeof done) => void } }).onProgress.onmessage(done);
+      return undefined as never;
+    });
+    await installAppUpdate(progress);
+    expect(invoke).toHaveBeenCalledExactlyOnceWith("install_app_update", { rid: 42, onProgress: expect.any(Object) });
+    expect(progress).toHaveBeenLastCalledWith(done);
     expect(check).toHaveBeenCalledWith({ timeout: 30_000 });
-    expect(update.downloadAndInstall).toHaveBeenCalledWith(expect.any(Function), { timeout: 900_000 });
-    expect(invoke).toHaveBeenNthCalledWith(2, "end_app_update");
     expect(relaunch).toHaveBeenCalledOnce();
   });
 });
@@ -146,9 +149,9 @@ function deferred<T>() {
 function updateFixture(version = "0.3.0") {
   return {
     version,
+    rid: version === "0.3.0" ? 41 : 42,
     body: " Update notes ",
     close: vi.fn().mockResolvedValue(undefined),
-    downloadAndInstall: vi.fn().mockResolvedValue(undefined),
   } as unknown as Update;
 }
 
@@ -205,7 +208,7 @@ describe("update resource ownership", () => {
     expect(oldUpdate.close).toHaveBeenCalledOnce();
     expect(currentUpdate.close).not.toHaveBeenCalled();
     await installAppUpdate(vi.fn());
-    expect(currentUpdate.downloadAndInstall).toHaveBeenCalledOnce();
+    expect(invoke).toHaveBeenCalledExactlyOnceWith("install_app_update", expect.objectContaining({ rid: currentUpdate.rid }));
     expect(currentUpdate.close).toHaveBeenCalledOnce();
   });
 
@@ -222,11 +225,11 @@ describe("update resource ownership", () => {
   it("keeps the installing handle alive across checks, duplicate installs and unmount", async () => {
     const download = deferred<void>();
     const update = updateFixture();
-    vi.mocked(update.downloadAndInstall).mockReturnValue(download.promise);
+    vi.mocked(invoke).mockReturnValueOnce(download.promise as Promise<never>);
     vi.mocked(check).mockResolvedValue(update);
     await checkForAppUpdate();
     const installation = installAppUpdate(vi.fn());
-    await vi.waitFor(() => expect(update.downloadAndInstall).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledOnce());
     await checkForAppUpdate();
     await expect(installAppUpdate(vi.fn())).rejects.toThrow("APP_UPDATE_IN_PROGRESS");
     await disposeAppUpdate();
@@ -235,29 +238,28 @@ describe("update resource ownership", () => {
     download.resolve();
     await installation;
     expect(update.close).toHaveBeenCalledOnce();
-    expect(invoke).toHaveBeenCalledWith("end_app_update");
+    expect(invoke).toHaveBeenCalledOnce();
   });
 
   it("releases failed downloads and obtains a fresh handle for retry", async () => {
     const failed = updateFixture();
     const retry = updateFixture();
-    vi.mocked(failed.downloadAndInstall).mockRejectedValue(new Error("download failed"));
+    vi.mocked(invoke).mockRejectedValueOnce(new Error("download failed"));
     vi.mocked(check).mockResolvedValueOnce(failed).mockResolvedValueOnce(retry);
     await expect(installAppUpdate(vi.fn())).rejects.toThrow("download failed");
     expect(failed.close).toHaveBeenCalledOnce();
-    expect(invoke).toHaveBeenCalledWith("end_app_update");
+    expect(invoke).toHaveBeenCalledOnce();
     await installAppUpdate(vi.fn());
-    expect(retry.downloadAndInstall).toHaveBeenCalledOnce();
+    expect(invoke).toHaveBeenCalledTimes(2);
     expect(retry.close).toHaveBeenCalledOnce();
   });
 
   it("releases the reservation and native handle after a download timeout", async () => {
     const update = updateFixture();
-    vi.mocked(update.downloadAndInstall).mockRejectedValueOnce(new Error("request timed out"));
+    vi.mocked(invoke).mockRejectedValueOnce(new Error("request timed out"));
     vi.mocked(check).mockResolvedValueOnce(update);
     await expect(installAppUpdate(vi.fn())).rejects.toThrow("request timed out");
-    expect(update.downloadAndInstall).toHaveBeenCalledWith(expect.any(Function), { timeout: 900_000 });
-    expect(invoke).toHaveBeenCalledWith("end_app_update");
+    expect(invoke).toHaveBeenCalledOnce();
     expect(update.close).toHaveBeenCalledOnce();
     expect(relaunch).not.toHaveBeenCalled();
   });
@@ -267,12 +269,12 @@ describe("update resource ownership", () => {
     const late = updateFixture("0.4.0");
     const refresh = deferred<Update>();
     const download = deferred<void>();
-    vi.mocked(active.downloadAndInstall).mockReturnValue(download.promise);
+    vi.mocked(invoke).mockReturnValueOnce(download.promise as Promise<never>);
     vi.mocked(check).mockResolvedValueOnce(active).mockReturnValueOnce(refresh.promise);
     await checkForAppUpdate();
     const checking = checkForAppUpdate();
     const installation = installAppUpdate(vi.fn());
-    await vi.waitFor(() => expect(active.downloadAndInstall).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledOnce());
     refresh.resolve(late);
     await checking;
     expect(late.close).toHaveBeenCalledOnce();
@@ -287,16 +289,15 @@ describe("update resource ownership", () => {
     vi.mocked(check).mockResolvedValue(update);
     vi.mocked(invoke).mockRejectedValueOnce(new Error("operation_conflict"));
     await expect(installAppUpdate(vi.fn())).rejects.toThrow("operation_conflict");
-    expect(update.downloadAndInstall).not.toHaveBeenCalled();
     expect(update.close).toHaveBeenCalledOnce();
-    expect(invoke).not.toHaveBeenCalledWith("end_app_update");
+    expect(invoke).toHaveBeenCalledOnce();
   });
 
   it("reports cleanup failures while preserving the original installation error", async () => {
     const update = updateFixture();
     const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     vi.mocked(check).mockResolvedValue(update);
-    vi.mocked(update.downloadAndInstall).mockRejectedValue(new Error("download failed"));
+    vi.mocked(invoke).mockRejectedValueOnce(new Error("download failed"));
     vi.mocked(update.close).mockRejectedValue(new Error("close failed"));
     await expect(installAppUpdate(vi.fn())).rejects.toThrow("download failed");
     expect(warning).toHaveBeenCalledWith("Gagal menutup resource update aplikasi.", expect.any(Error));

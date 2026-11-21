@@ -50,21 +50,19 @@ fn list_in(root: &Path, committed: &HashSet<PathBuf>) -> Result<Vec<JobCacheEntr
         let modified = fs::metadata(&directory)
             .and_then(|metadata| metadata.modified())
             .map_err(|e| format!("Gagal membaca waktu cache job: {e}"))?;
-        items.push(JobCacheEntry {
-            id,
-            title,
-            source_url,
-            bytes,
-            modified_at: chrono::DateTime::<chrono::Utc>::from(modified).to_rfc3339(),
-        });
+        items.push((
+            modified,
+            JobCacheEntry {
+                id,
+                title,
+                source_url,
+                bytes,
+                modified_at: history::utc_timestamp(modified)?,
+            },
+        ));
     }
-    items.sort_unstable_by(|left, right| {
-        right
-            .modified_at
-            .cmp(&left.modified_at)
-            .then(left.id.cmp(&right.id))
-    });
-    Ok(items)
+    items.sort_unstable_by(|left, right| right.0.cmp(&left.0).then(left.1.id.cmp(&right.1.id)));
+    Ok(items.into_iter().map(|(_, item)| item).collect())
 }
 
 fn discard_in(root: &Path, committed: &HashSet<PathBuf>, id: &str) -> Result<(), String> {
@@ -112,7 +110,10 @@ mod tests {
         let committed = HashSet::from([fs::canonicalize(root.join(&ids[0])).unwrap()]);
         let listed = list_in(&root, &committed).unwrap();
         let before = history::storage_tree_bytes(&root).unwrap();
-        assert!(crate::transcription::ensure_job_storage_budget(before, before).is_err());
+        let active = root.join(&ids[2]);
+        let budget = history::JobStorageBudget::new(&root, &active, before).unwrap();
+        assert_eq!(budget.remaining().unwrap(), 0);
+        assert!(budget.check_growth(1).is_err());
         assert_eq!(listed.len(), 2);
         assert!(listed
             .iter()
@@ -120,11 +121,15 @@ mod tests {
         assert!(discard_in(&root, &committed, &ids[0]).is_err());
         assert!(discard_in(&root, &committed, "../outside").is_err());
         discard_in(&root, &committed, &ids[1]).unwrap();
-        crate::transcription::ensure_job_storage_budget(
-            history::storage_tree_bytes(&root).unwrap(),
-            before,
-        )
-        .unwrap();
+        let budget = history::JobStorageBudget::new(&root, &active, before).unwrap();
+        assert_eq!(budget.remaining().unwrap(), 14);
+        budget.check_growth(10).unwrap();
+        let checkpoint = active.join("checkpoint.json");
+        fs::write(&checkpoint, b"checkpoint").unwrap();
+        assert_eq!(budget.remaining().unwrap(), 4);
+        assert!(budget.check_growth(5).is_err());
+        fs::remove_file(checkpoint).unwrap();
+        assert_eq!(budget.remaining().unwrap(), 14);
         assert!(!root.join(&ids[1]).exists());
         assert_eq!(
             fs::read(root.join(&ids[0]).join("audio.wav")).unwrap(),

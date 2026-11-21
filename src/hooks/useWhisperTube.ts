@@ -12,6 +12,7 @@ import {
   disposeAppUpdate,
   downloadModel,
   exportTranscriptFile,
+  getJobStorageUsage,
   getSystemStatus,
   getTranscriptionResumeStage,
   installAccelerator,
@@ -69,6 +70,7 @@ const initialProgress: ProgressPayload = {
 };
 
 const COOKIES_PATH_STORAGE_KEY = "whispertube.cookiesPath";
+type RefreshScope = "all" | "history" | "models" | "storage";
 
 function localizedMetadataError(cause: unknown, t: Translate) {
   const code = errorCode(cause);
@@ -233,18 +235,26 @@ export function useWhisperTube() {
                 system.accelerators.some((accelerator) => accelerator.installed)),
   );
 
-  const refreshSystem = useCallback(async () => {
+  const refreshSystem = useCallback(async (scope: RefreshScope = "all") => {
     if (refreshingSystemRef.current) return;
     refreshingSystemRef.current = true;
     setRefreshingSystem(true);
     try {
-      const [systemResult, modelsResult, historyResult] = await Promise.allSettled([
-        getSystemStatus(),
-        listModels(),
-        listHistory(),
+      const historyRequest = scope === "all" || scope === "history"
+        ? listHistory()
+        : Promise.resolve(null);
+      const [systemResult, modelsResult, historyResult, storageResult] = await Promise.allSettled([
+        scope === "all" ? getSystemStatus() : Promise.resolve(null),
+        scope === "all" || scope === "models" ? listModels() : Promise.resolve(null),
+        historyRequest,
+        // History and storage each reserve native storage access. Sequence
+        // them so they cannot reject one another during reconciliation.
+        scope === "history" || scope === "storage"
+          ? historyRequest.then(getJobStorageUsage, getJobStorageUsage)
+          : Promise.resolve(null),
       ]);
 
-      if (systemResult.status === "fulfilled") {
+      if (systemResult.status === "fulfilled" && systemResult.value !== null) {
         const nextSystem = systemResult.value;
         setSystem(nextSystem);
         setSystemChecked(true);
@@ -256,14 +266,18 @@ export function useWhisperTube() {
         }
       }
       if (systemResult.status === "rejected") setSystemChecked(true);
-      if (modelsResult.status === "fulfilled") setModels(modelsResult.value);
-      if (historyResult.status === "fulfilled") {
+      if (modelsResult.status === "fulfilled" && modelsResult.value !== null) setModels(modelsResult.value);
+      if (historyResult.status === "fulfilled" && historyResult.value !== null) {
         setHistory(historyResult.value.items);
         setHistoryHasMore(historyResult.value.hasMore);
         setHistoryTotalCount(historyResult.value.totalCount);
       }
+      if (storageResult.status === "fulfilled" && storageResult.value !== null) {
+        const bytes = storageResult.value;
+        setSystem((previous) => previous && { ...previous, jobStorageBytes: bytes });
+      }
 
-      const failures = [systemResult, modelsResult, historyResult]
+      const failures = [systemResult, modelsResult, historyResult, storageResult]
         .filter((result): result is PromiseRejectedResult => result.status === "rejected")
         .map((result) => friendlyError(result.reason));
       if (failures.length > 0) throw new Error(failures.join(" "));
@@ -281,9 +295,9 @@ export function useWhisperTube() {
     }
   }, [refreshSystem]);
 
-  const refreshAfterSuccessfulOperation = useCallback(async () => {
+  const refreshAfterSuccessfulOperation = useCallback(async (scope: RefreshScope = "all") => {
     try {
-      await refreshSystem();
+      await refreshSystem(scope);
     } catch (cause) {
       setError(t("error.operationSucceededRefreshFailed", { detail: friendlyError(cause) }));
     }
@@ -300,9 +314,9 @@ export function useWhisperTube() {
     }
   }, []);
 
-  const refreshAfterMutationFailure = useCallback(async () => {
+  const refreshAfterMutationFailure = useCallback(async (scope: RefreshScope = "all") => {
     try {
-      await refreshSystem();
+      await refreshSystem(scope);
     } catch {
       // Preserve the mutation error: refreshSystem already applied every fulfilled result.
     }
@@ -344,7 +358,9 @@ export function useWhisperTube() {
         setTranscriptionElapsedMs(0);
         setTranscriptionTimerActive(true);
       }
-      setProgress(payload);
+      setProgress((previous) => payload.stage === "transcribing" && previous.stage === "transcribing"
+        ? { ...payload, backend: payload.backend ?? previous.backend, percent: Math.max(previous.percent, payload.percent) }
+        : payload);
       setNetworkSpeedBytesPerSecond(
         payload.stage === "downloading" ? payload.networkBytesPerSecond : null,
       );
@@ -635,7 +651,7 @@ export function useWhisperTube() {
     }));
     try {
       await downloadModel(id, computeTargetId);
-      await refreshAfterSuccessfulOperation();
+      await refreshAfterSuccessfulOperation(isQwenModel(id) ? "all" : "models");
     } catch (cause) {
       const message = friendlyError(cause);
       if (!message.toLowerCase().includes("dibatalkan")) setError(message);
@@ -656,7 +672,7 @@ export function useWhisperTube() {
     try {
       await deleteModel(id);
       if (modelId === id) setModelId("base");
-      await refreshAfterSuccessfulOperation();
+      await refreshAfterSuccessfulOperation("models");
     } catch (cause) {
       setError(friendlyError(cause));
       throw cause;
@@ -827,7 +843,7 @@ export function useWhisperTube() {
       setCurrentResult(completedResult);
       setRetrySource(null);
       setSearchQuery("");
-      await refreshAfterSuccessfulOperation();
+      await refreshAfterSuccessfulOperation("history");
     } catch (cause) {
       setRetrySource(JSON.stringify([metadata.webpageUrl, metadata.duration]));
       const message = friendlyError(cause);
@@ -915,13 +931,13 @@ export function useWhisperTube() {
       setJobCache((previous) => previous?.filter((item) => item.id !== id) ?? null);
     } catch (cause) {
       setError(friendlyError(cause));
-      await refreshAfterMutationFailure();
+      await refreshAfterMutationFailure("storage");
       throw cause;
     } finally {
       setHistoryOperation(null);
       setResumeRevision((revision) => revision + 1);
     }
-    await refreshAfterSuccessfulOperation();
+    await refreshAfterSuccessfulOperation("storage");
   }
 
   async function handleDeleteHistory(ids: number[]) {
@@ -934,7 +950,7 @@ export function useWhisperTube() {
         setCurrentResult(null);
         setSearchQuery("");
       }
-      await refreshAfterSuccessfulOperation();
+      await refreshAfterSuccessfulOperation("history");
       if (outcome.cleanupWarnings.length > 0) {
         setError((previous) => [previous, ...outcome.cleanupWarnings].filter(Boolean).join("\n"));
       }
@@ -976,7 +992,7 @@ export function useWhisperTube() {
         try { setCurrentResult(await loadHistory(result.historyId)); }
         catch (cause) { setError(friendlyError(cause)); }
       }
-      await refreshAfterSuccessfulOperation();
+      await refreshAfterSuccessfulOperation("history");
       if (outcome.cleanupWarnings.length) {
         setError((previous) => [previous, ...outcome.cleanupWarnings].filter(Boolean).join("\n"));
       }

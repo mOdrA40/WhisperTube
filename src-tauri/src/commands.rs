@@ -112,6 +112,17 @@ pub async fn system_status(app: AppHandle) -> CommandResult<SystemStatus> {
 }
 
 #[tauri::command]
+pub async fn job_storage_usage(app: AppHandle, state: State<'_, AppState>) -> CommandResult<u64> {
+    let operation = OperationGuard::reserve_history_read(&state)?;
+    Ok(tokio::task::spawn_blocking(move || {
+        let _operation = operation;
+        history::job_storage_bytes(&app)
+    })
+    .await
+    .map_err(|error| format!("Pemeriksaan penyimpanan job gagal: {error}"))??)
+}
+
+#[tauri::command]
 pub async fn list_models(app: AppHandle) -> CommandResult<Vec<ModelInfo>> {
     Ok(
         tokio::task::spawn_blocking(move || models::list_models(&app))
@@ -195,16 +206,6 @@ pub async fn reset_user_data(app: AppHandle, state: State<'_, AppState>) -> Comm
     })
     .await
     .map_err(|error| format!("Reset data gagal dijalankan: {error}"))??)
-}
-
-#[tauri::command]
-pub fn begin_app_update(state: State<'_, AppState>) -> CommandResult<()> {
-    Ok(OperationGuard::reserve_app_update(&state)?)
-}
-
-#[tauri::command]
-pub fn end_app_update(state: State<'_, AppState>) -> CommandResult<()> {
-    Ok(OperationGuard::release_app_update(&state)?)
 }
 
 #[tauri::command(rename_all = "camelCase")]

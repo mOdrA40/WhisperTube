@@ -4,6 +4,13 @@ WhisperTube uses the Tauri v2 updater. The updater reads a static latest.json
 manifest from the stable GitHub Release and verifies each artifact with the
 embedded updater public key before installation.
 
+The app streams the package to a private temporary file and limits the
+transfer to 256 MiB and 15 minutes. It verifies the mapped file with the
+embedded Minisign key before handing it to Tauri's platform installer.
+The same size limit applies when the server omits Content-Length. The
+installer remains unavailable when the package is incomplete or its
+signature fails verification.
+
 ## Application release flow
 
 1. Set the same application version in package.json,

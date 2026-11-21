@@ -11,10 +11,11 @@ $CpuTransactionId = [guid]::NewGuid().ToString("N")
 $StagingCpu = Join-Path $Runtime (".cpu-staging-" + $CpuTransactionId)
 $CpuBackup = Join-Path $Runtime (".cpu-backup-" + $CpuTransactionId)
 
-$YtDlpVersion = "2026.10.21"
-$YtDlpSha256 = "33121d192d706e62f684a06f80918e3f3a8ba52ac3a65213b6951c39c7d9f555"
-$FfmpegVersion = "9.0.1"
-$FfmpegSha256 = "fec81ae03971d9dd4be3ebe02e263bd2ec1d789483f931bdba5f5715e65da2e9"
+$YtDlpVersion = "2026.10.26"
+$YtDlpSha256 = "f5389d3698ecde4ef06f4e6b1ce0294fe9ac1396228c8990b8d3416d6d177a7d"
+$FfmpegVersion = "9.0.2"
+$FfmpegSha256 = "60f467265b1e312373dbcd92200c2618a74850f98d3d078e94296bb3fa2047ba"
+$FfmpegBinarySha256 = "3256173f3f8bffd7df12227c68adf68025edb1832273a9530688a7bb1ed8edec"
 $WhisperVersion = "v1.9.2"
 # Matches the official whisper.cpp v1.9.2 asset.
 $WhisperCpuSha256 = "49dcc16de826f20bd53d44f947a1ae49dfa81f86cad67a64d80820cb192d674a"
@@ -89,6 +90,7 @@ try {
     if (-not $FfmpegExe) { throw "ffmpeg.exe tidak ditemukan setelah extract." }
     $StagedFfmpeg = Join-Path $Staging "ffmpeg.exe"
     Copy-Item -LiteralPath $FfmpegExe.FullName -Destination $StagedFfmpeg -Force
+    Assert-Sha256 $StagedFfmpeg $FfmpegBinarySha256 "FFmpeg binary"
     Assert-Process $StagedFfmpeg @("-version") "FFmpeg"
     Move-Item -LiteralPath $StagedFfmpeg -Destination (Join-Path $Runtime "ffmpeg.exe") -Force
 

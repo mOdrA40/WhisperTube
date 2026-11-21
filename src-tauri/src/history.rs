@@ -1,4 +1,3 @@
-use chrono::Utc;
 use rusqlite::{params, Connection};
 use std::{
     collections::{BTreeSet, HashSet},
@@ -24,6 +23,12 @@ const ORPHAN_JOB_GRACE: Duration = Duration::from_secs(24 * 60 * 60);
 const HISTORY_PAGE_SIZE: usize = 100;
 pub const MAX_JOB_STORAGE_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 const STORAGE_USAGE_CACHE_TTL: Duration = Duration::from_secs(5);
+
+pub(crate) fn utc_timestamp(value: SystemTime) -> Result<String, String> {
+    time::OffsetDateTime::from(value)
+        .format(&time::format_description::well_known::Rfc3339)
+        .map_err(|error| format!("Waktu history tidak dapat diformat: {error}"))
+}
 
 struct StorageUsageCache {
     bytes: u64,
@@ -58,6 +63,43 @@ pub(crate) fn storage_tree_bytes(path: &Path) -> Result<u64, String> {
         }
     }
     Ok(total)
+}
+
+/// Transcription owns the storage reservation. Hold the byte count for other
+/// jobs fixed and recheck only the job that is producing files.
+pub(crate) struct JobStorageBudget<'a> {
+    job: &'a Path,
+    limit: u64,
+}
+
+impl<'a> JobStorageBudget<'a> {
+    pub fn new(root: &Path, job: &'a Path, limit: u64) -> Result<Self, String> {
+        let other_jobs = storage_tree_bytes(root)?.saturating_sub(storage_tree_bytes(job)?);
+        if other_jobs > limit {
+            return Err(storage_quota_error());
+        }
+        Ok(Self {
+            job,
+            limit: limit - other_jobs,
+        })
+    }
+
+    pub fn remaining(&self) -> Result<u64, String> {
+        self.limit
+            .checked_sub(storage_tree_bytes(self.job)?)
+            .ok_or_else(storage_quota_error)
+    }
+
+    pub fn check_growth(&self, growth: u64) -> Result<(), String> {
+        if growth > self.remaining()? {
+            return Err(storage_quota_error());
+        }
+        Ok(())
+    }
+}
+
+fn storage_quota_error() -> String {
+    "storage_quota_exceeded:Penyimpanan job WhisperTube tidak cukup. Hapus cache atau history yang tidak diperlukan.".into()
 }
 
 pub fn job_storage_bytes(app: &AppHandle) -> Result<u64, String> {
@@ -99,10 +141,21 @@ fn configure_connection(conn: &Connection) -> Result<(), String> {
 
 pub fn init_db(app: &AppHandle) -> Result<PathBuf, String> {
     let db_path = database_path(app)?;
-    let conn = Connection::open(&db_path).map_err(|e| format!("Gagal membuka database: {e}"))?;
-    configure_connection(&conn)?;
-    initialize_schema(&conn)?;
+    initialize_database_file(&db_path)?;
     Ok(db_path)
+}
+
+fn initialize_database_file(db_path: &Path) -> Result<(), String> {
+    if db_path
+        .symlink_metadata()
+        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    {
+        let root = db_path.parent().ok_or("Folder database tidak valid.")?;
+        crate::user_data::ensure_recovery_files_removed(root)?;
+    }
+    let conn = Connection::open(db_path).map_err(|e| format!("Gagal membuka database: {e}"))?;
+    configure_connection(&conn)?;
+    initialize_schema(&conn)
 }
 
 pub(crate) fn initialize_schema(conn: &Connection) -> Result<(), String> {
@@ -158,9 +211,17 @@ pub(crate) fn initialize_schema(conn: &Connection) -> Result<(), String> {
 }
 
 pub(crate) fn open_connection(app: &AppHandle) -> Result<Connection, String> {
-    let conn = Connection::open(database_path(app)?)
-        .map_err(|e| format!("Gagal membuka history database: {e}"))?;
+    // A failed startup or reset must not silently create a database beside an
+    // old recovery journal. Initialization is owned by startup and reset.
+    let conn = Connection::open_with_flags(database_path(app)?, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .map_err(|e| format!("Gagal membuka history database. Periksa izin penyimpanan atau buka pengaturan pemulihan: {e}"))?;
     configure_connection(&conn)?;
+    let version: i64 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(|e| format!("History database tidak dapat dibaca. Periksa cadangan data: {e}"))?;
+    if version < 1 {
+        initialize_schema(&conn)?;
+    }
     Ok(conn)
 }
 
@@ -187,7 +248,7 @@ where
             request.title,
             request.channel,
             request.url,
-            Utc::now().to_rfc3339(),
+            utc_timestamp(SystemTime::now())?,
             request.duration,
             language,
             request.model_id,
@@ -248,6 +309,10 @@ pub fn list_history(app: &AppHandle, before_id: Option<i64>) -> Result<HistoryPa
 
 pub fn load_history(app: &AppHandle, id: i64) -> Result<TranscriptResult, String> {
     let conn = open_connection(app)?;
+    load_history_in(&conn, &crate::paths::jobs_dir(app)?, id)
+}
+
+fn load_history_in(conn: &Connection, root: &Path, id: i64) -> Result<TranscriptResult, String> {
     let result_path: String = conn
         .query_row(
             "SELECT result_path FROM history WHERE id = ?1",
@@ -255,10 +320,10 @@ pub fn load_history(app: &AppHandle, id: i64) -> Result<TranscriptResult, String
             |row| row.get(0),
         )
         .map_err(|e| format!("History tidak ditemukan: {e}"))?;
-    let job_dir = job_dir_for_result(app, &result_path)?
+    let job_dir = job_dir_for_result_in(root, &result_path)?
         .ok_or_else(|| "File transcript history tidak ditemukan.".to_string())?;
-    if crate::history_files::is_deleted(&conn, id, "transcript")? {
-        return crate::history_files::metadata_only_result(&conn, id, &job_dir);
+    if crate::history_files::is_deleted(conn, id, "transcript")? {
+        return crate::history_files::metadata_only_result(conn, id, &job_dir);
     }
     let safe_result_path = job_dir.join("result.json");
     let canonical_result = fs::canonicalize(&safe_result_path)
@@ -275,12 +340,25 @@ pub fn load_history(app: &AppHandle, id: i64) -> Result<TranscriptResult, String
         .read_to_end(&mut bytes)
         .map_err(|e| format!("Gagal membaca file history: {e}"))?;
     let mut result = decode_history_result(&bytes)?;
+    result.history_id = id;
     result.transcript_available = true;
-    if crate::history_files::is_deleted(&conn, id, "audio")?
-        || !crate::paths::is_regular_file(&job_dir.join("audio.wav"))
-    {
-        result.audio_path = None;
-    }
+    result.txt_path = job_dir
+        .join("transcript.txt")
+        .to_string_lossy()
+        .into_owned();
+    result.srt_path = job_dir
+        .join("transcript.srt")
+        .to_string_lossy()
+        .into_owned();
+    result.vtt_path = job_dir
+        .join("transcript.vtt")
+        .to_string_lossy()
+        .into_owned();
+    let audio = job_dir.join("audio.wav");
+    result.audio_path = (result.audio_path.is_some()
+        && !crate::history_files::is_deleted(conn, id, "audio")?
+        && crate::paths::is_regular_file(&audio))
+    .then(|| audio.to_string_lossy().into_owned());
     Ok(result)
 }
 
@@ -299,14 +377,9 @@ fn decode_history_result(bytes: &[u8]) -> Result<TranscriptResult, String> {
     Ok(result)
 }
 
-fn job_dir_for_result(app: &AppHandle, result_path: &str) -> Result<Option<PathBuf>, String> {
-    let jobs_root = crate::paths::jobs_dir(app)?;
-    job_dir_for_result_in(&jobs_root, result_path)
-}
-
 // A result file is written inside the SQLite transaction. After a crash it
 // can exist without a committed row, so file existence cannot decide whether
-// a checkpoint job is finished.
+// a checkpoint job is finished. Pending deletions must also never be resumed.
 pub fn referenced_job_directories(app: &AppHandle) -> Result<HashSet<PathBuf>, String> {
     let conn = open_connection(app)?;
     // Prepare the private roots once, rather than chmod/sync both for every row.
@@ -318,41 +391,187 @@ fn referenced_job_directories_in(
     conn: &Connection,
     jobs_root: &Path,
 ) -> Result<HashSet<PathBuf>, String> {
-    let mut statement = conn
-        .prepare("SELECT result_path FROM history")
-        .map_err(|e| format!("Gagal membaca referensi history untuk resume: {e}"))?;
-    let paths = statement
-        .query_map([], |row| row.get::<_, String>(0))
-        .map_err(|e| format!("Gagal query referensi history untuk resume: {e}"))?;
-    let mut directories = HashSet::new();
-    for path in paths {
-        let path = path.map_err(|e| format!("Path history untuk resume tidak valid: {e}"))?;
-        if let Some(directory) = job_dir_for_result_in(jobs_root, &path)? {
-            directories.insert(directory);
+    referenced_job_directories_before(conn, jobs_root, None)
+}
+
+pub(crate) fn resume_exclusions(
+    app: &AppHandle,
+    jobs_root: &Path,
+    deadline: Instant,
+) -> Result<Option<HashSet<PathBuf>>, String> {
+    let conn = Connection::open_with_flags(
+        database_path(app)?,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(|e| format!("Gagal membuka history untuk resume: {e}"))?;
+    conn.busy_timeout(deadline.saturating_duration_since(Instant::now()))
+        .map_err(|e| format!("Gagal mengatur timeout history untuk resume: {e}"))?;
+    let result = referenced_job_directories_before(&conn, jobs_root, Some(deadline));
+    if Instant::now() >= deadline {
+        return Ok(None);
+    }
+    result.map(Some)
+}
+
+fn referenced_job_directories_before(
+    conn: &Connection,
+    jobs_root: &Path,
+    deadline: Option<Instant>,
+) -> Result<HashSet<PathBuf>, String> {
+    let root = canonical_jobs_root(jobs_root)?;
+    let (mut directories, warnings) = inventory_history_directories_before(conn, &root, deadline)?;
+    for warning in warnings {
+        eprintln!("WhisperTube history reference warning: {warning}");
+    }
+    for name in pending_job_names(conn)? {
+        if direct_child_name(&name) {
+            // The normal spelling matches the canonical direct child. In case
+            // of an invalid entry, the cache caller still validates its path.
+            directories.insert(root.join(name));
         }
     }
     Ok(directories)
+}
+
+fn inventory_history_directories(
+    conn: &Connection,
+    canonical_root: &Path,
+) -> Result<(HashSet<PathBuf>, Vec<String>), String> {
+    inventory_history_directories_before(conn, canonical_root, None)
+}
+
+fn inventory_history_directories_before(
+    conn: &Connection,
+    canonical_root: &Path,
+    deadline: Option<Instant>,
+) -> Result<(HashSet<PathBuf>, Vec<String>), String> {
+    let mut statement = conn
+        .prepare("SELECT id, result_path FROM history")
+        .map_err(|e| format!("Gagal membaca referensi history untuk resume: {e}"))?;
+    let mut rows = statement
+        .query([])
+        .map_err(|e| format!("Gagal query referensi history untuk resume: {e}"))?;
+    let mut directories = HashSet::new();
+    let mut warnings = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("Gagal membaca baris history: {e}"))?
+    {
+        if deadline.is_some_and(|end| Instant::now() >= end) {
+            return Err("Pemeriksaan riwayat untuk resume melewati batas waktu.".into());
+        }
+        let id: i64 = row
+            .get(0)
+            .map_err(|e| format!("ID history tidak valid: {e}"))?;
+        let path = row
+            .get::<_, String>(1)
+            .map_err(|e| format!("Path history tidak valid: {e}"));
+        match path.and_then(|path| {
+            if let Some(job) = portable_job_id(&path).filter(|_| deadline.is_some()) {
+                // Resume validates each candidate's containment independently.
+                // Build exclusions without reopening every archived job.
+                return Ok(Some(canonical_root.join(job)));
+            }
+            resolve_job_directory(canonical_root, &path)
+        }) {
+            Ok(Some(directory)) => {
+                directories.insert(directory);
+            }
+            Ok(None) => {}
+            Err(error) => warnings.push(format!("History {id}: {error}")),
+        }
+    }
+    Ok((directories, warnings))
+}
+
+fn canonical_jobs_root(root: &Path) -> Result<PathBuf, String> {
+    fs::canonicalize(root).map_err(|e| format!("Gagal memvalidasi history storage: {e}"))
+}
+
+fn direct_child_name(name: &str) -> bool {
+    let mut parts = Path::new(name).components();
+    matches!(parts.next(), Some(std::path::Component::Normal(part)) if part == name)
+        && parts.next().is_none()
+}
+
+// The UUID survives a relocated backup. Retain the absolute representation
+// written to SQLite so older versions still read newly written local jobs.
+fn portable_job_id(result_path: &str) -> Option<&str> {
+    let mut parts = result_path.rsplitn(4, ['/', '\\']);
+    if parts.next()? != "result.json" {
+        return None;
+    }
+    let id = parts.next()?;
+    if parts.next()? != "jobs" {
+        return None;
+    }
+    if let Some(prefix) = parts.next() {
+        let is_absolute = prefix.is_empty()
+            || prefix.starts_with('/')
+            || prefix.starts_with("\\\\")
+            || (prefix.as_bytes().get(1) == Some(&b':')
+                && prefix.as_bytes()[0].is_ascii_alphabetic()
+                && (prefix.len() == 2 || prefix[2..].starts_with(['/', '\\'])));
+        if !is_absolute
+            || prefix.contains('\0')
+            || prefix
+                .split(['/', '\\'])
+                .any(|part| matches!(part, "." | ".."))
+        {
+            return None;
+        }
+    }
+    let is_canonical_uuid = uuid::Uuid::parse_str(id).is_ok_and(|uuid| uuid.to_string() == id);
+    is_canonical_uuid.then_some(id)
 }
 
 pub(crate) fn job_dir_for_result_in(
     jobs_root: &Path,
     result_path: &str,
 ) -> Result<Option<PathBuf>, String> {
-    let canonical_jobs_root = fs::canonicalize(jobs_root)
-        .map_err(|e| format!("Gagal memvalidasi history storage: {e}"))?;
-    let result_path = PathBuf::from(result_path);
+    resolve_job_directory(&canonical_jobs_root(jobs_root)?, result_path)
+}
+
+fn resolve_job_directory(root: &Path, stored: &str) -> Result<Option<PathBuf>, String> {
+    let result_path = Path::new(stored);
+    if let Some(id) = portable_job_id(stored) {
+        return resolve_existing_job(root, &root.join(id));
+    }
     if result_path.file_name() != Some(OsStr::new("result.json")) {
         return Err("Path history tidak valid.".into());
     }
     let job_dir = result_path
         .parent()
         .ok_or_else(|| "Folder job history tidak valid.".to_string())?;
-    let canonical_job_dir = match fs::canonicalize(job_dir) {
+    if !result_path.has_root() && job_dir.to_str().is_some_and(direct_child_name) {
+        return resolve_existing_job(root, &root.join(job_dir));
+    }
+    let parent = job_dir.parent().ok_or("Path history tidak valid.")?;
+    if parent != root && !fs::canonicalize(parent).is_ok_and(|path| path == root) {
+        return Err("Folder history berada di luar storage WhisperTube.".into());
+    }
+    let name = job_dir
+        .file_name()
+        .ok_or("Nama folder history tidak valid.")?;
+    resolve_existing_job(root, &root.join(name))
+}
+
+fn resolve_existing_job(root: &Path, path: &Path) -> Result<Option<PathBuf>, String> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("Gagal memeriksa folder job history: {error}")),
+        Ok(meta) if !meta.is_dir() || meta.file_type().is_symlink() => {
+            return Err("Folder history bukan direktori biasa.".into());
+        }
+        Ok(_) => {}
+    }
+    let canonical_job_dir = match fs::canonicalize(path) {
         Ok(path) => path,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(format!("Gagal memvalidasi folder job history: {error}")),
     };
-    if canonical_job_dir.parent() != Some(canonical_jobs_root.as_path()) {
+    if canonical_job_dir.parent() != Some(root) || canonical_job_dir.file_name() != path.file_name()
+    {
         return Err("Folder history berada di luar storage WhisperTube.".into());
     }
     Ok(Some(canonical_job_dir))
@@ -502,28 +721,16 @@ fn cleanup_committed_job_artifacts(job_dir: &Path) -> Result<(), String> {
 }
 
 pub(crate) fn cleanup_job_storage_in(conn: &Connection, root: &Path) -> Result<(), String> {
-    let canonical_root =
-        fs::canonicalize(root).map_err(|e| format!("Gagal memvalidasi job storage: {e}"))?;
+    let canonical_root = canonical_jobs_root(root)?;
     let mut warnings = cleanup_pending_deletions(conn, root)?;
     warnings.extend(crate::history_files::cleanup_pending(conn, root)?);
     let removed_transcripts = crate::history_files::removed_transcript_directories(conn, root)?;
-    let mut statement = conn
-        .prepare("SELECT result_path FROM history")
-        .map_err(|e| format!("Gagal membaca referensi history: {e}"))?;
-    let rows = statement
-        .query_map([], |row| row.get::<_, String>(0))
-        .map_err(|e| format!("Gagal membaca referensi file history: {e}"))?;
-    let history_paths = rows
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("Gagal membaca path history: {e}"))?;
     // The committed row owns its directory even when result.json is missing,
     // corrupt or unreadable. Resolve the parent independently of that file.
-    let mut committed_jobs = HashSet::new();
-    for path in history_paths {
-        if let Some(directory) = job_dir_for_result_in(&canonical_root, &path)? {
-            committed_jobs.insert(directory);
-        }
-    }
+    let (committed_jobs, reference_warnings) =
+        inventory_history_directories(conn, &canonical_root)?;
+    let inventory_complete = reference_warnings.is_empty();
+    warnings.extend(reference_warnings);
     let entries = fs::read_dir(root).map_err(|e| format!("Gagal membaca job storage: {e}"))?;
     for entry in entries {
         let entry = entry.map_err(|e| format!("Gagal membaca entry job storage: {e}"))?;
@@ -551,7 +758,7 @@ pub(crate) fn cleanup_job_storage_in(conn: &Connection, root: &Path) -> Result<(
             }
             continue;
         }
-        if is_older_than(&path, ORPHAN_JOB_GRACE) {
+        if inventory_complete && is_older_than(&path, ORPHAN_JOB_GRACE) {
             if let Err(error) = fs::remove_dir_all(&path) {
                 warnings.push(format!(
                     "Gagal membersihkan job storage orphan {}: {error}",
@@ -617,37 +824,33 @@ fn queue_history_deletion(
     Ok(ids.into_iter().collect())
 }
 
+fn pending_job_names(conn: &Connection) -> Result<Vec<String>, String> {
+    conn.prepare("SELECT job_name FROM pending_job_deletions")
+        .and_then(|mut statement| {
+            statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .map_err(|e| format!("Gagal membaca intent penghapusan: {e}"))
+}
+
 fn cleanup_pending_deletions(conn: &Connection, root: &Path) -> Result<Vec<String>, String> {
-    let root = fs::canonicalize(root).map_err(|e| format!("Gagal memvalidasi job storage: {e}"))?;
-    let names = conn
-        .prepare("SELECT job_name FROM pending_job_deletions")
-        .and_then(|mut statement| {
-            statement
-                .query_map([], |row| row.get::<_, String>(0))?
-                .collect::<Result<Vec<_>, _>>()
-        })
-        .map_err(|e| format!("Gagal membaca intent penghapusan: {e}"))?;
-    let references = conn
-        .prepare("SELECT result_path FROM history")
-        .and_then(|mut statement| {
-            statement
-                .query_map([], |row| row.get::<_, String>(0))?
-                .collect::<Result<Vec<_>, _>>()
-        })
-        .map_err(|e| format!("Gagal membaca referensi history: {e}"))?;
-    let mut live_dirs = HashSet::new();
-    for path in references {
-        if let Some(dir) = job_dir_for_result_in(&root, &path)? {
-            live_dirs.insert(dir);
-        }
+    let names = pending_job_names(conn)?;
+    if names.is_empty() {
+        return Ok(vec![]);
+    }
+    let root = canonical_jobs_root(root)?;
+    let (live_dirs, reference_warnings) = inventory_history_directories(conn, &root)?;
+    if !reference_warnings.is_empty() {
+        return Ok(vec![format!(
+            "Pembersihan history tertunda karena kepemilikan job tidak dapat diverifikasi: {}",
+            reference_warnings.join("; ")
+        )]);
     }
     let mut warnings = Vec::new();
     for name in names {
         let cleanup = || -> Result<(), String> {
-            let mut components = Path::new(&name).components();
-            if !matches!(components.next(), Some(std::path::Component::Normal(_)))
-                || components.next().is_some()
-            {
+            if !direct_child_name(&name) {
                 return Err("Nama folder pada intent penghapusan tidak aman.".into());
             }
             let target = root.join(&name);
@@ -993,6 +1196,28 @@ mod tests {
     }
 
     #[test]
+    fn startup_preserves_corrupt_database_and_orphaned_recovery_files() {
+        let root = tempfile::tempdir().unwrap();
+        let db = root.path().join("whispertube.db");
+        let journal = root.path().join("whispertube.db-journal");
+        let previous = b"existing recovery data";
+        fs::write(&journal, previous).unwrap();
+        assert!(super::initialize_database_file(&db).is_err());
+        assert!(!db.exists());
+        assert_eq!(fs::read(&journal).unwrap(), previous);
+
+        fs::remove_file(journal).unwrap();
+        let corrupt = b"existing corrupt history database";
+        fs::write(&db, corrupt).unwrap();
+        assert!(super::initialize_database_file(&db).is_err());
+        assert_eq!(fs::read(&db).unwrap(), corrupt);
+
+        fs::remove_file(&db).unwrap();
+        super::initialize_database_file(&db).unwrap();
+        assert!(db.is_file());
+    }
+
+    #[test]
     fn legacy_sqlite_database_preserves_history_and_transactions_after_upgrade() {
         let fixture = Fixture::new();
         // Created by rusqlite 0.32.1, before the bundled SQLite upgrade.
@@ -1073,18 +1298,84 @@ mod tests {
                 fs::canonicalize(fixture.root.join("complete")).unwrap(),
             ])
         );
+        let bad_id = fixture.insert(&conn, "bad");
+        let bad_path = fixture.root.parent().unwrap().join("result.json");
         conn.execute(
-            "UPDATE history SET result_path = ?1",
-            [fixture
-                .root
-                .parent()
-                .unwrap()
-                .join("result.json")
-                .to_str()
-                .unwrap()],
+            "UPDATE history SET result_path = ?1 WHERE id = ?2",
+            rusqlite::params![bad_path.to_str().unwrap(), bad_id],
         )
         .unwrap();
-        assert!(super::referenced_job_directories_in(&conn, &fixture.root).is_err());
+        assert!(super::job_dir_for_result_in(&fixture.root, bad_path.to_str().unwrap()).is_err());
+        assert_eq!(
+            super::referenced_job_directories_in(&conn, &fixture.root).unwrap(),
+            referenced
+        );
+        let orphan = fixture.root.join("uncertain");
+        fs::create_dir(&orphan).unwrap();
+        expire_job(&orphan);
+        assert!(cleanup_job_storage_in(&conn, &fixture.root).is_err());
+        assert!(orphan.is_dir());
+    }
+
+    #[test]
+    fn relocated_history_uses_local_job_identity_and_rebases_export_paths() {
+        let fixture = Fixture::new();
+        let conn = fixture.open();
+        let job_id = uuid::Uuid::new_v4().to_string();
+        let job = fixture.completed_job(&conn, &job_id, true);
+        let id = conn.last_insert_rowid();
+        let old_jobs = fixture.root.join("old-profile").join("jobs");
+        let old_path = old_jobs.join(&job_id).join("result.json");
+        conn.execute(
+            "UPDATE history SET result_path=?1 WHERE id=?2",
+            rusqlite::params![old_path.to_str().unwrap(), id],
+        )
+        .unwrap();
+        expire_job(&job);
+        cleanup_job_storage_in(&conn, &fixture.root).unwrap();
+        let canonical = fs::canonicalize(&job).unwrap();
+        for stored in [
+            old_path.to_string_lossy().into_owned(),
+            format!(r"Z:\old-profile\jobs\{job_id}\result.json"),
+            format!("/old-profile/jobs/{job_id}/result.json"),
+            format!("{job_id}/result.json"),
+        ] {
+            conn.execute(
+                "UPDATE history SET result_path=?1 WHERE id=?2",
+                rusqlite::params![stored, id],
+            )
+            .unwrap();
+            let result = super::load_history_in(&conn, &fixture.root, id).unwrap();
+            assert_eq!(result.history_id, id);
+            assert_eq!(
+                PathBuf::from(result.txt_path),
+                canonical.join("transcript.txt")
+            );
+            assert_eq!(
+                result.audio_path.map(PathBuf::from),
+                Some(canonical.join("audio.wav"))
+            );
+        }
+        assert!(job.join("result.json").is_file());
+    }
+
+    #[test]
+    fn pending_deletion_is_ineligible_for_cache_even_before_cleanup_can_run() {
+        let fixture = Fixture::new();
+        let mut conn = fixture.open();
+        let id = fixture.insert(&conn, "pending");
+        queue_history_deletion(&mut conn, &fixture.root, &[id]).unwrap();
+        let pending = fs::canonicalize(fixture.root.join("pending")).unwrap();
+        assert!(!super::inventory_history_directories(
+            &conn,
+            &fs::canonicalize(&fixture.root).unwrap()
+        )
+        .unwrap()
+        .0
+        .contains(&pending));
+        assert!(super::referenced_job_directories_in(&conn, &fixture.root)
+            .unwrap()
+            .contains(&pending));
     }
     impl Fixture {
         fn new() -> Self {

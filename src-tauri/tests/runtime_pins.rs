@@ -2,6 +2,23 @@
 mod build_support;
 
 #[test]
+fn unix_ffmpeg_build_receipt_requires_current_version_and_matching_binary() {
+    use sha2::{Digest, Sha256};
+    let root = tempfile::tempdir().unwrap();
+    let executable = root.path().join("ffmpeg");
+    let receipt = root.path().join(".ffmpeg-pin");
+    let bytes = b"verified FFmpeg fixture";
+    let digest = format!("{:x}", Sha256::digest(bytes));
+    std::fs::write(&executable, bytes).unwrap();
+    std::fs::write(&receipt, format!("9.0.1 {digest}")).unwrap();
+    assert!(build_support::verify_ffmpeg_receipt(&executable, &receipt, "9.0.2").is_err());
+    std::fs::write(&receipt, format!("9.0.2 {digest}")).unwrap();
+    build_support::verify_ffmpeg_receipt(&executable, &receipt, "9.0.2").unwrap();
+    std::fs::write(&executable, b"changed FFmpeg fixture").unwrap();
+    assert!(build_support::verify_ffmpeg_receipt(&executable, &receipt, "9.0.2").is_err());
+}
+
+#[test]
 fn native_build_rejects_old_or_modified_downloader_without_running_it() {
     use sha2::{Digest, Sha256};
     let root = std::env::temp_dir().join(format!("native-runtime-pin-{}", uuid::Uuid::new_v4()));

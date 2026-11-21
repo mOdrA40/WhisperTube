@@ -96,16 +96,8 @@ impl OperationGuard {
         Self::reserve(state, OperationState::HistoryRevealing, None)
     }
 
-    pub fn reserve_app_update(state: &AppState) -> Result<(), String> {
-        let mut active = state
-            .operation
-            .lock()
-            .map_err(|_| "State operasi terkunci")?;
-        if *active != OperationState::Idle {
-            return Err(operation_conflict_message(&active));
-        }
-        *active = OperationState::AppUpdating;
-        Ok(())
+    pub fn reserve_app_update(state: &AppState) -> Result<Self, String> {
+        Self::reserve(state, OperationState::AppUpdating, None)
     }
 
     pub fn reserve_data_reset(state: &AppState) -> Result<Self, String> {
@@ -159,17 +151,6 @@ impl OperationGuard {
             if let Some(pid) = pid {
                 crate::process::terminate_registered(pid);
             }
-        }
-        Ok(())
-    }
-
-    pub fn release_app_update(state: &AppState) -> Result<(), String> {
-        let mut active = state
-            .operation
-            .lock()
-            .map_err(|_| "State operasi terkunci")?;
-        if *active == OperationState::AppUpdating {
-            *active = OperationState::Idle;
         }
         Ok(())
     }
@@ -471,14 +452,14 @@ mod tests {
         assert!(OperationGuard::reserve_data_reset(&state).is_err());
         drop(model_delete);
 
-        OperationGuard::reserve_app_update(&state).unwrap();
+        let update = OperationGuard::reserve_app_update(&state).unwrap();
         assert!(JobGuard::reserve(&state).is_err());
         assert!(OperationGuard::reserve_model_download(&state, "base".into()).is_err());
         assert!(OperationGuard::reserve_runtime_install(&state, "cuda".into()).is_err());
         assert!(OperationGuard::reserve_model_delete(&state, "base".into()).is_err());
         assert!(OperationGuard::reserve_inspecting(&state).is_err());
         assert!(OperationGuard::reserve_data_reset(&state).is_err());
-        OperationGuard::release_app_update(&state).unwrap();
+        drop(update);
 
         let inspect = OperationGuard::reserve_inspecting(&state).unwrap();
         assert!(JobGuard::reserve(&state).is_err());

@@ -136,10 +136,12 @@ pub(crate) fn local_path_cancelable(
     Ok(Some(path))
 }
 
+#[cfg(test)]
 pub(crate) fn validate_source(source: &str) -> Result<String, String> {
     validate_source_cancelable(source, &AtomicBool::new(false))
 }
 
+#[cfg(test)]
 pub(crate) fn validate_source_cancelable(
     source: &str,
     cancelled: &AtomicBool,

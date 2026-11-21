@@ -27,7 +27,7 @@ own licenses and notices.
   https://github.com/yt-dlp/yt-dlp
 - FFmpeg: licensing depends on the exact configuration and enabled components.
   Windows uses the pinned Gyan.dev essentials build. macOS and Linux build
-  FFmpeg 9.0.1 from the pinned source archive with static linking,
+  FFmpeg 9.0.2 from the pinned source archive with static linking,
   autodetection disabled, and network support disabled. Review the exact
   configuration and provide the required notices and source offers before
   redistributing binaries.

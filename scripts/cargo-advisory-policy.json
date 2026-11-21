@@ -1,7 +1,16 @@
 {
-  "reviewedOn": "2026-10-23",
+  "reviewedOn": "2026-11-20",
   "owner": "WhisperTube maintainers",
   "knownRisks": [
+    {
+      "id": "RUSTSEC-2026-0543",
+      "package": "chrono",
+      "version": "0.4.45",
+      "kind": "unmaintained",
+      "lockfileOnly": true,
+      "upstream": "Optional serde_with dependency recorded in Cargo.lock. WhisperTube uses time for timestamps.",
+      "resolution": "Keep chrono outside every enabled application target and remove this entry once upstream drops the optional dependency."
+    },
     {
       "id": "RUSTSEC-2024-0370",
       "package": "proc-macro-error",

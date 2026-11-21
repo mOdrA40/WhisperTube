@@ -79,7 +79,7 @@ pub fn library_path(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 pub fn installed(app: &AppHandle) -> bool {
-    library_path(app).is_ok_and(|path| crate::paths::is_regular_file(&path))
+    snapshot(app, &AtomicBool::new(false)).is_ok()
 }
 
 pub fn snapshot(
@@ -172,9 +172,16 @@ pub async fn ensure_runtime(app: &AppHandle, cancelled: Arc<AtomicBool>) -> Resu
     if crate::paths::is_regular_file(&library) {
         let app = app.clone();
         let token = cancelled.clone();
-        return tokio::task::spawn_blocking(move || snapshot(&app, &token).map(|_| ()))
+        let verified = tokio::task::spawn_blocking(move || snapshot(&app, &token).map(|_| ()))
             .await
             .map_err(|e| format!("Verifikasi runtime Qwen: {e}"))?;
+        if verified.is_ok() {
+            return Ok(());
+        }
+        crate::io_cancel::check(&cancelled)?;
+        if let Err(error) = verified {
+            eprintln!("WhisperTube will replace invalid Qwen runtime: {error}");
+        }
     }
     let parent = crate::paths::user_runtime_dir(app)?;
     let staging = parent.join(format!(".qwen-staging-{}", uuid::Uuid::new_v4()));
@@ -270,19 +277,68 @@ async fn install(
     let tuple = tuple.to_owned();
     let sha = sha.to_owned();
     tokio::task::spawn_blocking(move || {
-        if crate::io_cancel::file_sha256(&archive,&cancelled)?!=sha { return Err("SHA-256 runtime Qwen tidak cocok.".into()); }
-        let unpacked=staging.join("unpacked"); fs::create_dir(&unpacked).map_err(|e|format!("Folder Qwen: {e}"))?;
-        extract(&archive,&unpacked,&tuple,&cancelled)?;
+        if crate::io_cancel::file_sha256(&archive, &cancelled)? != sha {
+            return Err("SHA-256 runtime Qwen tidak cocok.".into());
+        }
+        let unpacked = staging.join("unpacked");
+        fs::create_dir(&unpacked).map_err(|e| format!("Folder Qwen: {e}"))?;
+        extract(&archive, &unpacked, &tuple, &cancelled)?;
         crate::io_cancel::check(&cancelled)?;
-        if destination.exists() { return Err("Folder runtime Qwen sudah ada tetapi tidak lengkap. Hapus folder runtime Qwen yang rusak lalu ulangi unduhan.".into()); }
-        fs::rename(unpacked,destination).map_err(|e|format!("Aktivasi runtime Qwen: {e}"))
-    }).await.map_err(|e|format!("Instalasi runtime Qwen: {e}"))?
+        activate_runtime(&unpacked, &destination, &cancelled)
+    })
+    .await
+    .map_err(|e| format!("Instalasi runtime Qwen: {e}"))?
+}
+
+fn activate_runtime(
+    staged: &Path,
+    destination: &Path,
+    cancelled: &AtomicBool,
+) -> Result<(), String> {
+    crate::paths::clear_invalid_runtime_destination(
+        destination,
+        library_name(),
+        VERSION,
+        cancelled,
+    )?;
+    crate::paths::activate_runtime(staged, destination, cancelled)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{extract, library_name, AtomicBool, VERSION};
     use std::fs;
+    #[test]
+    fn activation_replaces_only_invalid_runtime_and_respects_cancel() {
+        let root = tempfile::tempdir().unwrap();
+        let installed = root.path().join("qwen");
+        let staged = root.path().join("staged");
+        fs::create_dir(&installed).unwrap();
+        fs::create_dir(&staged).unwrap();
+        fs::write(installed.join(library_name()), b"old corrupt library").unwrap();
+        fs::write(staged.join(library_name()), b"verified library").unwrap();
+        let cancelled = AtomicBool::new(false);
+        crate::paths::write_runtime_manifest(&staged, library_name(), VERSION, &cancelled).unwrap();
+        assert!(super::activate_runtime(&staged, &installed, &AtomicBool::new(true)).is_err());
+        assert_eq!(
+            fs::read(installed.join(library_name())).unwrap(),
+            b"old corrupt library"
+        );
+        super::activate_runtime(&staged, &installed, &cancelled).unwrap();
+        assert_eq!(
+            fs::read(installed.join(library_name())).unwrap(),
+            b"verified library"
+        );
+        assert!(super::activate_runtime(&staged, &installed, &cancelled).is_err());
+        assert!(crate::paths::runtime_manifest_matches_cancelable(
+            &installed,
+            &installed.join(library_name()),
+            VERSION,
+            &cancelled,
+        )
+        .unwrap());
+    }
+
     #[test]
     fn backend_capabilities_match_the_shipping_runtime_architecture() {
         for (os, arch, expected) in [

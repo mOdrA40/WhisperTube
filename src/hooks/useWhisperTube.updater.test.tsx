@@ -6,7 +6,10 @@ import { I18nProvider } from "../i18n";
 import { useWhisperTube } from "./useWhisperTube";
 import { disposeAppUpdate } from "../services/tauri";
 
-vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: vi.fn(),
+  Channel: class<T> { constructor(public onmessage: (payload: T) => void) {} },
+}));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockResolvedValue(() => undefined) }));
 vi.mock("@tauri-apps/plugin-updater", () => ({ check: vi.fn() }));
 vi.mock("@tauri-apps/plugin-process", () => ({ relaunch: vi.fn().mockResolvedValue(undefined) }));
@@ -31,9 +34,8 @@ beforeEach(async () => {
           vramRequiredMb: 2048, installed: true }] as never;
       case "list_history":
         return { items: [], hasMore: false, totalCount: 0 } as never;
-      case "begin_app_update":
-      case "end_app_update":
-        return undefined as never;
+      case "install_app_update":
+        throw new Error("fixture download failed");
       default:
         throw new Error("Unexpected IPC command in updater regression: " + command);
     }
@@ -47,10 +49,9 @@ afterEach(async () => {
 });
 
 it("clears a withdrawn update after failed download and a fresh no-update check", async () => {
-  const download = vi.fn().mockRejectedValue(new Error("fixture download failed"));
   const close = vi.fn().mockResolvedValue(undefined);
   const update = { version: "0.3.0", body: "Fixture update", date: null,
-    downloadAndInstall: download, close } as unknown as Update;
+    rid: 42, close } as unknown as Update;
   // Startup discovers version 0.3.0. After the failed download, the retry's
   // real service fallback check receives null from the mocked native updater.
   vi.mocked(check).mockResolvedValueOnce(update).mockResolvedValueOnce(null);
@@ -61,7 +62,7 @@ it("clears a withdrawn update after failed download and a fresh no-update check"
   });
 
   await act(async () => result.current.installAppUpdate());
-  expect(download).toHaveBeenCalledOnce();
+  expect(invoke).toHaveBeenCalledWith("install_app_update", expect.objectContaining({ rid: 42 }));
   expect(close).toHaveBeenCalledOnce();
   expect(result.current.appUpdateStatus).toBe("available");
   expect(result.current.appUpdateError).toBe("fixture download failed");
@@ -70,9 +71,7 @@ it("clears a withdrawn update after failed download and a fresh no-update check"
   expect(check).toHaveBeenCalledTimes(2);
   expect(check).toHaveBeenNthCalledWith(2, { timeout: 30_000 });
   // A withdrawn release must clear the stale offer without another download.
-  expect(download).toHaveBeenCalledOnce();
-  expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "begin_app_update")).toHaveLength(1);
-  expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "end_app_update")).toHaveLength(1);
+  expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "install_app_update")).toHaveLength(1);
   expect(close).toHaveBeenCalledOnce();
   expect(result.current.appUpdateError).toBeNull();
   expect(result.current.appUpdateStatus).toBe("up-to-date");

@@ -99,8 +99,12 @@ pub(crate) fn removed_transcript_directories(
         .map_err(|e| format!("Gagal membaca status transkrip: {e}"))?;
     let mut directories = BTreeSet::new();
     for path in paths {
-        if let Some(dir) = history::job_dir_for_result_in(root, &path)? {
-            directories.insert(dir);
+        match history::job_dir_for_result_in(root, &path) {
+            Ok(Some(dir)) => {
+                directories.insert(dir);
+            }
+            Ok(None) => {}
+            Err(error) => eprintln!("WhisperTube history deletion reference warning: {error}"),
         }
     }
     Ok(directories)

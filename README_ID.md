@@ -75,7 +75,7 @@ Prasyarat YouTube untuk aplikasi yang sudah diinstal: pasang [Node.js 22+](https
 - Progress model dan download video menampilkan byte yang sudah dipindahkan; download model dapat dibatalkan.
 - Saat transkripsi, penggunaan CPU/GPU ditampilkan jika tersedia di platform, dan speed jaringan tampil saat download.
 - Notifikasi sistem membedakan transkripsi berhasil, selesai dengan catatan durasi, gagal, dan dibatalkan saat jendela utama tidak aktif, untuk Whisper maupun Qwen. Pembatalan tanpa suara di Windows. Pesan mengikuti bahasa antarmuka tanpa judul video atau isi transkrip. Pengaturan OS atau Jangan Ganggu dapat menahan banner; kegagalan notifikasi tidak mengubah hasil pekerjaan.
-- Workspace dapat dibersihkan dari URL, preview, dan transkrip; history bisa dihapus permanen satuan, beberapa, atau semua item yang tampil.
+- Workspace dapat dibersihkan dari URL, preview, dan transkrip. Riwayat dapat dihapus permanen satuan atau dalam kelompok hingga 100 item.
 - Job gagal/dibatalkan menyimpan progres sementara secara otomatis. Coba transkripsi lagi dengan sumber dan pengaturan yang sama untuk melanjutkan bagian yang belum selesai.
 - Setelah berhasil, WAV dihapus kecuali opsi `Simpan audio setelah selesai` dinyalakan.
 

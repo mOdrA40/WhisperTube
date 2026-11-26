@@ -14,7 +14,7 @@ fn ordinary_job(root: &Path, id: &str) -> Result<PathBuf, String> {
     let path = root.join(id);
     let metadata =
         fs::symlink_metadata(&path).map_err(|e| format!("Cache job tidak tersedia: {e}"))?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+    if crate::durable::is_link(&metadata) || !metadata.is_dir() {
         return Err("Cache job bukan direktori biasa.".into());
     }
     let path = fs::canonicalize(path).map_err(|e| format!("Gagal memvalidasi cache job: {e}"))?;
@@ -25,8 +25,7 @@ fn ordinary_job(root: &Path, id: &str) -> Result<PathBuf, String> {
 }
 
 fn list_in(root: &Path, committed: &HashSet<PathBuf>) -> Result<Vec<JobCacheEntry>, String> {
-    let root =
-        fs::canonicalize(root).map_err(|e| format!("Gagal memvalidasi cache storage: {e}"))?;
+    let root = history::canonical_jobs_root(root)?;
     let mut items = Vec::new();
     for entry in fs::read_dir(&root).map_err(|e| format!("Gagal membaca cache storage: {e}"))? {
         let entry = entry.map_err(|e| format!("Gagal membaca cache job: {e}"))?;
@@ -34,7 +33,13 @@ fn list_in(root: &Path, committed: &HashSet<PathBuf>) -> Result<Vec<JobCacheEntr
         if uuid::Uuid::parse_str(&id).is_err() {
             continue;
         }
-        let directory = ordinary_job(&root, &id)?;
+        let directory = match ordinary_job(&root, &id) {
+            Ok(directory) => directory,
+            Err(error) => {
+                eprintln!("WhisperTube cache entry skipped ({id}): {error}");
+                continue;
+            }
+        };
         if committed.contains(&directory) {
             continue;
         }
@@ -66,8 +71,7 @@ fn list_in(root: &Path, committed: &HashSet<PathBuf>) -> Result<Vec<JobCacheEntr
 }
 
 fn discard_in(root: &Path, committed: &HashSet<PathBuf>, id: &str) -> Result<(), String> {
-    let root =
-        fs::canonicalize(root).map_err(|e| format!("Gagal memvalidasi cache storage: {e}"))?;
+    let root = history::canonical_jobs_root(root)?;
     let directory = ordinary_job(&root, id)?;
     if committed.contains(&directory) {
         return Err("Job masih dirujuk history dan tidak boleh dihapus sebagai cache.".into());

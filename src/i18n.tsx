@@ -315,6 +315,7 @@ const english = {
   "progress.local": "Processing locally…",
   "progress.unknownSize": "size unknown",
   "progress.startingJob": "Starting the transcription job…",
+  "progress.backendFallback": "Switching to {backend} after the previous backend could not continue.",
   "progress.preparingDownload": "Preparing the download…",
   "progress.downloadingAudio": "Downloading the best available audio from the video…",
   "progress.normalizingAudio": "Preparing audio for transcription…",
@@ -679,6 +680,7 @@ const messages: Record<UiLanguage, Record<TranslationKey, string>> = {
     "progress.local": "Memproses secara lokal…",
     "progress.unknownSize": "ukuran tidak diketahui",
     "progress.startingJob": "Memulai job transkripsi…",
+    "progress.backendFallback": "Beralih ke {backend} karena backend sebelumnya tidak bisa melanjutkan.",
     "progress.preparingDownload": "Menyiapkan unduhan…",
     "progress.downloadingAudio": "Mengunduh audio terbaik yang tersedia dari video…",
     "progress.normalizingAudio": "Menyiapkan audio untuk transkripsi…",
@@ -1034,6 +1036,7 @@ const messages: Record<UiLanguage, Record<TranslationKey, string>> = {
     "progress.local": "正在本地处理…",
     "progress.unknownSize": "大小未知",
     "progress.startingJob": "正在启动转录任务…",
+    "progress.backendFallback": "此前的后端无法继续，正在切换至 {backend}。",
     "progress.preparingDownload": "正在准备下载…",
     "progress.downloadingAudio": "正在从视频下载最佳可用音频…",
     "progress.normalizingAudio": "正在准备转录音频…",
@@ -1252,7 +1255,9 @@ export function getProgressMessage(
   const actualBackend = progress.backend ?? requestedBackend;
   const messageKey = progressMessageKeys[progress.messageCode];
   if (messageKey) return t(messageKey);
-  if (progress.messageCode === "backend_fallback") return rawMessage || t("progress.startingJob");
+  if (progress.messageCode === "backend_fallback") {
+    return t("progress.backendFallback", { backend: actualBackend.toUpperCase() });
+  }
   if (progress.messageCode === "whisper_via" && progress.backend) {
     return t("progress.whisperVia", { backend: actualBackend.toUpperCase() });
   }

@@ -28,6 +28,7 @@ impl From<String> for ErrorPayload {
             "operation_conflict",
             "job_finalizing",
             "storage_quota_exceeded",
+            "model_invalid",
         ];
 
         for code in KNOWN_CODES {
@@ -191,6 +192,8 @@ pub struct ProgressPayload {
 #[serde(rename_all = "camelCase")]
 pub struct ModelDownloadPayload {
     pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
     pub phase: String,
     pub downloaded_bytes: u64,
     pub total_bytes: u64,

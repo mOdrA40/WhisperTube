@@ -47,16 +47,23 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          choco install vulkan-sdk --yes --no-progress
-          $sdk = Get-ChildItem -Path 'C:\VulkanSDK' -Directory | Sort-Object Name -Descending | Select-Object -First 1
-          if (-not $sdk) { throw 'Vulkan SDK tidak ditemukan setelah instalasi.' }
-          "VULKAN_SDK=$($sdk.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          choco install vulkan-sdk --version=1.4.363 --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "Pemasangan Vulkan SDK gagal ($LASTEXITCODE)." }
+          $sdk = 'C:\VulkanSDK\1.4.363.0'
+          $compiler = Join-Path $sdk 'Bin\glslc.exe'
+          if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) {
+            throw "Vulkan SDK yang dipin tidak ditemukan: $compiler"
+          }
+          & $compiler --version
+          if ($LASTEXITCODE -ne 0) { throw 'Compiler shader Vulkan tidak dapat dijalankan.' }
+          "VULKAN_SDK=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "WHISPERTUBE_WINDOWS_VULKAN_SDK=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Build whisper.cpp backend
         shell: bash
         env:
-          WHISPER_VERSION: v1.9.2
-          WHISPER_COMMIT: 306c88f4d1286aec1bf96e544632897886af5501
+          WHISPER_VERSION: v1.9.5
+          WHISPER_COMMIT: d1be6fde11ac6e0407606b4e42fe72d34add8037
           BACKEND: ${{ matrix.backend }}
           PACKAGE_NAME: ${{ matrix.package }}
         run: |
@@ -75,11 +82,16 @@ jobs:
           if [ "$BACKEND" = "metal" ]; then
             cmake -S "$work" -B "$work/build" -C "$GITHUB_WORKSPACE/scripts/whisper-distribution.cmake" -DGGML_METAL=ON -DWHISPER_BUILD_TESTS=OFF -DCMAKE_BUILD_TYPE=Release
           else
+            if [ "$RUNNER_OS" = "Windows" ] && [ -z "${WHISPERTUBE_WINDOWS_VULKAN_SDK:-}" ]; then
+              echo "Path Vulkan SDK Windows yang dipin belum diteruskan ke build." >&2
+              exit 1
+            fi
+            git -C "$work" apply "$GITHUB_WORKSPACE/scripts/whisper-vulkan-device-discovery.patch"
             cmake -S "$work" -B "$work/build" -C "$GITHUB_WORKSPACE/scripts/whisper-distribution.cmake" -DGGML_VULKAN=ON -DWHISPER_BUILD_TESTS=OFF -DCMAKE_BUILD_TYPE=Release
           fi
           cmake --build "$work/build" --config Release --target whisper-cli --parallel 2
 
-          cli=$(find "$work/build" -type f \( -name whisper-cli -o -name whisper-cli.exe \) | head -n 1)
+          cli=$(find "$work/build" -type f \( -name whisper-cli -o -name whisper-cli.exe \) -print -quit)
           if [ -z "$cli" ]; then
             echo "whisper-cli tidak ditemukan setelah build" >&2
             exit 1
@@ -89,10 +101,11 @@ jobs:
           cp -R "$(dirname "$cli")"/* "$stage"/
           # The published stage must run with the complete build tree absent.
           rm -rf "$work"
-          if [ -x "$stage/whisper-cli" ]; then
-            "$stage/whisper-cli" --version
-          else
-            "$stage/whisper-cli.exe" --version
+          staged_cli="$stage/$(basename "$cli")"
+          "$staged_cli" --version
+          if [ "$BACKEND" = "vulkan" ]; then
+            probe_output="$("$staged_cli" --list-vulkan-devices 2>&1)"
+            grep -Fxq 'whispertube_vulkan_devices_v1' <<< "$(printf '%s' "$probe_output" | tr -d '\r')"
           fi
           node "$GITHUB_WORKSPACE/scripts/verify-runtime-loadpaths.mjs" "$stage"
           echo "$stage" > "$RUNNER_TEMP/stage-path"

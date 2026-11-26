@@ -14,13 +14,15 @@ use tokio::io::AsyncWriteExt;
 
 use crate::{
     network,
-    paths::{engine_available, engine_path, is_regular_file, models_dir, user_runtime_dir},
+    paths::{engine_for_status, engine_path, is_regular_file, models_dir, user_runtime_dir},
     process,
     types::{AcceleratorDownloadPayload, AcceleratorInfo},
 };
 
 const RELEASE_REPOSITORY: &str = "mOdrA40/WhisperTube";
-const RELEASE_TAG: &str = "accelerators-v0.1.3";
+// Include the release tag so an older package cannot satisfy a newer catalog
+// even when both packs were built from the same whisper.cpp source tag.
+pub(crate) const PACK_GENERATION: &str = "accelerators-v0.1.3/whisper.cpp-v1.9.2";
 const MAX_ACCELERATOR_ARCHIVE_BYTES: u64 = 1024 * 1024 * 1024;
 // The lightest supported model needs about 2 GiB for shared-memory Vulkan;
 // keep an additional 512 MiB headroom for the process and operating system.
@@ -108,14 +110,9 @@ fn executable_name() -> &'static str {
     }
 }
 
-pub fn catalog(
-    app: &AppHandle,
-    gpu_detected: bool,
-    vulkan_engine: Option<&Path>,
-) -> Result<Vec<AcceleratorInfo>, String> {
-    Ok(pack_specs()
+pub fn catalog(app: &AppHandle, vulkan_engine: Option<&Path>) -> Vec<AcceleratorInfo> {
+    pack_specs()
         .into_iter()
-        .filter(|_| cfg!(target_os = "macos") || gpu_detected)
         .map(|spec| {
             let (memory_available_mb, memory_required_mb, memory_sufficient) =
                 install_memory_status(spec.backend);
@@ -128,7 +125,7 @@ pub fn catalog(
                 installed: if is_vulkan {
                     vulkan_engine.is_some_and(is_regular_file)
                 } else {
-                    engine_available(app, spec.backend).unwrap_or(false)
+                    engine_for_status(app, spec.backend).is_ok_and(|engine| engine.is_some())
                 },
                 downloadable: spec.trusted_sha256.is_some(),
                 memory_available_mb,
@@ -142,7 +139,7 @@ pub fn catalog(
                 description: spec.description.into(),
             }
         })
-        .collect())
+        .collect()
 }
 
 fn install_memory_status(backend: &str) -> (Option<u64>, Option<u64>, bool) {
@@ -195,13 +192,20 @@ fn emit_progress(
     );
 }
 
+fn release_tag() -> &'static str {
+    PACK_GENERATION
+        .split_once('/')
+        .expect("accelerator pack generation contains a release tag and engine version")
+        .0
+}
+
 async fn release_asset(
     client: &Client,
     asset_name: &str,
     cancelled: &AtomicBool,
 ) -> Result<(String, String, Option<String>), String> {
-    let api_url =
-        format!("https://api.github.com/repos/{RELEASE_REPOSITORY}/releases/tags/{RELEASE_TAG}");
+    let tag = release_tag();
+    let api_url = format!("https://api.github.com/repos/{RELEASE_REPOSITORY}/releases/tags/{tag}");
     let response = network::send_cancelable(
         client.get(api_url),
         cancelled,
@@ -511,7 +515,7 @@ fn validate_staged_capability(
     cancelled: &AtomicBool,
 ) -> Result<(), String> {
     let device_indices = if backend == "vulkan" {
-        let devices = crate::system::detect_vulkan_devices_from_engine(engine);
+        let devices = crate::system::detect_vulkan_devices_from_engine(engine, Some(cancelled))?;
         let indices = devices
             .into_iter()
             .filter_map(|device| device.device_index)
@@ -548,8 +552,7 @@ fn validate_staged_capability(
                 .map(|index| format!("device {index}"))
                 .unwrap_or_else(|| "default device".into());
             let output = probe_dir.join(format!("probe-{}", device_index.unwrap_or(0)));
-            let mut command = std::process::Command::new(engine);
-            process::hide_console(&mut command);
+            let mut command = crate::paths::whisper_cli_command(engine);
             if backend == "vulkan" {
                 command.env("GGML_VK_DISABLE_COOPMAT", "1");
                 command.arg("-nfa");
@@ -661,8 +664,7 @@ fn finalize_blocking(
         return Err("Accelerator gagal dipasang ke staging.".into());
     }
     emit_progress(app, spec.backend, 94.0, 0, 0, None);
-    let mut command = std::process::Command::new(&staging_cli);
-    crate::process::hide_console(&mut command);
+    let mut command = crate::paths::whisper_cli_command(&staging_cli);
     command.arg("--version");
     let (status, stderr) = crate::process::run_with_timeout_captured_cancelable(
         &mut command,
@@ -889,8 +891,12 @@ mod tests {
 
     #[test]
     fn pack_asset_matches_target_platform() {
-        assert!(crate::paths::accelerator_runtime_manifest_version()
-            .starts_with(&format!("{}/", super::RELEASE_TAG)));
+        let (tag, version) = crate::paths::accelerator_runtime_manifest_version()
+            .split_once("/whisper.cpp-v")
+            .unwrap();
+        assert_eq!(tag, super::release_tag());
+        assert!(semver::Version::parse(tag.strip_prefix("accelerators-v").unwrap()).is_ok());
+        assert!(semver::Version::parse(version).is_ok());
         let specs = pack_specs();
         if cfg!(target_os = "windows") && cfg!(target_arch = "x86_64") {
             assert_eq!(specs[0].asset_name, "whispertube-windows-x64-vulkan.zip");

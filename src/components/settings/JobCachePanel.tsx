@@ -2,7 +2,7 @@ import { useState } from "react";
 import { HardDriveIcon } from "@phosphor-icons/react/dist/csr/HardDrive";
 import { TrashIcon } from "@phosphor-icons/react/dist/csr/Trash";
 import { useI18n } from "../../i18n";
-import { formatBytes, friendlyError } from "../../lib/format";
+import { formatBytes, formatLocalDate, friendlyError } from "../../lib/format";
 import type { JobCacheEntry } from "../../types";
 
 type Props = {
@@ -13,7 +13,7 @@ type Props = {
 };
 
 export function JobCachePanel({ items, busy, onLoad, onDiscard }: Props) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
   const [pendingId, setPendingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   async function discard(id: string) {
@@ -30,7 +30,7 @@ export function JobCachePanel({ items, busy, onLoad, onDiscard }: Props) {
     {items?.length === 0 && <p className="settings-note">{t("settings.jobCacheEmpty")}</p>}
     <div className="job-cache-list">{items?.map((item) => <article className="job-cache-item" key={item.id}>
       <strong>{item.title || item.sourceUrl || t("settings.jobCacheUnnamed")}</strong>
-      <small>{formatBytes(item.bytes, t("progress.unknownSize"))} · {new Date(item.modifiedAt).toLocaleString()}</small>
+      <small>{formatBytes(item.bytes, t("progress.unknownSize"))} · {formatLocalDate(item.modifiedAt, language)}</small>
       {pendingId === item.id ? <div>
         <p>{t("settings.jobCacheConfirm")}</p>
         <button type="button" className="secondary-button" disabled={busy} onClick={() => { setPendingId(null); setError(null); }}>{t("settings.jobCacheKeep")}</button>

@@ -10,9 +10,10 @@ $CudaTransactionId = [guid]::NewGuid().ToString("N")
 # Keep activation and rollback on the runtime volume, even when TEMP is elsewhere.
 $Staging = Join-Path $Runtime (".cuda-staging-" + $CudaTransactionId)
 $Backup = Join-Path $Runtime (".cuda-backup-" + $CudaTransactionId)
-$WhisperVersion = "v1.9.2"
+# b5454 is the binary release for v1.9.5 (d1be6fde11ac6e0407606b4e42fe72d34add8037).
+$WhisperAssetTag = "b5454"
 $CudaBuild = "12.4.0"
-$CudaSha256 = "443110ddaad70d4290ab2e77179e31cf712035bbc4fad56bb4519a90c917b39c"
+$CudaSha256 = "afef0b881c500958921c3f5523b50e59ee2ec9b6f5cbd25b324c51ed308a957a"
 
 function Download-File($Url, $OutFile) {
     Write-Host "    Downloading $Url"
@@ -44,7 +45,7 @@ New-Item -ItemType Directory -Force -Path $Runtime, $Temp, $Extract, $Staging | 
 
 try {
     $Zip = Join-Path $Temp "whisper-cuda.zip"
-    $Url = "https://github.com/ggml-org/whisper.cpp/releases/download/$WhisperVersion/whisper-cublas-$CudaBuild-bin-x64.zip"
+    $Url = "https://github.com/ggml-org/whisper.cpp/releases/download/$WhisperAssetTag/whisper-bin-win-cuda-$CudaBuild-x64.zip"
     Write-Host "`nDownloading whisper.cpp CUDA package (~hundreds of MB)..." -ForegroundColor Cyan
     Download-File $Url $Zip
     Assert-Sha256 $Zip $CudaSha256

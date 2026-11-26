@@ -307,7 +307,10 @@ describe("SettingsPage local data reset", () => {
     }
   });
 
-  it("disables Vulkan installation when available RAM is below the preflight floor", () => {
+  it.each([
+    { memory: 1024, gpuName: "AMD Radeon 780M Graphics", allowed: false },
+    { memory: 8192, gpuName: null, allowed: true },
+  ])("uses Vulkan preflight RAM even when the GPU name is $gpuName", ({ memory, gpuName, allowed }) => {
     const system: SystemStatus = {
       qwenBackends: ["auto", "cpu", "cuda"],
       ytDlp: true,
@@ -316,10 +319,10 @@ describe("SettingsPage local data reset", () => {
       cudaEngine: false,
       cudaSupported: false,
       nvidia: false,
-      gpuName: "AMD Radeon 780M Graphics",
+      gpuName,
       gpuMemoryMb: null,
       gpuFreeMemoryMb: null,
-      availableMemoryMb: 1024,
+      availableMemoryMb: memory,
       nvidiaDriverVersion: null,
       cudaInstallable: false,
       cpuThreads: 8,
@@ -333,11 +336,11 @@ describe("SettingsPage local data reset", () => {
         supported: true,
         installed: false,
         downloadable: true,
-        memoryAvailableMb: 1024,
+        memoryAvailableMb: memory,
         memoryRequiredMb: 2560,
-        memorySufficient: false,
-        preflightChecked: true,
-        preflightCompatible: false,
+        memorySufficient: allowed,
+        preflightChecked: !allowed,
+        preflightCompatible: allowed,
         description: "GPU acceleration",
       }],
       computeDevices: [],
@@ -345,10 +348,16 @@ describe("SettingsPage local data reset", () => {
       jobStorageLimitBytes: 20 * 1024 * 1024 * 1024,
     };
 
-    renderSettingsPage({ system, accelerators: system.accelerators });
+    const { props } = renderSettingsPage({ system, accelerators: system.accelerators });
 
     const installButton = screen.getByRole("button", { name: "Install" });
-    expect((installButton as HTMLButtonElement).disabled).toBe(true);
-    expect(screen.getByText(/Vulkan disabled: 1\.0 GB RAM available/)).toBeTruthy();
+    expect((installButton as HTMLButtonElement).disabled).toBe(!allowed);
+    if (allowed) {
+      expect(screen.getByText(/Vulkan compatibility cannot be verified before installation/)).toBeTruthy();
+      fireEvent.click(installButton);
+      expect(props.onInstallAccelerator).toHaveBeenCalledWith("vulkan");
+    } else {
+      expect(screen.getByText(/Vulkan disabled: 1\.0 GB RAM available/)).toBeTruthy();
+    }
   });
 });

@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
-use sysinfo::{Disks, System};
+#[cfg(windows)]
+use sysinfo::Disks;
+use sysinfo::System;
 
 pub fn available_memory_bytes() -> u64 {
     let mut system = System::new();
@@ -11,6 +13,7 @@ pub fn available_memory_mb() -> u64 {
     available_memory_bytes() / 1024 / 1024
 }
 
+#[cfg(windows)]
 pub fn available_disk_bytes(path: &Path) -> Option<u64> {
     let path = existing_disk_path(path).ok()?;
     let disks = Disks::new_with_refreshed_list();
@@ -19,6 +22,27 @@ pub fn available_disk_bytes(path: &Path) -> Option<u64> {
         .map(|disk| disk.mount_point().to_path_buf())
         .collect::<Vec<_>>();
     matching_mount_index(&path, &mounts).map(|index| disks[index].available_space())
+}
+
+#[cfg(unix)]
+pub fn available_disk_bytes(path: &Path) -> Option<u64> {
+    unix_available_disk_bytes(&existing_disk_path(path).ok()?).ok()
+}
+
+#[cfg(unix)]
+fn unix_available_disk_bytes(path: &Path) -> std::io::Result<u64> {
+    use std::{ffi::CString, io, mem::MaybeUninit, os::unix::ffi::OsStrExt};
+
+    let path = CString::new(path.as_os_str().as_bytes()).map_err(io::Error::other)?;
+    let mut stats = MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: the terminated path and writable statvfs buffer live through the call.
+    if unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: statvfs initialized the output on success.
+    let stats = unsafe { stats.assume_init() };
+    let available = u128::from(stats.f_frsize) * u128::from(stats.f_bavail);
+    Ok(u64::try_from(available).unwrap_or(u64::MAX))
 }
 
 // Capacity belongs to the filesystem reached by the OS, including linked
@@ -45,6 +69,7 @@ fn existing_disk_path(path: &Path) -> std::io::Result<PathBuf> {
 
 // Comparison only: keep the original path for all filesystem operations.
 // canonicalize() adds verbatim prefixes on Windows, including to cached jobs.
+#[cfg(any(windows, test))]
 fn mount_comparison_path(path: &Path) -> PathBuf {
     #[cfg(windows)]
     {
@@ -78,6 +103,7 @@ fn mount_comparison_path(path: &Path) -> PathBuf {
     path.into()
 }
 
+#[cfg(any(windows, test))]
 fn matching_mount_index(path: &Path, mounts: &[PathBuf]) -> Option<usize> {
     let path = mount_comparison_path(path);
     mounts
@@ -88,6 +114,7 @@ fn matching_mount_index(path: &Path, mounts: &[PathBuf]) -> Option<usize> {
         .map(|(index, _)| index)
 }
 
+#[cfg(windows)]
 pub fn require_disk_allocations(allocations: &[(&Path, u64)], purpose: &str) -> Result<(), String> {
     let disks = Disks::new_with_refreshed_list();
     let mounts = disks
@@ -113,6 +140,47 @@ pub fn require_disk_allocations(allocations: &[(&Path, u64)], purpose: &str) -> 
     Ok(())
 }
 
+#[cfg(unix)]
+pub fn require_disk_allocations(allocations: &[(&Path, u64)], purpose: &str) -> Result<(), String> {
+    use std::{collections::BTreeMap, os::unix::fs::MetadataExt};
+
+    struct Allocation {
+        path: PathBuf,
+        available: u64,
+        required: u64,
+    }
+
+    let mut filesystems = BTreeMap::new();
+    for (path, required) in allocations {
+        let path = existing_disk_path(path)
+            .map_err(|error| format!("Gagal menentukan filesystem tujuan: {error}"))?;
+        let device = std::fs::metadata(&path)
+            .map_err(|error| format!("Gagal membaca filesystem tujuan: {error}"))?
+            .dev();
+        let available = unix_available_disk_bytes(&path)
+            .map_err(|error| format!("Ruang disk tersedia tidak dapat diperiksa: {error}"))?;
+        let allocation = filesystems.entry(device).or_insert(Allocation {
+            path,
+            available,
+            required: 0,
+        });
+        allocation.available = allocation.available.min(available);
+        allocation.required = allocation.required.saturating_add(*required);
+    }
+    for allocation in filesystems.into_values() {
+        if allocation.available < allocation.required {
+            return Err(format!(
+                "Ruang disk tidak cukup untuk {purpose} pada {}. Diperlukan sekitar {:.1} GB, tersedia {:.1} GB.",
+                allocation.path.display(),
+                allocation.required as f64 / 1024_f64.powi(3),
+                allocation.available as f64 / 1024_f64.powi(3),
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(any(windows, test))]
 fn disk_allocations_by_mount(
     allocations: &[(&Path, u64)],
     mounts: &[PathBuf],
@@ -257,7 +325,6 @@ mod tests {
         );
     }
 
-    #[cfg(windows)]
     #[test]
     fn disk_guards_accept_a_canonical_retry_directory_and_a_future_output() {
         let directory = std::env::temp_dir();
@@ -268,6 +335,23 @@ mod tests {
         let future = canonical.join("whispertube-future-output.wav");
         super::require_disk(&future, 1, "test").unwrap();
         super::require_disk_allocations(&[(&future, 1), (&directory, 1)], "test").unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn disk_guards_add_allocations_resolved_to_the_same_filesystem() {
+        let directory = tempfile::tempdir().unwrap();
+        let future = directory.path().join("audio.wav");
+        let available = super::available_disk_bytes(&future).unwrap();
+        assert!(available > 4);
+        let single = available - available / 4;
+        super::require_disk(&future, single, "test").unwrap();
+        let error = super::require_disk_allocations(
+            &[(&future, single), (directory.path(), single)],
+            "test",
+        )
+        .unwrap_err();
+        assert!(error.contains("Ruang disk tidak cukup"));
     }
 
     #[test]

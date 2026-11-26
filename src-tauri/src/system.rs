@@ -11,12 +11,12 @@ use std::{
 
 #[cfg(target_os = "linux")]
 use std::fs;
-use sysinfo::{Pid, ProcessesToUpdate, System};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 use tauri::AppHandle;
 
 use crate::{
     accelerators, models,
-    paths::{engine_available, engine_path, is_regular_file, runtime_dir, tool_path},
+    paths::{engine_for_status, is_regular_file, runtime_dir, tool_path},
     types::{ComputeDeviceInfo, SystemStatus},
 };
 
@@ -151,14 +151,22 @@ impl UsageMonitor {
         let thread = std::thread::spawn(move || {
             let mut cpu_sampler = CpuSampler::default();
             let mut memory_sampler = System::new();
+            let mut sampled_pid = None;
             while !thread_stop.load(Ordering::SeqCst) {
                 let target = thread_target.lock().ok().and_then(|value| value.clone());
                 let process_id = thread_process_id.lock().ok().and_then(|value| *value);
+                if process_id != sampled_pid {
+                    // A PID-scoped refresh only evicts IDs included in that
+                    // refresh. Release the former child's sampled resources.
+                    memory_sampler = System::new();
+                    sampled_pid = process_id;
+                }
                 let current = sample_usage_uncached(
                     &mut cpu_sampler,
                     &mut memory_sampler,
                     target.as_ref(),
                     process_id,
+                    &thread_stop,
                 );
                 if let Ok(mut cached) = thread_snapshot.lock() {
                     *cached = current;
@@ -264,15 +272,18 @@ fn format_vram(memory_mb: Option<u64>) -> String {
         .unwrap_or_else(|| "VRAM tidak terbaca".into())
 }
 
-pub fn detect_nvidia() -> Option<GpuInfo> {
-    let devices = detect_nvidia_devices();
+pub fn detect_nvidia(cancelled: Option<&AtomicBool>) -> Option<GpuInfo> {
+    let devices = detect_nvidia_devices(cancelled);
     let gpu = select_nvidia_device(&devices);
     set_selected_nvidia_device(gpu.as_ref());
     gpu
 }
 
-pub fn detect_nvidia_device(device_index: usize) -> Option<GpuInfo> {
-    detect_nvidia_device_from(&detect_nvidia_devices(), device_index)
+pub fn detect_nvidia_device(
+    device_index: usize,
+    cancelled: Option<&AtomicBool>,
+) -> Option<GpuInfo> {
+    detect_nvidia_device_from(&detect_nvidia_devices(cancelled), device_index)
 }
 
 fn detect_nvidia_device_from(devices: &[GpuInfo], device_index: usize) -> Option<GpuInfo> {
@@ -282,13 +293,13 @@ fn detect_nvidia_device_from(devices: &[GpuInfo], device_index: usize) -> Option
         .cloned()
 }
 
-pub fn detect_nvidia_devices() -> Vec<GpuInfo> {
-    let (devices, _) = detect_nvidia_snapshot();
+fn detect_nvidia_devices(cancelled: Option<&AtomicBool>) -> Vec<GpuInfo> {
+    let (devices, _) = detect_nvidia_snapshot(cancelled);
     cuda_visible_nvidia_devices(&devices)
 }
 
-fn detect_nvidia_snapshot() -> (Vec<GpuInfo>, Option<String>) {
-    let Some(program) = nvidia_smi_program() else {
+fn detect_nvidia_snapshot(cancelled: Option<&AtomicBool>) -> (Vec<GpuInfo>, Option<String>) {
+    let Some(program) = nvidia_smi_program(cancelled) else {
         return (Vec::new(), None);
     };
     let output = {
@@ -298,19 +309,21 @@ fn detect_nvidia_snapshot() -> (Vec<GpuInfo>, Option<String>) {
             "--query-gpu=index,name,uuid,memory.total,memory.free,driver_version",
             "--format=csv,noheader,nounits",
         ]);
-        command_output_with_timeout(command, Duration::from_secs(2))
+        command_output_with_timeout(command, Duration::from_secs(2), cancelled)
     };
     match output {
         Some(out) => parse_nvidia_snapshot(&out.stdout),
         None => {
-            clear_nvidia_smi_program();
+            if !cancelled.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+                clear_nvidia_smi_program();
+            }
             (Vec::new(), None)
         }
     }
 }
 
-pub fn detect_nvidia_driver_version() -> Option<String> {
-    detect_nvidia_snapshot().1
+pub fn detect_nvidia_driver_version(cancelled: Option<&AtomicBool>) -> Option<String> {
+    detect_nvidia_snapshot(cancelled).1
 }
 
 fn parse_nvidia_snapshot(output: &[u8]) -> (Vec<GpuInfo>, Option<String>) {
@@ -343,14 +356,18 @@ pub fn cuda_driver_is_compatible(version: &str) -> bool {
     actual >= required
 }
 
-pub fn ensure_cuda_install_supported() -> Result<(), String> {
+pub fn ensure_cuda_install_supported(cancelled: Option<&AtomicBool>) -> Result<(), String> {
     if !cfg!(all(target_os = "windows", target_arch = "x86_64")) {
         return Err("Download CUDA otomatis saat ini hanya didukung di Windows x64.".into());
     }
-    if detect_nvidia_snapshot().0.is_empty() {
+    let (devices, driver) = detect_nvidia_snapshot(cancelled);
+    if let Some(cancelled) = cancelled {
+        crate::io_cancel::check(cancelled)?;
+    }
+    if devices.is_empty() {
         return Err("NVIDIA GPU/driver tidak terdeteksi. CUDA engine tidak perlu dipasang.".into());
     }
-    let Some(driver_version) = detect_nvidia_driver_version() else {
+    let Some(driver_version) = driver else {
         return Err(
             "Versi driver NVIDIA tidak dapat diverifikasi. Update driver NVIDIA lalu coba lagi."
                 .into(),
@@ -378,8 +395,8 @@ fn select_nvidia_display_device(devices: &[GpuInfo]) -> Option<GpuInfo> {
     })
 }
 
-pub fn cuda_devices_by_preference() -> Vec<GpuInfo> {
-    ordered_nvidia_devices(&detect_nvidia_devices())
+pub fn cuda_devices_by_preference(cancelled: Option<&AtomicBool>) -> Vec<GpuInfo> {
+    ordered_nvidia_devices(&detect_nvidia_devices(cancelled))
 }
 
 pub fn configure_cuda_command(command: &mut Command, gpu: &GpuInfo) -> Result<(), String> {
@@ -429,15 +446,19 @@ fn parse_nvidia_compute_capability(output: &[u8], uuid: &str) -> Option<(u32, u3
     (major > 0 && minor < 10).then_some((major, minor))
 }
 
-pub fn nvidia_compute_capability(gpu: &GpuInfo) -> Result<(u32, u32), String> {
-    let program = nvidia_smi_program().ok_or("nvidia-smi tidak tersedia.")?;
+pub fn nvidia_compute_capability(
+    gpu: &GpuInfo,
+    cancelled: Option<&AtomicBool>,
+) -> Result<(u32, u32), String> {
+    let program = nvidia_smi_program(cancelled).ok_or("nvidia-smi tidak tersedia.")?;
     let command = nvidia_compute_capability_command(&program, gpu)?;
-    let output = command_output_with_timeout(command, Duration::from_secs(2)).ok_or_else(|| {
-        format!(
-            "Gagal membaca compute capability NVIDIA untuk {}.",
-            gpu.name
-        )
-    })?;
+    let output = command_output_with_timeout(command, Duration::from_secs(2), cancelled)
+        .ok_or_else(|| {
+            format!(
+                "Gagal membaca compute capability NVIDIA untuk {}.",
+                gpu.name
+            )
+        })?;
     parse_nvidia_compute_capability(&output.stdout, gpu.uuid.as_deref().unwrap()).ok_or_else(|| {
         format!(
             "Compute capability NVIDIA untuk {} tidak dapat diverifikasi.",
@@ -643,7 +664,7 @@ fn parse_nvidia_gpus(output: &[u8]) -> Option<GpuInfo> {
     select_nvidia_device(&parse_nvidia_devices(output))
 }
 
-fn nvidia_smi_program() -> Option<String> {
+fn nvidia_smi_program(cancelled: Option<&AtomicBool>) -> Option<String> {
     let cache = NVIDIA_SMI_PROGRAM.get_or_init(|| Mutex::new(None));
     if let Ok(cached) = cache.lock() {
         if cached.is_some() {
@@ -660,8 +681,11 @@ fn nvidia_smi_program() -> Option<String> {
         let mut command = Command::new(program);
         crate::process::hide_console(&mut command);
         command.arg("--version");
-        command_output_with_timeout(command, Duration::from_secs(2)).is_some()
+        command_output_with_timeout(command, Duration::from_secs(2), cancelled).is_some()
     });
+    if cancelled.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+        return None;
+    }
     if let Ok(mut cached) = cache.lock() {
         *cached = found;
         return cached.clone();
@@ -706,11 +730,11 @@ fn is_software_vulkan_device(name: &str) -> bool {
     .any(|marker| lower.contains(marker))
 }
 
-fn parse_vulkan_devices(stderr: &str) -> Vec<ComputeDeviceInfo> {
+fn parse_vulkan_devices(stderr: &str, prefix: &str) -> Vec<ComputeDeviceInfo> {
     stderr
         .lines()
         .filter_map(|line| {
-            let rest = line.strip_prefix("ggml_vulkan: ")?;
+            let rest = line.strip_prefix(prefix)?;
             let (index, rest) = rest.split_once(" = ")?;
             let device_index = index.trim().parse::<usize>().ok()?;
             let (name, capabilities) = rest.split_once(" | ").unwrap_or((rest, ""));
@@ -732,28 +756,100 @@ fn parse_vulkan_devices(stderr: &str) -> Vec<ComputeDeviceInfo> {
         .collect()
 }
 
-fn vulkan_probe_command(engine: &Path) -> Command {
-    let mut command = Command::new(engine);
-    crate::process::hide_console(&mut command);
-    command
+const VULKAN_LIST_OPTION: &str = "--list-vulkan-devices";
+const VULKAN_INVENTORY_MARKER: &str = "whispertube_vulkan_devices_v1";
+const VULKAN_INVENTORY_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn complete_legacy_vulkan_inventory(output: &str) -> Option<Vec<ComputeDeviceInfo>> {
+    const LEGACY_PREFIX: &str = "ggml_vulkan: ";
+    let expected = output.lines().find_map(|line| {
+        line.strip_prefix("ggml_vulkan: Found ")?
+            .strip_suffix(" Vulkan devices:")?
+            .parse::<usize>()
+            .ok()
+    })?;
+    // Count software adapters too. They belong to the engine's reported
+    // inventory even though the application filters them out for inference.
+    let reported = output.lines().filter_map(|line| {
+        let (ordinal, name) = line.strip_prefix(LEGACY_PREFIX)?.split_once(" = ")?;
+        if name.trim().is_empty() {
+            return None;
+        }
+        ordinal.trim().parse::<usize>().ok()
+    });
+    (reported.count() == expected).then(|| parse_vulkan_devices(output, LEGACY_PREFIX))
 }
 
-pub fn detect_vulkan_devices_from_engine(engine: &Path) -> Vec<ComputeDeviceInfo> {
-    if !is_regular_file(engine) {
-        return Vec::new();
+fn probe_vulkan_devices(
+    mut run: impl FnMut(&str) -> Result<(bool, String), String>,
+) -> Result<Vec<ComputeDeviceInfo>, String> {
+    let (success, output) = run(VULKAN_LIST_OPTION)?;
+    if success && output.lines().any(|line| line == VULKAN_INVENTORY_MARKER) {
+        return Ok(parse_vulkan_devices(&output, "whispertube_vulkan_device: "));
     }
-    let mut command = vulkan_probe_command(engine);
-    command.arg("--help");
-    crate::process::run_with_timeout_captured(&mut command, Duration::from_secs(3), 256 * 1024)
-        .map(|(_, stderr)| parse_vulkan_devices(&stderr))
-        .unwrap_or_default()
+    // v1.9.2 prints an unknown-argument error but exits with status zero.
+    // A failed or incomplete new probe must not be treated as a legacy pack.
+    if output
+        .lines()
+        .any(|line| line.strip_prefix("error: unknown argument: ") == Some(VULKAN_LIST_OPTION))
+    {
+        if success {
+            if let Some(devices) = complete_legacy_vulkan_inventory(&output) {
+                return Ok(devices);
+            }
+        }
+        let (success, legacy_output) = run("--help")?;
+        if success {
+            return Ok(parse_vulkan_devices(&legacy_output, "ggml_vulkan: "));
+        }
+    }
+    Err("Engine Vulkan gagal menyelesaikan inventaris perangkat.".into())
 }
 
-pub fn detect_vulkan_devices(app: &AppHandle) -> Vec<ComputeDeviceInfo> {
-    let Ok(engine) = engine_path(app, "vulkan") else {
-        return Vec::new();
-    };
-    detect_vulkan_devices_from_engine(&engine)
+pub fn detect_vulkan_devices_from_engine(
+    engine: &Path,
+    cancelled: Option<&AtomicBool>,
+) -> Result<Vec<ComputeDeviceInfo>, String> {
+    if let Some(cancelled) = cancelled {
+        crate::io_cancel::check(cancelled)?;
+    }
+    if !is_regular_file(engine) {
+        return Err("Engine Vulkan tidak tersedia untuk pemeriksaan perangkat.".into());
+    }
+    probe_vulkan_devices(|option| {
+        let mut command = crate::paths::whisper_cli_command(engine);
+        command.arg(option);
+        let result = match cancelled {
+            Some(cancelled) => crate::process::run_with_timeout_captured_cancelable(
+                &mut command,
+                VULKAN_INVENTORY_TIMEOUT,
+                256 * 1024,
+                cancelled,
+            ),
+            None => crate::process::run_with_timeout_captured(
+                &mut command,
+                VULKAN_INVENTORY_TIMEOUT,
+                256 * 1024,
+            ),
+        };
+        result
+            .map(|(status, stderr)| (status.success(), stderr))
+            .map_err(|error| {
+                if crate::process::is_process_timeout(&error) {
+                    "Pemeriksaan perangkat Vulkan melewati batas waktu.".into()
+                } else {
+                    error
+                }
+            })
+    })
+}
+
+pub fn detect_vulkan_devices(
+    app: &AppHandle,
+    cancelled: &AtomicBool,
+) -> Result<Vec<ComputeDeviceInfo>, String> {
+    let (engine, _snapshot) = crate::paths::engine_with_snapshot(app, "vulkan", cancelled)?;
+    detect_vulkan_devices_from_engine(&engine, Some(cancelled))
 }
 
 fn clean_gpu_name(value: &str) -> Option<String> {
@@ -776,7 +872,7 @@ fn clean_gpu_name(value: &str) -> Option<String> {
 }
 
 #[cfg(target_os = "windows")]
-fn detect_generic_gpu() -> Option<GpuInfo> {
+fn detect_generic_gpu(_cancelled: Option<&AtomicBool>) -> Option<GpuInfo> {
     #[repr(C)]
     struct DisplayDevice {
         size: u32,
@@ -832,11 +928,11 @@ fn detect_generic_gpu() -> Option<GpuInfo> {
 }
 
 #[cfg(target_os = "macos")]
-fn detect_generic_gpu() -> Option<GpuInfo> {
+fn detect_generic_gpu(cancelled: Option<&AtomicBool>) -> Option<GpuInfo> {
     let mut command = Command::new("system_profiler");
     crate::process::hide_console(&mut command);
     command.args(["SPDisplaysDataType", "-detailLevel", "basic"]);
-    let name = command_output_with_timeout(command, Duration::from_secs(5))
+    let name = command_output_with_timeout(command, Duration::from_secs(5), cancelled)
         .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
         .and_then(|output| {
             output.lines().find_map(|line| {
@@ -856,7 +952,7 @@ fn detect_generic_gpu() -> Option<GpuInfo> {
 }
 
 #[cfg(target_os = "linux")]
-fn detect_generic_gpu() -> Option<GpuInfo> {
+fn detect_generic_gpu(cancelled: Option<&AtomicBool>) -> Option<GpuInfo> {
     let drm_root = fs::read_dir("/sys/class/drm").ok()?;
     for entry in drm_root.flatten() {
         let file_name = entry.file_name().to_string_lossy().to_string();
@@ -881,7 +977,8 @@ fn detect_generic_gpu() -> Option<GpuInfo> {
             device_index: None,
         });
     }
-    let output = command_output_with_timeout(Command::new("lspci"), Duration::from_secs(2))?;
+    let output =
+        command_output_with_timeout(Command::new("lspci"), Duration::from_secs(2), cancelled)?;
     String::from_utf8_lossy(&output.stdout)
         .lines()
         .find(|line| {
@@ -901,20 +998,20 @@ fn detect_generic_gpu() -> Option<GpuInfo> {
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-fn detect_generic_gpu() -> Option<GpuInfo> {
+fn detect_generic_gpu(_cancelled: Option<&AtomicBool>) -> Option<GpuInfo> {
     None
 }
 
-pub fn detect_gpu() -> Option<GpuInfo> {
-    detect_nvidia().or_else(detect_generic_gpu)
-}
-
-fn command_output_with_timeout(mut command: Command, timeout: Duration) -> Option<Output> {
+fn command_output_with_timeout(
+    mut command: Command,
+    timeout: Duration,
+    cancelled: Option<&AtomicBool>,
+) -> Option<Output> {
     let mut stdout = Vec::with_capacity(64 * 1024);
     let status = crate::process::run_piped(
         &mut command,
         Some(timeout),
-        None,
+        cancelled,
         |_| Ok(()),
         |event| {
             if let crate::process::OutputEvent::Data(crate::process::OutputStream::Stdout, bytes) =
@@ -992,7 +1089,7 @@ fn sample_cpu_usage(_sampler: &mut CpuSampler) -> Option<f64> {
     let mut command = Command::new("ps");
     crate::process::hide_console(&mut command);
     command.args(["-A", "-o", "%cpu="]);
-    let output = command_output_with_timeout(command, Duration::from_secs(2))?;
+    let output = command_output_with_timeout(command, Duration::from_secs(2), None)?;
     let total: f64 = String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter_map(|line| line.trim().parse::<f64>().ok())
@@ -1009,12 +1106,12 @@ fn sample_cpu_usage(_sampler: &mut CpuSampler) -> Option<f64> {
 }
 
 #[cfg(target_os = "windows")]
-fn sample_gpu_usage(target: Option<&UsageTarget>) -> Option<f64> {
+fn sample_gpu_usage(target: Option<&UsageTarget>, stop: &AtomicBool) -> Option<f64> {
     if target.is_none_or(|value| value.backend == "cpu") {
         return None;
     }
     if target.is_some_and(|value| value.backend == "cuda") {
-        if let Some(program) = nvidia_smi_program() {
+        if let Some(program) = nvidia_smi_program(Some(stop)) {
             let mut command = Command::new(&program);
             crate::process::hide_console(&mut command);
             if let Some(index) = target.and_then(|value| value.device_index) {
@@ -1024,8 +1121,9 @@ fn sample_gpu_usage(target: Option<&UsageTarget>) -> Option<f64> {
                 "--query-gpu=utilization.gpu",
                 "--format=csv,noheader,nounits",
             ]);
-            if let Some(value) = command_output_with_timeout(command, Duration::from_secs(2))
-                .and_then(|output| parse_percent(&output.stdout))
+            if let Some(value) =
+                command_output_with_timeout(command, Duration::from_secs(2), Some(stop))
+                    .and_then(|output| parse_percent(&output.stdout))
             {
                 return Some(value);
             }
@@ -1068,7 +1166,7 @@ fn linux_gpu_busy_percent() -> Option<f64> {
 }
 
 #[cfg(target_os = "linux")]
-fn sample_gpu_usage(target: Option<&UsageTarget>) -> Option<f64> {
+fn sample_gpu_usage(target: Option<&UsageTarget>, _stop: &AtomicBool) -> Option<f64> {
     if target.is_none_or(|value| value.backend == "cpu") {
         return None;
     }
@@ -1081,7 +1179,7 @@ fn sample_gpu_usage(target: Option<&UsageTarget>) -> Option<f64> {
     target_os = "macos",
     not(any(target_os = "windows", target_os = "linux"))
 ))]
-fn sample_gpu_usage(_target: Option<&UsageTarget>) -> Option<f64> {
+fn sample_gpu_usage(_target: Option<&UsageTarget>, _stop: &AtomicBool) -> Option<f64> {
     // macOS has no stable, non-privileged GPU utilization API that can be
     // mapped to the selected Metal device without guessing.
     None
@@ -1092,16 +1190,21 @@ fn sample_usage_uncached(
     memory_sampler: &mut System,
     target: Option<&UsageTarget>,
     process_id: Option<u32>,
+    stop: &AtomicBool,
 ) -> UsageSnapshot {
     memory_sampler.refresh_memory();
     let process_memory_bytes = process_id.and_then(|process_id| {
         let pid = Pid::from_u32(process_id);
-        memory_sampler.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
+        memory_sampler.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[pid]),
+            true,
+            ProcessRefreshKind::nothing().with_memory(),
+        );
         memory_sampler.process(pid).map(|process| process.memory())
     });
     UsageSnapshot {
         cpu_usage_percent: sample_cpu_usage(cpu_sampler),
-        gpu_usage_percent: sample_gpu_usage(target),
+        gpu_usage_percent: sample_gpu_usage(target, stop),
         available_memory_bytes: Some(memory_sampler.available_memory()),
         process_memory_bytes,
     }
@@ -1126,9 +1229,9 @@ pub fn system_status(app: &AppHandle) -> Result<SystemStatus, String> {
     let runtime = runtime_dir(app)?;
     let yt_dlp = crate::paths::is_regular_file(&tool_path(app, "yt-dlp")?);
     let ffmpeg = crate::paths::is_regular_file(&tool_path(app, "ffmpeg")?);
-    let cpu_engine = engine_available(app, "cpu")?;
-    let cuda_engine = engine_available(app, "cuda")?;
-    let (nvidia_devices, nvidia_driver_version) = detect_nvidia_snapshot();
+    let cpu_engine = engine_for_status(app, "cpu")?.is_some();
+    let cuda_engine = engine_for_status(app, "cuda")?.is_some();
+    let (nvidia_devices, nvidia_driver_version) = detect_nvidia_snapshot(None);
     let nvidia_gpu = select_nvidia_display_device(&nvidia_devices);
     let cuda_devices = cuda_visible_nvidia_devices(&nvidia_devices);
     let cuda_gpu = select_nvidia_device(&cuda_devices);
@@ -1136,7 +1239,7 @@ pub fn system_status(app: &AppHandle) -> Result<SystemStatus, String> {
     let gpu = cuda_gpu
         .clone()
         .or_else(|| nvidia_gpu.clone())
-        .or_else(detect_generic_gpu);
+        .or_else(|| detect_generic_gpu(None));
     let nvidia = nvidia_gpu.is_some();
     let cuda_supported = cfg!(all(target_os = "windows", target_arch = "x86_64")) && nvidia;
     let nvidia_driver_version = nvidia.then_some(nvidia_driver_version).flatten();
@@ -1144,7 +1247,6 @@ pub fn system_status(app: &AppHandle) -> Result<SystemStatus, String> {
         && nvidia_driver_version
             .as_deref()
             .is_some_and(cuda_driver_is_compatible);
-    let gpu_name = gpu.as_ref().map(|info| info.name.clone());
     let gpu_memory_mb = gpu.as_ref().and_then(|info| info.total_memory_mb);
     let gpu_free_memory_mb = gpu.as_ref().and_then(|info| info.free_memory_mb);
     let available_memory_mb = crate::resources::available_memory_mb();
@@ -1152,12 +1254,27 @@ pub fn system_status(app: &AppHandle) -> Result<SystemStatus, String> {
         .as_ref()
         .or(gpu.as_ref())
         .and_then(GpuInfo::available_memory_mb);
-    let vulkan_engine = if gpu.is_some() && cfg!(any(target_os = "windows", target_os = "linux")) {
-        Some(engine_path(app, "vulkan")?)
+    let vulkan_engine = if cfg!(any(target_os = "windows", target_os = "linux")) {
+        engine_for_status(app, "vulkan")?
     } else {
         None
     };
-    let accelerators = accelerators::catalog(app, gpu.is_some(), vulkan_engine.as_deref())?;
+    let vulkan_path = vulkan_engine
+        .as_ref()
+        .map(|(path, _snapshot)| path.as_path());
+    let vulkan_devices = vulkan_path
+        .map(|engine| {
+            detect_vulkan_devices_from_engine(engine, None).unwrap_or_else(|error| {
+                eprintln!("WhisperTube: pemeriksaan perangkat Vulkan gagal: {error}");
+                Vec::new()
+            })
+        })
+        .unwrap_or_default();
+    let gpu_name = gpu
+        .as_ref()
+        .map(|info| info.name.clone())
+        .or_else(|| vulkan_devices.first().map(|device| device.name.clone()));
+    let accelerators = accelerators::catalog(app, vulkan_path);
     let job_storage_bytes = crate::history::job_storage_bytes(app)?;
     let vulkan_installed = accelerators
         .iter()
@@ -1179,9 +1296,7 @@ pub fn system_status(app: &AppHandle) -> Result<SystemStatus, String> {
         }));
     }
     if vulkan_installed {
-        if let Some(engine) = &vulkan_engine {
-            compute_devices.extend(detect_vulkan_devices_from_engine(engine));
-        }
+        compute_devices.extend(vulkan_devices);
     }
     let cpu_threads = std::thread::available_parallelism()
         .map(|value| value.get())
@@ -1409,7 +1524,7 @@ mod tests {
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     #[test]
     fn native_cuda_driver_uuids_match_physical_inventory() {
-        let (devices, driver) = super::detect_nvidia_snapshot();
+        let (devices, driver) = super::detect_nvidia_snapshot(None);
         if devices.is_empty()
             || !driver
                 .as_deref()
@@ -1426,7 +1541,7 @@ mod tests {
             "CUDA UUID did not map to NVML inventory"
         );
         for gpu in &matched {
-            let capability = super::nvidia_compute_capability(gpu)
+            let capability = super::nvidia_compute_capability(gpu, None)
                 .expect("compatible NVIDIA driver should report compute capability by UUID");
             eprintln!(
                 "{}: compute capability {}.{}",
@@ -1484,7 +1599,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn native_display_adapter_probe_handles_present_or_headless_sessions() {
-        if let Some(gpu) = super::detect_generic_gpu() {
+        if let Some(gpu) = super::detect_generic_gpu(None) {
             assert!(!gpu.name.is_empty());
             assert_eq!(super::clean_gpu_name(&gpu.name), Some(gpu.name.clone()));
         }
@@ -1571,7 +1686,7 @@ mod tests {
             }
             return;
         }
-        let mut command = super::vulkan_probe_command(&std::env::current_exe().unwrap());
+        let mut command = crate::paths::whisper_cli_command(&std::env::current_exe().unwrap());
         command
             .args([
                 "--exact",
@@ -1638,7 +1753,7 @@ mod tests {
         let output = "ggml_vulkan: Found 2 Vulkan devices:\n\
             ggml_vulkan: 0 = AMD Radeon 780M Graphics (AMD proprietary driver) | uma: 1 | fp16: 1\n\
             ggml_vulkan: 1 = NVIDIA GeForce RTX 4050 Laptop GPU (NVIDIA) | uma: 0 | fp16: 1\n";
-        let devices = parse_vulkan_devices(output);
+        let devices = parse_vulkan_devices(output, "ggml_vulkan: ");
         assert_eq!(devices.len(), 2);
         assert_eq!(devices[0].id, "vulkan:0");
         assert_eq!(devices[0].vendor, "amd");
@@ -1647,11 +1762,159 @@ mod tests {
         assert!(!devices[1].integrated);
     }
 
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[test]
+    #[ignore = "Requires a verified Vulkan pack and a physical GPU"]
+    fn native_vulkan_pack_reports_physical_gpu_through_app_probe() {
+        let engine = std::path::PathBuf::from(
+            std::env::var_os("WHISPERTUBE_QA_VULKAN_ENGINE")
+                .expect("A verified engine is required"),
+        );
+        let expected_name = std::env::var("WHISPERTUBE_QA_VULKAN_DEVICE")
+            .expect("A physical device name is required");
+        assert!(engine.is_absolute(), "Use an absolute executable path");
+        assert!(!expected_name.trim().is_empty());
+
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        let devices = super::detect_vulkan_devices_from_engine(&engine, Some(&cancelled))
+            .expect("Vulkan inventory probe failed");
+        let ids: std::collections::HashSet<_> = devices.iter().map(|device| &device.id).collect();
+        assert_eq!(ids.len(), devices.len(), "Duplicate Vulkan device IDs");
+
+        let mut matching = devices
+            .iter()
+            .filter(|device| device.name.contains(&expected_name));
+        let device = matching
+            .next()
+            .expect("Physical Vulkan GPU was not reported");
+        let ordinal = device
+            .device_index
+            .expect("Vulkan device ordinal is missing");
+        assert_eq!(device.id, format!("vulkan:{ordinal}"));
+        assert!(matching.next().is_none(), "Device name is ambiguous");
+        println!(
+            "Physical Vulkan device reported by app: {} ({})",
+            device.name, device.id
+        );
+    }
+
+    #[test]
+    fn dedicated_vulkan_probe_uses_only_completed_inventory() {
+        let output = concat!(
+            "ggml_vulkan: 1 = Intel Graphics | uma: 1\n",
+            "whispertube_vulkan_device: 1 = Intel Graphics | uma: 1\n",
+            "whispertube_vulkan_devices_v1\n",
+        );
+        for (response, expected) in [(output, 1), ("whispertube_vulkan_devices_v1\n", 0)] {
+            let mut calls = Vec::new();
+            let devices = super::probe_vulkan_devices(|option| {
+                calls.push(option.to_owned());
+                Ok((true, response.to_owned()))
+            })
+            .unwrap();
+            assert_eq!(calls, ["--list-vulkan-devices"]);
+            assert_eq!(devices.len(), expected);
+            if let Some(device) = devices.first() {
+                assert_eq!(device.device_index, Some(1));
+                assert!(device.integrated);
+            }
+        }
+    }
+
+    #[test]
+    fn failed_vulkan_inventory_never_becomes_an_empty_inventory() {
+        const INCOMPLETE: &str = "Engine Vulkan gagal menyelesaikan inventaris perangkat.";
+        for (response, error) in [
+            (
+                Ok((false, "whispertube_vulkan_devices_v1".into())),
+                INCOMPLETE,
+            ),
+            (Ok((true, "unexpected response".into())), INCOMPLETE),
+            (Err("Proses dibatalkan.".into()), "Proses dibatalkan."),
+            (
+                Err("Pemeriksaan perangkat Vulkan melewati batas waktu.".into()),
+                "Pemeriksaan perangkat Vulkan melewati batas waktu.",
+            ),
+        ] {
+            let result = super::probe_vulkan_devices(|option| {
+                assert_eq!(option, "--list-vulkan-devices");
+                response.clone()
+            });
+            assert_eq!(result.err().as_deref(), Some(error));
+        }
+    }
+
+    #[test]
+    fn legacy_vulkan_probe_recognizes_unknown_option_even_with_successful_exit() {
+        let mut calls = Vec::new();
+        let devices = super::probe_vulkan_devices(|option| {
+            calls.push(option.to_owned());
+            Ok((
+                true,
+                match option {
+                    "--list-vulkan-devices" => {
+                        "error: unknown argument: --list-vulkan-devices\nusage: whisper-cli"
+                    }
+                    "--help" => "ggml_vulkan: 2 = Radeon RX 7600 | uma: 0",
+                    _ => panic!("Unexpected Vulkan probe option: {option}"),
+                }
+                .into(),
+            ))
+        })
+        .unwrap();
+        assert_eq!(calls, ["--list-vulkan-devices", "--help"]);
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].device_index, Some(2));
+        assert!(!devices[0].integrated);
+    }
+
+    #[test]
+    fn legacy_vulkan_probe_reuses_a_completed_inventory_without_starting_help() {
+        let devices = super::probe_vulkan_devices(|option| {
+            assert_eq!(option, "--list-vulkan-devices");
+            Ok((
+                true,
+                concat!(
+                    "ggml_vulkan: Found 2 Vulkan devices:\n",
+                    "ggml_vulkan: 0 = Intel Graphics | uma: 1\n",
+                    "ggml_vulkan: 1 = llvmpipe | uma: 0\n",
+                    "error: unknown argument: --list-vulkan-devices\n",
+                )
+                .into(),
+            ))
+        })
+        .unwrap();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].id, "vulkan:0");
+    }
+
+    #[test]
+    fn incomplete_legacy_vulkan_inventory_still_uses_help() {
+        let devices = super::probe_vulkan_devices(|option| {
+            Ok((
+                true,
+                match option {
+                    "--list-vulkan-devices" => concat!(
+                        "ggml_vulkan: Found 2 Vulkan devices:\n",
+                        "ggml_vulkan: 0 = Intel Graphics | uma: 1\n",
+                        "error: unknown argument: --list-vulkan-devices\n",
+                    ),
+                    "--help" => "ggml_vulkan: 1 = Radeon RX 7600 | uma: 0",
+                    _ => panic!("Unexpected Vulkan probe option: {option}"),
+                }
+                .into(),
+            ))
+        })
+        .unwrap();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].id, "vulkan:1");
+    }
+
     #[test]
     fn filters_software_vulkan_devices() {
         let output = "ggml_vulkan: 0 = llvmpipe (LLVM 17.0.6, 256 bits) | uma: 1 | fp16: 1\n\
             ggml_vulkan: 1 = AMD Radeon 780M Graphics (AMD proprietary driver) | uma: 1 | fp16: 1\n";
-        let devices = parse_vulkan_devices(output);
+        let devices = parse_vulkan_devices(output, "ggml_vulkan: ");
         assert_eq!(devices.len(), 1);
         assert_eq!(devices[0].id, "vulkan:1");
     }
@@ -1666,10 +1929,12 @@ mod tests {
                 "--nocapture",
             ])
             .env("WHISPERTUBE_CAPTURE_CHILD", "large-stdout");
-        assert!(
-            super::command_output_with_timeout(command, std::time::Duration::from_secs(8))
-                .is_none()
-        );
+        assert!(super::command_output_with_timeout(
+            command,
+            std::time::Duration::from_secs(8),
+            None
+        )
+        .is_none());
     }
 
     #[test]

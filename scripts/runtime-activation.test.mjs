@@ -11,7 +11,7 @@ beforeAll(() => checkTestPrerequisites());
 
 const variants = [
   { name: "CPU", file: "setup-windows.ps1", headerEnd: "$YtDlpVersion", start: "$HadExistingCpu =", end: '\n    Write-Step "Installing JavaScript dependencies"', destination: "$CpuDir", stage: "$StagingCpu", backup: "$CpuBackup" },
-  { name: "CUDA", file: "install-cuda-engine.ps1", headerEnd: "$WhisperVersion", start: "$HadExistingCuda =", end: '\n    Write-Host "`nCUDA engine installed.', destination: "$CudaDir", stage: "$Staging", backup: "$Backup" },
+  { name: "CUDA", file: "install-cuda-engine.ps1", headerEnd: "$WhisperAssetTag", start: "$HadExistingCuda =", end: '\n    Write-Host "`nCUDA engine installed.', destination: "$CudaDir", stage: "$Staging", backup: "$Backup" },
 ];
 
 for (const variant of variants) {

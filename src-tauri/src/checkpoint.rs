@@ -61,12 +61,7 @@ pub struct CompletedTranscript {
 }
 
 fn ordinary_file(path: &Path) -> Result<File, String> {
-    let metadata =
-        fs::symlink_metadata(path).map_err(|e| format!("Gagal membaca file resume: {e}"))?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() {
-        return Err("File resume bukan file biasa.".into());
-    }
-    File::open(path).map_err(|e| format!("Gagal membuka file resume: {e}"))
+    crate::durable::open_regular_read(path).map_err(|e| format!("Gagal membuka file resume: {e}"))
 }
 
 impl PcmAudio {
@@ -283,6 +278,13 @@ fn owned_directory(path: &Path) -> Result<(), String> {
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    atomic_write_with(path, |file| file.write_all(bytes))
+}
+
+pub(crate) fn atomic_write_with(
+    path: &Path,
+    write: impl FnOnce(&mut File) -> std::io::Result<()>,
+) -> Result<(), String> {
     let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
     let result = (|| {
         let mut file = OpenOptions::new()
@@ -290,7 +292,7 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
             .create_new(true)
             .open(&temporary)
             .map_err(|e| format!("Gagal membuat checkpoint sementara: {e}"))?;
-        file.write_all(bytes)
+        write(&mut file)
             .and_then(|_| file.sync_all())
             .map_err(|e| format!("Gagal menyimpan checkpoint: {e}"))?;
         drop(file);
@@ -503,9 +505,10 @@ where
             progress(start_percent, false);
             // An interrupted child can leave scratch outputs from a prior attempt.
             clear_chunk_output(&prefix)?;
-            let current_bytes = fs::metadata(&chunk_audio).map_or(0, |metadata| metadata.len());
-            let chunk_bytes = (chunk.end - chunk.start) * 2 + 44;
-            check_growth(chunk_bytes.saturating_sub(current_bytes))?;
+            // Atomic replacement temporarily holds the old WAV and the
+            // entire padded staging WAV. Budget the latter in full.
+            let chunk_bytes = (chunk.end - chunk.start).max(SAMPLE_RATE) * 2 + 44;
+            check_growth(chunk_bytes)?;
             audio.write_chunk(&chunk, &chunk_audio)?;
             let mut output = run(
                 &chunk_audio,
@@ -610,45 +613,89 @@ where
     )
 }
 
-pub fn write_exports_with_budget(
+pub(crate) fn measure_transcript_output(
+    write: impl FnOnce(&mut dyn Write) -> std::io::Result<()>,
+) -> Result<u64, String> {
+    struct Counter(u64);
+    impl Write for Counter {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            let next = self.0.saturating_add(data.len() as u64);
+            if next > MAX_TRANSCRIPT_RESULT_BYTES {
+                return Err(std::io::Error::other(
+                    "Hasil transcript melebihi batas ukuran aman.",
+                ));
+            }
+            self.0 = next;
+            Ok(data.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut counter = Counter(0);
+    write(&mut counter).map_err(|e| format!("Gagal menyiapkan keluaran transkrip: {e}"))?;
+    Ok(counter.0)
+}
+
+fn write_subtitles(
+    output: &mut dyn Write,
+    segments: &[Segment],
+    web_vtt: bool,
+) -> std::io::Result<()> {
+    if web_vtt {
+        writeln!(output, "WEBVTT\n")?;
+    }
+    for (index, segment) in segments.iter().enumerate() {
+        if web_vtt {
+            writeln!(
+                output,
+                "{} --> {}\n{}\n",
+                segment.from.replace(',', "."),
+                segment.to.replace(',', "."),
+                segment.text
+            )?;
+        } else {
+            writeln!(
+                output,
+                "{}\n{} --> {}\n{}\n",
+                index + 1,
+                segment.from,
+                segment.to,
+                segment.text
+            )?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn write_exports_with_budget(
     prefix: &Path,
-    result: &CompletedTranscript,
+    text: &str,
+    segments: &[Segment],
     check_growth: impl Fn(u64) -> Result<(), String>,
 ) -> Result<(), String> {
-    let mut srt = String::new();
-    let mut vtt = String::from("WEBVTT\n\n");
-    for (index, segment) in result.segments.iter().enumerate() {
-        srt.push_str(&format!(
-            "{}\n{} --> {}\n{}\n\n",
-            index + 1,
-            segment.from,
-            segment.to,
-            segment.text
-        ));
-        vtt.push_str(&format!(
-            "{} --> {}\n{}\n\n",
-            segment.from.replace(',', "."),
-            segment.to.replace(',', "."),
-            segment.text
-        ));
-    }
-    for (extension, bytes) in [
-        ("txt", result.text.as_bytes()),
-        ("srt", srt.as_bytes()),
-        ("vtt", vtt.as_bytes()),
-    ] {
-        if bytes.len() as u64 > MAX_TRANSCRIPT_RESULT_BYTES {
-            return Err("Export gabungan terlalu besar.".into());
-        }
-        check_growth(bytes.len() as u64)?;
-        atomic_write(&prefix.with_extension(extension), bytes)?;
+    let txt_bytes = measure_transcript_output(|out| out.write_all(text.as_bytes()))?;
+    let srt_bytes = measure_transcript_output(|out| write_subtitles(out, segments, false))?;
+    let vtt_bytes = measure_transcript_output(|out| write_subtitles(out, segments, true))?;
+
+    check_growth(txt_bytes)?;
+    atomic_write(&prefix.with_extension("txt"), text.as_bytes())?;
+    for (extension, bytes, web_vtt) in [("srt", srt_bytes, false), ("vtt", vtt_bytes, true)] {
+        check_growth(bytes)?;
+        atomic_write_with(&prefix.with_extension(extension), |file| {
+            let mut out = std::io::BufWriter::new(file);
+            write_subtitles(&mut out, segments, web_vtt)?;
+            out.flush()
+        })?;
     }
     Ok(())
 }
 
 #[cfg(test)]
 fn write_exports(prefix: &Path, result: &CompletedTranscript) -> Result<(), String> {
-    write_exports_with_budget(prefix, result, |_| Ok(()))
+    write_exports_with_budget(prefix, &result.text, &result.segments, |_| Ok(()))
 }
 
 /// Remove temporary PCM without discarding checkpoint text used for recovery.
@@ -657,25 +704,27 @@ pub fn cleanup_audio(job_dir: &Path) -> Result<(), String> {
     match fs::symlink_metadata(&root) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(format!("Gagal memeriksa audio checkpoint: {e}")),
-        Ok(meta) if !meta.is_dir() || meta.file_type().is_symlink() => {
+        Ok(meta) if !meta.is_dir() || crate::durable::is_link(&meta) => {
             return Err("Folder checkpoint bukan direktori biasa.".into())
         }
         Ok(_) => {}
     }
     for entry in fs::read_dir(root).map_err(|e| format!("Gagal membaca checkpoint: {e}"))? {
         let entry = entry.map_err(|e| format!("Gagal membaca checkpoint: {e}"))?;
-        let kind = entry
-            .file_type()
+        let metadata = fs::symlink_metadata(entry.path())
             .map_err(|e| format!("Gagal memeriksa checkpoint: {e}"))?;
-        if kind.is_symlink() {
+        if crate::durable::is_link(&metadata) {
             return Err("Checkpoint berisi symbolic link.".into());
         }
-        if kind.is_dir() {
-            match fs::remove_file(entry.path().join("current.wav")) {
+        if metadata.is_dir() {
+            let audio = entry.path().join("current.wav");
+            match fs::remove_file(&audio) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(format!("Gagal menghapus audio checkpoint: {e}")),
             }
+            crate::durable::sync_parent(&audio)
+                .map_err(|e| format!("Gagal menyinkronkan penghapusan audio checkpoint: {e}"))?;
         }
     }
     Ok(())
@@ -686,7 +735,7 @@ pub fn cleanup(job_dir: &Path) -> Result<(), String> {
     match fs::symlink_metadata(&directory) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(format!("Gagal membaca checkpoint: {e}")),
-        Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
+        Ok(meta) if meta.is_dir() && !crate::durable::is_link(&meta) => {
             fs::remove_dir_all(directory).map_err(|e| format!("Gagal membersihkan checkpoint: {e}"))
         }
         Ok(_) => Err("Folder checkpoint bukan direktori biasa.".into()),

@@ -8,6 +8,11 @@ export const stageLabels = {
   error: "Gagal",
 } as const;
 
+export function formatLocalDate(isoDate: string, language: "en" | "id" | "zh") {
+  const locale = { en: "en-US", id: "id-ID", zh: "zh-CN" }[language];
+  return new Date(isoDate).toLocaleString(locale);
+}
+
 export function formatDuration(totalSeconds: number) {
   if (!Number.isFinite(totalSeconds) || totalSeconds <= 0) return "—";
   const hours = Math.floor(totalSeconds / 3600);

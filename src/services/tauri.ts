@@ -133,8 +133,8 @@ export function installAccelerator(backend: Exclude<BackendChoice, "auto" | "cpu
   return invoke("install_accelerator", { backend });
 }
 
-export function listModels() {
-  return invoke<ModelInfo[]>("list_models");
+export function listModels(qwenRuntime?: boolean) {
+  return invoke<ModelInfo[]>("list_models", { qwenRuntime });
 }
 
 export function listHistory(beforeId: number | null = null) {
@@ -178,8 +178,8 @@ export function revealAudioFile(path: string) {
   return invoke("reveal_audio", { path });
 }
 
-export function downloadModel(modelId: string, computeDeviceId: string | null = null) {
-  return invoke("download_model", { modelId, computeDeviceId });
+export function downloadModel(modelId: string, computeDeviceId: string | null = null, operationId?: string) {
+  return invoke("download_model", { modelId, computeDeviceId, ...(operationId === undefined ? {} : { operationId }) });
 }
 
 export function installCudaEngine() {

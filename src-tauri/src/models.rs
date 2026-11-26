@@ -3,7 +3,6 @@ use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
-    process::Command,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, OnceLock,
@@ -21,9 +20,10 @@ use crate::{
     types::{CudaDownloadPayload, ModelDownloadPayload, ModelInfo},
 };
 
-const CUDA_ENGINE_VERSION: &str = "v1.9.2";
+// Upstream publishes v1.9.5 binaries as b5454 (d1be6fde11ac6e0407606b4e42fe72d34add8037).
+const CUDA_ENGINE_ASSET_TAG: &str = "b5454";
 const CUDA_ENGINE_BUILD: &str = "12.4.0";
-const CUDA_ENGINE_SHA256: &str = "443110ddaad70d4290ab2e77179e31cf712035bbc4fad56bb4519a90c917b39c";
+const CUDA_ENGINE_SHA256: &str = "afef0b881c500958921c3f5523b50e59ee2ec9b6f5cbd25b324c51ed308a957a";
 const MAX_CUDA_ARCHIVE_BYTES: u64 = 1024 * 1024 * 1024;
 // Keep connection establishment bounded, but allow GitHub/CDN responses and
 // slow links more time before declaring the large CUDA archive stalled.
@@ -40,9 +40,17 @@ struct ModelFingerprint {
     changed: [i64; 2],
 }
 
-static VERIFIED_MODELS: OnceLock<Mutex<HashMap<PathBuf, ModelFingerprint>>> = OnceLock::new();
+#[derive(Clone, Copy)]
+struct ModelVerification {
+    fingerprint: ModelFingerprint,
+    expected_sha256: &'static str,
+    valid: bool,
+}
 
-fn verified_models() -> &'static Mutex<HashMap<PathBuf, ModelFingerprint>> {
+const MODEL_INVALID: &str = "model_invalid:";
+static VERIFIED_MODELS: OnceLock<Mutex<HashMap<PathBuf, ModelVerification>>> = OnceLock::new();
+
+fn verified_models() -> &'static Mutex<HashMap<PathBuf, ModelVerification>> {
     VERIFIED_MODELS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -53,19 +61,25 @@ pub fn clear_verified_models() {
 }
 
 fn model_fingerprint(path: &Path) -> Result<ModelFingerprint, String> {
-    let file = fs::File::open(path).map_err(|e| format!("Gagal membuka model: {e}"))?;
+    open_model_for_verification(path).map(|(_, fingerprint)| fingerprint)
+}
+
+fn open_model_for_verification(path: &Path) -> Result<(fs::File, ModelFingerprint), String> {
+    let file =
+        crate::durable::open_regular_read(path).map_err(|e| format!("Gagal membuka model: {e}"))?;
     let metadata = file
         .metadata()
         .map_err(|e| format!("Gagal membaca metadata model: {e}"))?;
     let (identity, changed) = crate::runtime_snapshot::file_identity(&file, &metadata);
-    Ok(ModelFingerprint {
+    let fingerprint = ModelFingerprint {
         identity,
         changed,
         size: metadata.len(),
         modified: metadata
             .modified()
             .map_err(|e| format!("Waktu perubahan model tidak dapat dibaca: {e}"))?,
-    })
+    };
+    Ok((file, fingerprint))
 }
 
 struct TemporaryFileGuard {
@@ -103,7 +117,7 @@ impl Drop for TemporaryFileGuard {
 
 fn cuda_engine_url() -> String {
     format!(
-        "https://github.com/ggml-org/whisper.cpp/releases/download/{CUDA_ENGINE_VERSION}/whisper-cublas-{CUDA_ENGINE_BUILD}-bin-x64.zip"
+        "https://github.com/ggml-org/whisper.cpp/releases/download/{CUDA_ENGINE_ASSET_TAG}/whisper-bin-win-cuda-{CUDA_ENGINE_BUILD}-x64.zip"
     )
 }
 
@@ -171,19 +185,42 @@ pub fn model_filename(id: &str) -> String {
     }
 }
 
-pub fn list_models(app: &AppHandle) -> Result<Vec<ModelInfo>, String> {
+fn model_weights_ready(path: &Path) -> bool {
+    if !crate::paths::is_regular_file(path) {
+        return false;
+    }
+    let invalid = verified_models()
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(path).filter(|entry| !entry.valid).copied());
+    match invalid {
+        Some(entry) => model_fingerprint(path).is_ok_and(|actual| actual != entry.fingerprint),
+        None => true,
+    }
+}
+
+pub fn list_models(
+    app: &AppHandle,
+    mut qwen_runtime: Option<bool>,
+) -> Result<Vec<ModelInfo>, String> {
+    // A full UI refresh supplies its system-status result. Job startup and model
+    // installation perform their own checks before using the runtime.
     let dir = models_dir(app)?;
     Ok(MODELS
         .iter()
-        .map(|model| ModelInfo {
-            weights_present: crate::paths::is_regular_file(&dir.join(model_filename(model.id))),
-            id: model.id.into(),
-            label: model.label.into(),
-            description: model.description.into(),
-            size_mb: model.size_mb,
-            vram_required_mb: model.vram_required_mb,
-            installed: crate::paths::is_regular_file(&dir.join(model_filename(model.id)))
-                && (!crate::qwen::is_qwen(model.id) || crate::qwen::installed(app)),
+        .map(|model| {
+            let weights_present = model_weights_ready(&dir.join(model_filename(model.id)));
+            ModelInfo {
+                weights_present,
+                id: model.id.into(),
+                label: model.label.into(),
+                description: model.description.into(),
+                size_mb: model.size_mb,
+                vram_required_mb: model.vram_required_mb,
+                installed: weights_present
+                    && (!crate::qwen::is_qwen(model.id)
+                        || *qwen_runtime.get_or_insert_with(|| crate::qwen::installed(app))),
+            }
         })
         .collect())
 }
@@ -241,6 +278,7 @@ pub fn ensure_download_supported(
     app: &AppHandle,
     model_id: &str,
     compute_device_id: Option<&str>,
+    cancelled: &AtomicBool,
 ) -> Result<(), String> {
     let spec = model_spec(model_id)?;
     let target_id = compute_device_id.unwrap_or("auto");
@@ -249,7 +287,7 @@ pub fn ensure_download_supported(
         let index = index
             .parse::<usize>()
             .map_err(|_| format!("Target CUDA tidak valid: {target_id}."))?;
-        let gpu = system::detect_nvidia_device(index)
+        let gpu = system::detect_nvidia_device(index, Some(cancelled))
             .ok_or_else(|| format!("NVIDIA device {index} tidak terdeteksi."))?;
         return ensure_vram_available(spec.id, gpu.available_memory_mb());
     }
@@ -258,7 +296,7 @@ pub fn ensure_download_supported(
         let index = index
             .parse::<usize>()
             .map_err(|_| format!("Target Vulkan tidak valid: {target_id}."))?;
-        let devices = system::detect_vulkan_devices(app);
+        let devices = system::detect_vulkan_devices(app, cancelled)?;
         if !devices
             .iter()
             .any(|device| device.device_index == Some(index))
@@ -269,7 +307,7 @@ pub fn ensure_download_supported(
     }
 
     if target_id == "cuda" {
-        let gpu = system::detect_nvidia()
+        let gpu = system::detect_nvidia(Some(cancelled))
             .ok_or_else(|| "NVIDIA GPU/driver tidak terdeteksi.".to_string())?;
         return ensure_vram_available(spec.id, gpu.available_memory_mb());
     }
@@ -298,23 +336,30 @@ pub fn verify_model_file(
 ) -> Result<(), String> {
     crate::io_cancel::check(cancelled)?;
     let spec = model_spec(model_id)?;
-    let fingerprint = model_fingerprint(path)
+    let (mut file, fingerprint) = open_model_for_verification(path)
         .map_err(|error| format!("Gagal membaca metadata model {}: {error}", spec.label))?;
     if fingerprint.size == 0 {
         return Err(format!(
-            "Model {} kosong dan tidak dapat digunakan.",
+            "{MODEL_INVALID}Model {} kosong dan tidak dapat digunakan.",
             spec.label
         ));
     }
-    let already_verified = verified_models()
-        .lock()
-        .map_err(|_| "Cache verifikasi model terkunci".to_string())?
-        .get(path)
-        .is_some_and(|cached| *cached == fingerprint);
-    if already_verified && fingerprint.identity.is_some() {
+    if cfg!(windows)
+        && fingerprint.identity.is_some()
+        && verified_models()
+            .lock()
+            .map_err(|_| "Cache verifikasi model terkunci".to_string())?
+            .get(path)
+            .is_some_and(|cached| {
+                cached.valid
+                    && cached.expected_sha256 == spec.sha256
+                    && cached.fingerprint == fingerprint
+            })
+    {
         return Ok(());
     }
-    verify_sha256_file(path, spec.sha256, cancelled)?;
+    let actual = crate::io_cancel::hash_reader(&mut file, cancelled)?;
+    let valid = actual == spec.sha256;
     let verified_fingerprint = model_fingerprint(path)
         .map_err(|error| format!("Gagal memeriksa ulang model {}: {error}", spec.label))?;
     if verified_fingerprint != fingerprint {
@@ -326,7 +371,20 @@ pub fn verify_model_file(
     verified_models()
         .lock()
         .map_err(|_| "Cache verifikasi model terkunci".to_string())?
-        .insert(path.to_path_buf(), verified_fingerprint);
+        .insert(
+            path.to_path_buf(),
+            ModelVerification {
+                fingerprint: verified_fingerprint,
+                expected_sha256: spec.sha256,
+                valid,
+            },
+        );
+    if !valid {
+        return Err(format!(
+            "{MODEL_INVALID}SHA-256 model {} tidak cocok. Unduh ulang model dari Settings.",
+            spec.label
+        ));
+    }
     Ok(())
 }
 
@@ -337,6 +395,7 @@ pub(crate) fn emit_model_progress(
     total_bytes: u64,
     bytes_per_second: Option<u64>,
     phase: &str,
+    operation_id: Option<&str>,
 ) {
     let percent = if total_bytes > 0 {
         downloaded_bytes as f64 / total_bytes as f64 * 100.0
@@ -347,6 +406,7 @@ pub(crate) fn emit_model_progress(
         "model-download",
         ModelDownloadPayload {
             id: id.into(),
+            operation_id: operation_id.map(str::to_owned),
             phase: phase.into(),
             downloaded_bytes,
             total_bytes,
@@ -360,30 +420,34 @@ pub async fn download_model(
     app: AppHandle,
     model_id: String,
     cancelled: Arc<AtomicBool>,
+    operation_id: Option<&str>,
 ) -> Result<(), String> {
     let spec = model_spec(&model_id)?;
     if crate::qwen::is_qwen(&model_id) {
-        crate::qwen::ensure_runtime(&app, cancelled.clone()).await?;
+        crate::qwen::ensure_runtime(&app, cancelled.clone(), operation_id).await?;
     }
     let dest = model_path(&app, &model_id)?;
     let temp = dest.with_extension("bin.download");
     let temp_guard = TemporaryFileGuard::new(temp.clone());
-    if temp.exists() {
-        tokio::fs::remove_file(&temp)
-            .await
-            .map_err(|e| format!("Gagal membersihkan download model lama: {e}"))?;
+    match tokio::fs::remove_file(&temp).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("Gagal membersihkan download model lama: {error}")),
     }
-    if dest.exists() && crate::paths::is_regular_file(&dest) {
+    if crate::paths::is_regular_file(&dest) {
         let dest_for_verify = dest.clone();
         let cancel_for_verify = cancelled.clone();
-        tokio::task::spawn_blocking(move || {
+        let existing = tokio::task::spawn_blocking(move || {
             verify_model_file(&dest_for_verify, &model_id, &cancel_for_verify)
         })
         .await
-        .map_err(|e| format!("Verifikasi model gagal: {e}"))??;
-        return Ok(());
-    }
-    if dest.exists() {
+        .map_err(|e| format!("Verifikasi model gagal: {e}"))?;
+        match existing {
+            Ok(()) => return Ok(()),
+            Err(error) if error.starts_with(MODEL_INVALID) => {}
+            Err(error) => return Err(error),
+        }
+    } else if dest.symlink_metadata().is_ok() {
         let invalid_dest = dest.clone();
         tokio::task::spawn_blocking(move || clear_invalid_model_destination(&invalid_dest))
             .await
@@ -427,13 +491,16 @@ pub async fn download_model(
         total.saturating_add(256 * 1024 * 1024),
         "download model",
     )?;
-    let mut file = tokio::fs::File::create(&temp)
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)
         .await
         .map_err(|e| format!("Gagal membuat file model: {e}"))?;
     let mut downloaded = 0u64;
     let download_started_at = Instant::now();
     let mut last_progress = Duration::ZERO;
-    emit_model_progress(&app, spec.id, 0, total, None, "model");
+    emit_model_progress(&app, spec.id, 0, total, None, "model", operation_id);
     loop {
         if cancelled.load(Ordering::SeqCst) {
             return Err("Download model dibatalkan.".into());
@@ -461,13 +528,32 @@ pub async fn download_model(
         let elapsed = download_started_at.elapsed().as_secs_f64();
         let bytes_per_second = (elapsed > 0.0).then(|| (downloaded as f64 / elapsed) as u64);
         if network::download_progress_due(download_started_at.elapsed(), &mut last_progress) {
-            emit_model_progress(&app, spec.id, downloaded, total, bytes_per_second, "model");
+            emit_model_progress(
+                &app,
+                spec.id,
+                downloaded,
+                total,
+                bytes_per_second,
+                "model",
+                operation_id,
+            );
         }
     }
-    emit_model_progress(&app, spec.id, downloaded, total, None, "model");
+    emit_model_progress(
+        &app,
+        spec.id,
+        downloaded,
+        total,
+        None,
+        "model",
+        operation_id,
+    );
     file.flush()
         .await
         .map_err(|e| format!("Gagal menyelesaikan file model: {e}"))?;
+    file.sync_all()
+        .await
+        .map_err(|e| format!("Gagal menyinkronkan file model: {e}"))?;
     drop(file);
     let temp_for_verify = temp.clone();
     let expected_sha256 = spec.sha256;
@@ -480,18 +566,28 @@ pub async fn download_model(
     if cancelled.load(Ordering::SeqCst) {
         return Err("Download model dibatalkan.".into());
     }
-    tokio::fs::rename(&temp, &dest)
+    let staging = temp.clone();
+    tokio::task::spawn_blocking(move || crate::durable::publish(&staging, &dest))
         .await
+        .map_err(|e| format!("Pemasangan model gagal dijalankan: {e}"))?
         .map_err(|e| format!("Gagal memasang model: {e}"))?;
     temp_guard.commit();
-    emit_model_progress(&app, spec.id, downloaded, downloaded, None, "model");
+    emit_model_progress(
+        &app,
+        spec.id,
+        downloaded,
+        downloaded,
+        None,
+        "model",
+        operation_id,
+    );
     Ok(())
 }
 
 fn clear_invalid_model_destination(path: &Path) -> Result<(), String> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|error| format!("Gagal memeriksa model invalid: {error}"))?;
-    if metadata.file_type().is_symlink() {
+    if crate::durable::is_link(&metadata) {
         return Err("Model invalid berupa symbolic link dan tidak dapat diganti otomatis.".into());
     }
     if metadata.is_dir() {
@@ -778,8 +874,7 @@ fn finalize_cuda_engine_blocking(
         return Err("CUDA engine gagal dipasang ke staging.".into());
     }
     emit_cuda_progress(app, 94.0, 0, 0, None);
-    let mut command = Command::new(&staging_cli);
-    crate::process::hide_console(&mut command);
+    let mut command = crate::paths::whisper_cli_command(&staging_cli);
     command.arg("--version");
     let (status, stderr) = crate::process::run_with_timeout_captured_cancelable(
         &mut command,
@@ -918,7 +1013,26 @@ mod tests {
         let after = super::model_fingerprint(&path).unwrap();
         assert_eq!(before.size, after.size);
         assert_eq!(before.modified, after.modified);
+        #[cfg(windows)]
         assert!(before != after || after.identity.is_none());
+        #[cfg(unix)]
+        {
+            let spec = super::model_spec("base").unwrap();
+            super::verified_models().lock().unwrap().insert(
+                path.clone(),
+                super::ModelVerification {
+                    fingerprint: after,
+                    expected_sha256: spec.sha256,
+                    valid: true,
+                },
+            );
+            assert!(
+                super::verify_model_file(&path, spec.id, &super::AtomicBool::new(false))
+                    .unwrap_err()
+                    .starts_with(super::MODEL_INVALID)
+            );
+            super::verified_models().lock().unwrap().remove(&path);
+        }
         std::fs::remove_file(path).unwrap();
     }
     #[cfg(windows)]
@@ -993,6 +1107,24 @@ mod tests {
             let _guard = TemporaryFileGuard::new(PathBuf::from(&path));
         }
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn checksum_failure_removes_current_weights_from_model_availability() {
+        let storage = tempfile::tempdir().unwrap();
+        let path = storage.path().join("ggml-base.bin");
+        fs::write(&path, b"nonempty corrupt model").unwrap();
+        assert!(super::model_weights_ready(&path));
+        let error = verify_model_file(&path, "base", &std::sync::atomic::AtomicBool::new(false))
+            .unwrap_err();
+        assert!(error.starts_with(super::MODEL_INVALID));
+        assert!(!super::model_weights_ready(&path));
+
+        // A replacement gets a fresh verification attempt.
+        let replacement = storage.path().join("replacement.bin");
+        fs::write(&replacement, b"different weights").unwrap();
+        crate::durable::publish(&replacement, &path).unwrap();
+        assert!(super::model_weights_ready(&path));
     }
 
     #[test]

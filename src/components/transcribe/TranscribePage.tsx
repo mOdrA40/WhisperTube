@@ -74,6 +74,7 @@ type TranscribePageProps = {
   onInstallAccelerator: (backend: Exclude<BackendChoice, "auto" | "cpu" | "cuda">) => void;
   onCancelAccelerator: () => void;
   onStart: () => void;
+  onRefreshCompute?: () => void;
   onCopy: () => void;
   onExport: (kind: "txt" | "srt" | "vtt") => void;
   onRevealAudio: () => void;
@@ -135,6 +136,7 @@ export function TranscribePage({
   onInstallAccelerator,
   onCancelAccelerator,
   onStart,
+  onRefreshCompute,
   onCopy,
   onExport,
   onRevealAudio,
@@ -234,6 +236,7 @@ export function TranscribePage({
           onInstallAccelerator={onInstallAccelerator}
           onCancelAccelerator={onCancelAccelerator}
           onStart={onStart}
+          onRefreshCompute={onRefreshCompute}
         />
         </div>
       </aside>

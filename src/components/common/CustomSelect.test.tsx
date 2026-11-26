@@ -40,9 +40,10 @@ describe("CustomSelect", () => {
     );
 
     const trigger = screen.getByRole("combobox", { name: "Compute backend" });
-    expect(trigger.getAttribute("aria-controls")).toBeTruthy();
+    expect(trigger.getAttribute("aria-controls")).toBeNull();
 
     fireEvent.click(trigger);
+    expect(trigger.getAttribute("aria-controls")).toBe(screen.getByRole("listbox").id);
     fireEvent.click(screen.getByRole("option", { name: "CPU" }));
     expect(onChange).toHaveBeenCalledWith("cpu");
   });

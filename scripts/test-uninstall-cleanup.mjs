@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { copyFileSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -48,10 +48,9 @@ test("development runtime cleanup preserves nested tracked placeholders", { skip
 
 test("uninstall cleanup is opt-in and never removes the complete application data root", () => {
   assert.ok(hook.includes('StrCmp $WhisperTubeRemoveUserData "1" 0 whispertube_uninstall_done'));
-  assert.ok(!hook.includes(`RMDir /r "${applicationRoot}"`));
+  assert.doesNotMatch(hook, /RMDir\s+\/r/i);
   for (const name of ownedDirectories) {
-    assert.ok(hook.includes(`RMDir /r "${applicationRoot}\\${name}"`), name);
-    assert.ok(hook.includes(`IfFileExists "${applicationRoot}\\${name}\\*.*" whispertube_cleanup_failed`), name);
+    assert.ok(hook.includes(`!insertmacro WHISPERTUBE_PURGE_OWNED_DIR "${applicationRoot}\\${name}"`), name);
   }
   for (const name of databaseFiles) {
     assert.ok(hook.includes(`Delete "${applicationRoot}\\${name}"`), name);
@@ -85,15 +84,26 @@ function isolatedBuiltinCleanup(appData, roamingData) {
   return cleanup;
 }
 
-for (const mode of ["keep", "remove", "update", "unset", "locked-cookie", "locked-database"]) {
+for (const mode of ["keep", "remove", "update", "unset", "locked-cookie", "locked-database", "linked-root", "linked-child"]) {
   test(`NSIS hook in isolated storage: ${mode}`, { skip: process.platform !== "win32" }, () => {
     const root = mkdtempSync(join(tmpdir(), "whispertube-$0-uninstall-test-"));
     try {
-      const appData = join(root, "app-data");
+      const storage = join(root, "app-data");
+      const appData = mode === "linked-root" ? join(root, "redirected-root") : storage;
       const roamingData = join(root, "roaming-data");
       mkdirSync(roamingData);
       writeFileSync(join(roamingData, "keep.txt"), "roaming canary");
-      for (const name of [...ownedDirectories, "WebView"]) mkdirSync(join(appData, name), { recursive: true });
+      for (const name of [...ownedDirectories, "WebView"]) mkdirSync(join(storage, name), { recursive: true });
+      if (mode === "linked-root") symlinkSync(storage, appData, "junction");
+      const outside = join(root, "outside");
+      mkdirSync(outside);
+      writeFileSync(join(outside, "keep.txt"), "outside the storage scope");
+      if (mode === "linked-child") {
+        const parent = join(appData, "jobs", "nested");
+        mkdirSync(parent);
+        symlinkSync(outside, join(parent, "external"), "junction");
+        writeFileSync(join(parent, "owned.txt"), "inside the storage scope");
+      }
       const cookie = join(appData, "cookie-jars", "crashed-operation", "cookies.txt");
       mkdirSync(resolve(cookie, ".."), { recursive: true });
       writeFileSync(cookie, "internal synthetic session");
@@ -119,6 +129,7 @@ SilentInstall silent
 !include LogicLib.nsh
 Var DeleteAppDataCheckboxState
 Var UpdateMode
+!define WHISPERTUBE_TEST_NORMAL_SECTION
 !include "${quoteNsisCompiler(join(root, "hooks.nsh"))}"
 Section
   StrCpy $DeleteAppDataCheckboxState "${mode === "unset" ? "" : mode === "keep" ? "0" : "1"}"
@@ -148,9 +159,15 @@ finally { $fixtureLock.Dispose() }
       assert.equal(readFileSync(join(appData, "WebView", "keep.txt"), "utf8"), "webview");
       assert.equal(readFileSync(join(appData, "config.json"), "utf8"), "config");
       assert.equal(readFileSync(join(roamingData, "keep.txt"), "utf8"), "roaming canary");
-      const keep = ["keep", "update", "unset"].includes(mode);
+      const keep = ["keep", "update", "unset", "linked-root"].includes(mode);
       assert.equal(existsSync(cookie), keep || mode === "locked-cookie");
-      assert.equal(existsSync(join(root, "cleanup-warning.txt")), locked !== null);
+      assert.equal(readFileSync(join(outside, "keep.txt"), "utf8"), "outside the storage scope");
+      assert.equal(existsSync(join(root, "cleanup-warning.txt")), locked !== null || mode.startsWith("linked-"));
+      if (mode === "linked-child") {
+        const parent = join(appData, "jobs", "nested");
+        assert.ok(existsSync(join(parent, "external")));
+        assert.ok(!existsSync(join(parent, "owned.txt")));
+      }
       for (const name of databaseFiles) assert.equal(existsSync(join(appData, name)), keep || mode === "locked-database", name);
     } finally {
       const resolved = resolve(root);

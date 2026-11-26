@@ -281,7 +281,7 @@ export function CustomSelect({
         aria-haspopup="listbox"
         aria-disabled={disabled || undefined}
         aria-expanded={isOpen}
-        aria-controls={listboxId}
+        aria-controls={isOpen ? listboxId : undefined}
         aria-label={ariaLabel}
         aria-labelledby={ariaLabelledBy}
         aria-activedescendant={

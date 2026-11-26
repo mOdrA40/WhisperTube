@@ -79,7 +79,9 @@ pub fn library_path(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 pub fn installed(app: &AppHandle) -> bool {
-    snapshot(app, &AtomicBool::new(false)).is_ok()
+    library_path(app).is_ok_and(|path| {
+        crate::runtime_snapshot::RuntimeSnapshot::capture_for_status(&path, Some(VERSION)).is_ok()
+    })
 }
 
 pub fn snapshot(
@@ -166,7 +168,11 @@ fn archive_relative(path: &Path, tuple: &str) -> Result<PathBuf, String> {
     Ok(relative.to_owned())
 }
 
-pub async fn ensure_runtime(app: &AppHandle, cancelled: Arc<AtomicBool>) -> Result<(), String> {
+pub async fn ensure_runtime(
+    app: &AppHandle,
+    cancelled: Arc<AtomicBool>,
+    operation_id: Option<&str>,
+) -> Result<(), String> {
     let (tuple, sha) = artifact()?;
     let library = library_path(app)?;
     if crate::paths::is_regular_file(&library) {
@@ -186,7 +192,7 @@ pub async fn ensure_runtime(app: &AppHandle, cancelled: Arc<AtomicBool>) -> Resu
     let parent = crate::paths::user_runtime_dir(app)?;
     let staging = parent.join(format!(".qwen-staging-{}", uuid::Uuid::new_v4()));
     fs::create_dir(&staging).map_err(|e| format!("Folder runtime Qwen: {e}"))?;
-    let result = install(app, &staging, &library, tuple, sha, cancelled).await;
+    let result = install(app, &staging, &library, tuple, sha, cancelled, operation_id).await;
     if let Err(error) = fs::remove_dir_all(&staging) {
         if error.kind() != std::io::ErrorKind::NotFound {
             eprintln!("Qwen staging cleanup: {error}");
@@ -202,6 +208,7 @@ async fn install(
     tuple: &str,
     sha: &str,
     cancelled: Arc<AtomicBool>,
+    operation_id: Option<&str>,
 ) -> Result<(), String> {
     crate::resources::require_disk(staging, MAX_ARCHIVE + MAX_UNPACKED, "runtime Qwen")?;
     let archive = staging.join("archive.tar.gz");
@@ -228,7 +235,15 @@ async fn install(
     let mut file = tokio::fs::File::create(&archive)
         .await
         .map_err(|e| format!("Arsip Qwen: {e}"))?;
-    crate::models::emit_model_progress(app, super::MODEL_ID, 0, total, None, "runtime");
+    crate::models::emit_model_progress(
+        app,
+        super::MODEL_ID,
+        0,
+        total,
+        None,
+        "runtime",
+        operation_id,
+    );
     let started = Instant::now();
     let mut last_progress = Duration::ZERO;
     while let Some(chunk) = crate::network::next_chunk_cancelable(
@@ -256,6 +271,7 @@ async fn install(
                 total,
                 speed,
                 "runtime",
+                operation_id,
             );
         }
     }
@@ -266,6 +282,7 @@ async fn install(
         downloaded,
         None,
         "runtime",
+        operation_id,
     );
     file.flush()
         .await

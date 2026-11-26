@@ -33,15 +33,26 @@ if ($unexpectedRuntimeFiles) {
 }
 
 $buildArgs = @('--bundles', 'nsis')
+$originalSigningKey = $env:TAURI_SIGNING_PRIVATE_KEY
 if ($env:TAURI_CREATE_UPDATER_ARTIFACTS -eq 'true') {
-    if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY) -and [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY_PATH)) {
-        throw 'TAURI_SIGNING_PRIVATE_KEY atau TAURI_SIGNING_PRIVATE_KEY_PATH wajib diisi saat membuat artifact updater.'
+    if ([string]::IsNullOrWhiteSpace($originalSigningKey)) {
+        if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY_PATH)) {
+            throw 'TAURI_SIGNING_PRIVATE_KEY atau TAURI_SIGNING_PRIVATE_KEY_PATH wajib diisi saat membuat artifact updater.'
+        }
+        if (-not (Test-Path -LiteralPath $env:TAURI_SIGNING_PRIVATE_KEY_PATH -PathType Leaf)) {
+            throw 'TAURI_SIGNING_PRIVATE_KEY_PATH harus menunjuk file kunci privat updater.'
+        }
+        $env:TAURI_SIGNING_PRIVATE_KEY = $env:TAURI_SIGNING_PRIVATE_KEY_PATH
     }
     $buildArgs += @('--config', '{"bundle":{"createUpdaterArtifacts":true}}')
 }
 
-npm run tauri:build -- @buildArgs
-if ($LASTEXITCODE -ne 0) { throw "Build aplikasi gagal (npm exit code $LASTEXITCODE)." }
+try {
+    npm run tauri:build -- @buildArgs
+    if ($LASTEXITCODE -ne 0) { throw "Build aplikasi gagal (npm exit code $LASTEXITCODE)." }
+} finally {
+    $env:TAURI_SIGNING_PRIVATE_KEY = $originalSigningKey
+}
 $metadata = cargo metadata --no-deps --format-version 1 --manifest-path src-tauri/Cargo.toml
 if ($LASTEXITCODE -ne 0) { throw 'Lokasi hasil build Cargo tidak dapat ditentukan.' }
 $targetRoot = ($metadata | ConvertFrom-Json).target_directory

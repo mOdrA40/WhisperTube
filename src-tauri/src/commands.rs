@@ -37,6 +37,7 @@ pub async fn history_files(
     state: State<'_, AppState>,
     id: i64,
 ) -> CommandResult<Vec<crate::types::HistoryFileInfo>> {
+    crate::wait_for_startup(&app).await;
     let operation = OperationGuard::reserve_history_read(&state)?;
     Ok(tokio::task::spawn_blocking(move || {
         let _operation = operation;
@@ -53,6 +54,7 @@ pub async fn delete_history_files(
     ids: Vec<i64>,
     scope: crate::types::HistoryFileScope,
 ) -> CommandResult<crate::types::HistoryFilesDeleteOutcome> {
+    crate::wait_for_startup(&app).await;
     let operation = OperationGuard::reserve_history_delete(&state)?;
     Ok(tokio::task::spawn_blocking(move || {
         let _operation = operation;
@@ -63,12 +65,13 @@ pub async fn delete_history_files(
 }
 
 #[tauri::command]
-pub fn reveal_history_file(
+pub async fn reveal_history_file(
     app: AppHandle,
     state: State<'_, AppState>,
     id: i64,
     kind: crate::types::HistoryFileKind,
 ) -> CommandResult<()> {
+    crate::wait_for_startup(&app).await;
     let _operation = OperationGuard::reserve_history_reveal(&state)?;
     Ok(crate::history_files::reveal(&app, id, kind)?)
 }
@@ -78,6 +81,7 @@ pub async fn list_job_cache(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> CommandResult<Vec<crate::types::JobCacheEntry>> {
+    crate::wait_for_startup(&app).await;
     let operation = OperationGuard::reserve_history_read(&state)?;
     Ok(tokio::task::spawn_blocking(move || {
         let _operation = operation;
@@ -93,6 +97,7 @@ pub async fn discard_job_cache(
     state: State<'_, AppState>,
     id: String,
 ) -> CommandResult<()> {
+    crate::wait_for_startup(&app).await;
     let operation = OperationGuard::reserve_history_delete(&state)?;
     Ok(tokio::task::spawn_blocking(move || {
         let _operation = operation;
@@ -104,6 +109,7 @@ pub async fn discard_job_cache(
 
 #[tauri::command]
 pub async fn system_status(app: AppHandle) -> CommandResult<SystemStatus> {
+    crate::wait_for_startup(&app).await;
     Ok(
         tokio::task::spawn_blocking(move || system::system_status(&app))
             .await
@@ -113,6 +119,7 @@ pub async fn system_status(app: AppHandle) -> CommandResult<SystemStatus> {
 
 #[tauri::command]
 pub async fn job_storage_usage(app: AppHandle, state: State<'_, AppState>) -> CommandResult<u64> {
+    crate::wait_for_startup(&app).await;
     let operation = OperationGuard::reserve_history_read(&state)?;
     Ok(tokio::task::spawn_blocking(move || {
         let _operation = operation;
@@ -123,9 +130,13 @@ pub async fn job_storage_usage(app: AppHandle, state: State<'_, AppState>) -> Co
 }
 
 #[tauri::command]
-pub async fn list_models(app: AppHandle) -> CommandResult<Vec<ModelInfo>> {
+pub async fn list_models(
+    app: AppHandle,
+    qwen_runtime: Option<bool>,
+) -> CommandResult<Vec<ModelInfo>> {
+    crate::wait_for_startup(&app).await;
     Ok(
-        tokio::task::spawn_blocking(move || models::list_models(&app))
+        tokio::task::spawn_blocking(move || models::list_models(&app, qwen_runtime))
             .await
             .map_err(|error| format!("Pembacaan model gagal dijalankan: {error}"))??,
     )
@@ -137,30 +148,43 @@ pub async fn download_model(
     state: State<'_, AppState>,
     model_id: String,
     compute_device_id: Option<String>,
+    operation_id: Option<String>,
 ) -> CommandResult<()> {
+    crate::wait_for_startup(&app).await;
+    if operation_id.as_ref().is_some_and(|id| id.len() > 64) {
+        return Err("Identitas unduhan model tidak valid.".into());
+    }
     let operation = OperationGuard::reserve_model_download(&state, model_id.clone())?;
     let preflight_app = app.clone();
     let preflight_model = model_id.clone();
+    let preflight_cancelled = state.model_cancelled.clone();
     let _operation = run_preflight(operation, state.model_cancelled.clone(), move || {
         models::ensure_download_supported(
             &preflight_app,
             &preflight_model,
             compute_device_id.as_deref(),
+            &preflight_cancelled,
         )
     })
     .await?;
-    let result = models::download_model(app, model_id, state.model_cancelled.clone()).await;
+    let result = models::download_model(
+        app,
+        model_id,
+        state.model_cancelled.clone(),
+        operation_id.as_deref(),
+    )
+    .await;
     Ok(result?)
 }
 
 #[tauri::command]
 pub async fn install_cuda_engine(app: AppHandle, state: State<'_, AppState>) -> CommandResult<()> {
+    crate::wait_for_startup(&app).await;
     let operation = OperationGuard::reserve_runtime_install(&state, "cuda".into())?;
-    let _operation = run_preflight(
-        operation,
-        state.runtime_cancelled.clone(),
-        system::ensure_cuda_install_supported,
-    )
+    let preflight_cancelled = state.runtime_cancelled.clone();
+    let _operation = run_preflight(operation, state.runtime_cancelled.clone(), move || {
+        system::ensure_cuda_install_supported(Some(&preflight_cancelled))
+    })
     .await?;
     let result = models::install_cuda_engine(app, state.runtime_cancelled.clone()).await;
     Ok(result?)
@@ -172,6 +196,7 @@ pub async fn install_accelerator(
     state: State<'_, AppState>,
     backend: String,
 ) -> CommandResult<()> {
+    crate::wait_for_startup(&app).await;
     let operation = OperationGuard::reserve_runtime_install(&state, backend.clone())?;
     let preflight_backend = backend.clone();
     let _operation = run_preflight(operation, state.runtime_cancelled.clone(), move || {
@@ -188,6 +213,7 @@ pub async fn delete_model(
     state: State<'_, AppState>,
     model_id: String,
 ) -> CommandResult<()> {
+    crate::wait_for_startup(&app).await;
     let operation = OperationGuard::reserve_model_delete(&state, model_id.clone())?;
     Ok(tokio::task::spawn_blocking(move || {
         let _operation = operation;
@@ -199,6 +225,7 @@ pub async fn delete_model(
 
 #[tauri::command]
 pub async fn reset_user_data(app: AppHandle, state: State<'_, AppState>) -> CommandResult<()> {
+    crate::wait_for_startup(&app).await;
     let operation = OperationGuard::reserve_data_reset(&state)?;
     Ok(tokio::task::spawn_blocking(move || {
         let _operation = operation;
@@ -214,6 +241,7 @@ pub async fn inspect_local_audio(
     state: State<'_, AppState>,
     path: String,
 ) -> CommandResult<VideoMetadata> {
+    crate::wait_for_startup(&app).await;
     let operation = OperationGuard::reserve_inspecting(&state)?;
     let active_pid = state.active_pid.clone();
     let cancelled = state.inspect_cancelled.clone();
@@ -232,6 +260,7 @@ pub async fn inspect_media(
     url: String,
     cookies_path: Option<String>,
 ) -> CommandResult<VideoMetadata> {
+    crate::wait_for_startup(&app).await;
     let _operation = OperationGuard::reserve_inspecting(&state)?;
     Ok(sources::inspect_media(
         app,
@@ -250,6 +279,7 @@ pub async fn transcription_resume_stage(
     url: String,
     duration: f64,
 ) -> CommandResult<Option<crate::types::TranscriptionResumeStage>> {
+    crate::wait_for_startup(&app).await;
     run_resume_lookup(&state, move || {
         transcription::resume_stage(&app, &url, duration)
     })
@@ -289,6 +319,7 @@ pub async fn start_transcription(
     completion_message: Option<String>,
     notifications: Option<completion_notifications::TranscriptionNotifications>,
 ) -> CommandResult<TranscriptResult> {
+    crate::wait_for_startup(&app).await;
     let mut job_guard = JobGuard::reserve(&state)?;
     let active_pid = state.active_pid.clone();
     let cancelled = state.cancelled.clone();
@@ -333,6 +364,7 @@ pub async fn list_history(
     state: State<'_, AppState>,
     before_id: Option<i64>,
 ) -> CommandResult<HistoryPageResult> {
+    crate::wait_for_startup(&app).await;
     let operation = OperationGuard::reserve_history_read(&state)?;
     Ok(tokio::task::spawn_blocking(move || {
         let _operation = operation;
@@ -348,6 +380,7 @@ pub async fn load_history(
     state: State<'_, AppState>,
     id: i64,
 ) -> CommandResult<TranscriptResult> {
+    crate::wait_for_startup(&app).await;
     let operation = OperationGuard::reserve_history_read(&state)?;
     Ok(tokio::task::spawn_blocking(move || {
         let _operation = operation;
@@ -363,6 +396,7 @@ pub async fn delete_history(
     state: State<'_, AppState>,
     ids: Vec<i64>,
 ) -> CommandResult<HistoryDeleteOutcome> {
+    crate::wait_for_startup(&app).await;
     let operation = OperationGuard::reserve_history_delete(&state)?;
     Ok(tokio::task::spawn_blocking(move || {
         let _operation = operation;
@@ -379,6 +413,7 @@ pub async fn copy_export(
     source: String,
     target: String,
 ) -> CommandResult<()> {
+    crate::wait_for_startup(&app).await;
     let operation = OperationGuard::reserve_history_export(&state)?;
     Ok(tokio::task::spawn_blocking(move || {
         let _operation = operation;
@@ -389,7 +424,12 @@ pub async fn copy_export(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn reveal_audio(app: AppHandle, state: State<'_, AppState>, path: String) -> CommandResult<()> {
+pub async fn reveal_audio(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+) -> CommandResult<()> {
+    crate::wait_for_startup(&app).await;
     let _operation = OperationGuard::reserve_history_reveal(&state)?;
     Ok(history::reveal_audio(&app, &path)?)
 }

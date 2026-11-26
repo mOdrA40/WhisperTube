@@ -48,6 +48,7 @@ type ControlsCardProps = {
   onKeepAudioChange: (keepAudio: boolean) => void;
   onDownloadModel: (id: string) => void;
   onStart: () => void;
+  onRefreshCompute?: () => void;
 };
 
 export function ControlsCard({
@@ -86,6 +87,7 @@ export function ControlsCard({
   onKeepAudioChange,
   onDownloadModel,
   onStart,
+  onRefreshCompute,
 }: ControlsCardProps) {
   const { t } = useI18n();
   const controlsDisabled = busy || operationActive;
@@ -381,9 +383,11 @@ export function ControlsCard({
       </div>
       <div className="control-action-footer">
       {vramWarning && (
-        <p className="setup-hint">
-          <WarningCircleIcon aria-hidden="true" size={14} /> {vramWarning}
-        </p>
+        <div className="setup-hint">
+          <p><WarningCircleIcon aria-hidden="true" size={14} /> {vramWarning}</p>
+          {onRefreshCompute && <button type="button" className="secondary-button"
+            disabled={operationActive} onClick={onRefreshCompute}>{t("settings.recheck")}</button>}
+        </div>
       )}
       {acceleratorWarning && (
         <p className="setup-hint">

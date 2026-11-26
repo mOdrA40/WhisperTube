@@ -112,6 +112,7 @@ export default function App() {
           onInstallAccelerator={app.installAccelerator}
           onCancelAccelerator={app.cancelJob}
           onStart={app.startTranscription}
+          onRefreshCompute={app.refreshSystem}
           onCopy={app.copyTranscript}
           onExport={app.exportFile}
           onRevealAudio={app.revealAudio}

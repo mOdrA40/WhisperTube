@@ -81,7 +81,7 @@ pub fn file_sha256(path: &Path, cancelled: &AtomicBool) -> Result<String, String
     hash_reader(&mut file, cancelled)
 }
 
-fn hash_reader(input: &mut impl Read, cancelled: &AtomicBool) -> Result<String, String> {
+pub(crate) fn hash_reader(input: &mut impl Read, cancelled: &AtomicBool) -> Result<String, String> {
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; 64 * 1024];
     loop {

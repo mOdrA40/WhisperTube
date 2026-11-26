@@ -50,22 +50,13 @@ impl CookieJar {
         if !metadata.is_file() || metadata.len() > MAX_COOKIE_BYTES {
             return Err("File cookies.txt bukan file biasa atau terlalu besar.".into());
         }
+        crate::durable::create_private_dir_all(root)
+            .map_err(|e| format!("Gagal membuka storage cookies: {e}"))?;
         let mut builder = fs::DirBuilder::new();
         #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt;
             builder.mode(0o700);
-        }
-        builder
-            .recursive(true)
-            .create(root)
-            .map_err(|e| format!("Gagal membuat storage cookies: {e}"))?;
-        if fs::symlink_metadata(root)
-            .map_err(|e| format!("Gagal memvalidasi storage cookies: {e}"))?
-            .file_type()
-            .is_symlink()
-        {
-            return Err("Storage cookies tidak boleh berupa symbolic link.".into());
         }
         let directory = root.join(Uuid::new_v4().to_string());
         builder
@@ -128,7 +119,7 @@ fn cleanup_stale_in(root: &Path) -> Result<(), String> {
     match fs::symlink_metadata(root) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(format!("Gagal membaca storage cookies: {e}")),
-        Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => {
+        Ok(meta) if !meta.is_dir() || crate::durable::is_link(&meta) => {
             return Err("Storage cookies bukan direktori biasa.".into());
         }
         Ok(_) => {}
@@ -137,11 +128,11 @@ fn cleanup_stale_in(root: &Path) -> Result<(), String> {
         fs::canonicalize(root).map_err(|e| format!("Gagal memvalidasi cookies: {e}"))?;
     for entry in fs::read_dir(root).map_err(|e| format!("Gagal membaca cookies: {e}"))? {
         let entry = entry.map_err(|e| format!("Gagal membaca cookie jar: {e}"))?;
-        let kind = entry
-            .file_type()
+        let metadata = entry
+            .metadata()
             .map_err(|e| format!("Gagal membaca tipe cookie jar: {e}"))?;
-        if !kind.is_dir()
-            || kind.is_symlink()
+        if !metadata.is_dir()
+            || crate::durable::is_link(&metadata)
             || Uuid::parse_str(&entry.file_name().to_string_lossy()).is_err()
         {
             continue;

@@ -117,6 +117,7 @@ export type ProgressPayload = {
 
 export type ModelDownloadPayload = {
   id: string;
+  operationId?: string;
   phase?: "model" | "runtime";
   downloadedBytes: number;
   totalBytes: number;

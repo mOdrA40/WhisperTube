@@ -1,0 +1,30 @@
+diff --git a/examples/cli/cli.cpp b/examples/cli/cli.cpp
+--- a/examples/cli/cli.cpp
++++ b/examples/cli/cli.cpp
+@@ -4,2 +4,3 @@
+ #include "whisper.h"
++#include "ggml-backend.h"
+ #include "grammar-parser.h"
+@@ -975,4 +976,21 @@
+     SetConsoleOutputCP(CP_UTF8);
+ #endif
+-
++
++    if (argc == 2 && std::strcmp(argv[1], "--list-vulkan-devices") == 0) {
++        ggml_backend_load_all();
++        const size_t count = ggml_backend_dev_count();
++        for (size_t index = 0; index < count; ++index) {
++            const ggml_backend_dev_t device = ggml_backend_dev_get(index);
++            const char * name = ggml_backend_dev_name(device);
++            if (std::strncmp(name, "Vulkan", 6) != 0) {
++                continue;
++            }
++            const bool integrated = ggml_backend_dev_type(device) == GGML_BACKEND_DEVICE_TYPE_IGPU;
++            std::fprintf(stderr, "whispertube_vulkan_device: %s = %s | uma: %d\n",
++                         name + 6, ggml_backend_dev_description(device), integrated ? 1 : 0);
++        }
++        std::fputs("whispertube_vulkan_devices_v1\n", stderr);
++        return 0;
++    }
++
+     whisper_params params;

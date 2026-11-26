@@ -1,4 +1,5 @@
 use super::*;
+use std::io::Read;
 
 pub(crate) const AUDIO_EXTENSIONS: &[&str] = &[
     "mp3", "wav", "m4a", "aac", "flac", "ogg", "opus", "wma", "aiff", "aif", "webm", "mp4",
@@ -80,8 +81,7 @@ fn local_source_cancelable(
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_err(|e| format!("Waktu file audio tidak valid: {e}"))?;
     let mut url = Url::from_file_path(&path).map_err(|()| "Path audio tidak valid.")?;
-    let (identity, changed) = crate::runtime_snapshot::file_identity(&file, &metadata);
-    let identity = source_identity(&path, identity, changed, cancelled)?;
+    let identity = source_identity(&file, &metadata, cancelled)?;
     url.set_query(Some(&format!(
         "size={}&modified={}&identity={}",
         metadata.len(),
@@ -92,18 +92,39 @@ fn local_source_cancelable(
 }
 
 fn source_identity(
-    path: &Path,
-    identity: Option<[u64; 3]>,
-    changed: [i64; 2],
+    file: &std::fs::File,
+    metadata: &std::fs::Metadata,
     cancelled: &AtomicBool,
 ) -> Result<String, String> {
-    Ok(match identity {
-        Some(id) => format!(
+    let (identity, changed) = crate::runtime_snapshot::file_identity(file, metadata);
+    if let Some(id) = identity.filter(|_| cfg!(windows)) {
+        return Ok(format!(
             "{:x}-{:x}-{:x}-{}-{}",
             id[0], id[1], id[2], changed[0], changed[1]
-        ),
-        None => crate::io_cancel::file_sha256(path, cancelled)?,
-    })
+        ));
+    }
+    source_content_hash(file, metadata, cancelled)
+}
+
+fn source_content_hash(
+    file: &std::fs::File,
+    metadata: &std::fs::Metadata,
+    cancelled: &AtomicBool,
+) -> Result<String, String> {
+    // Unix ctime can stay unchanged across two writes in the same clock tick.
+    let mut input = file.take(metadata.len() + 1);
+    let hash = crate::io_cancel::hash_reader(&mut input, cancelled)?;
+    let after = file
+        .metadata()
+        .map_err(|e| format!("Gagal memeriksa ulang file audio: {e}"))?;
+    if input.limit() != 1
+        || after.modified().ok() != metadata.modified().ok()
+        || crate::runtime_snapshot::file_identity(file, &after)
+            != crate::runtime_snapshot::file_identity(file, metadata)
+    {
+        return Err("File audio berubah selama verifikasi. Pilih ulang file audio.".into());
+    }
+    Ok(hash)
 }
 
 #[cfg(test)]
@@ -160,12 +181,23 @@ pub(crate) fn inspect(
     cancelled: &Arc<AtomicBool>,
 ) -> Result<VideoMetadata, String> {
     let (path, source) = local_source_cancelable(path, cancelled)?;
-    let (duration, audio_recovered) = super::duration_probe::probe_import_duration(
-        &tool_path(app, "ffmpeg")?,
-        &path,
-        active_pid,
-        cancelled,
-    )?;
+    let cached = match crate::transcription::cached_local_duration(app, &source, cancelled) {
+        Ok(cached) => cached,
+        Err(error) if crate::io_cancel::is_cancellation_error(&error) => return Err(error),
+        Err(error) => {
+            eprintln!("WhisperTube local duration cache skipped: {error}");
+            None
+        }
+    };
+    let (duration, audio_recovered) = match cached {
+        Some(cached) => cached,
+        None => super::duration_probe::probe_import_duration(
+            &tool_path(app, "ffmpeg")?,
+            &path,
+            active_pid,
+            cancelled,
+        )?,
+    };
     // Detect replacement during inspection as well as before transcription.
     local_path_cancelable(&source, cancelled)?;
     Ok(VideoMetadata {
@@ -193,14 +225,16 @@ mod tests {
     fn fallback_hash_uses_the_callers_cancellation_token() {
         let path = std::env::temp_dir().join(format!("local-hash-{}.mp3", uuid::Uuid::new_v4()));
         std::fs::write(&path, b"abc").unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let metadata = file.metadata().unwrap();
         let cancelled = AtomicBool::new(false);
         assert_eq!(
-            source_identity(&path, None, [0, 0], &cancelled).unwrap(),
+            source_content_hash(&file, &metadata, &cancelled).unwrap(),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
         cancelled.store(true, Ordering::SeqCst);
         assert_eq!(
-            source_identity(&path, None, [0, 0], &cancelled).unwrap_err(),
+            source_content_hash(&file, &metadata, &cancelled).unwrap_err(),
             "Proses dibatalkan."
         );
         assert_eq!(

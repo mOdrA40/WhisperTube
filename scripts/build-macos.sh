@@ -22,9 +22,16 @@ npm ci
 # Include the DMG helper's output when hdiutil or packaging fails on a runner.
 build_args=(--verbose --bundles app,dmg)
 if [[ "${TAURI_CREATE_UPDATER_ARTIFACTS:-}" == "true" ]]; then
-  if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" && -z "${TAURI_SIGNING_PRIVATE_KEY_PATH:-}" ]]; then
-    echo "TAURI_SIGNING_PRIVATE_KEY atau TAURI_SIGNING_PRIVATE_KEY_PATH wajib diisi saat membuat artifact updater." >&2
-    exit 1
+  if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
+    if [[ -z "${TAURI_SIGNING_PRIVATE_KEY_PATH:-}" ]]; then
+      echo "TAURI_SIGNING_PRIVATE_KEY atau TAURI_SIGNING_PRIVATE_KEY_PATH wajib diisi saat membuat artifact updater." >&2
+      exit 1
+    fi
+    if [[ ! -f "$TAURI_SIGNING_PRIVATE_KEY_PATH" ]]; then
+      echo "TAURI_SIGNING_PRIVATE_KEY_PATH harus menunjuk file kunci privat updater." >&2
+      exit 1
+    fi
+    export TAURI_SIGNING_PRIVATE_KEY="$TAURI_SIGNING_PRIVATE_KEY_PATH"
   fi
   build_args+=(--config '{"bundle":{"createUpdaterArtifacts":true}}')
 fi

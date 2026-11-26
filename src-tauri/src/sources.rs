@@ -531,7 +531,7 @@ fn probe_node_cached(
     Ok(available)
 }
 
-fn node_program() -> Option<PathBuf> {
+fn javascript_program(name: &str) -> Option<PathBuf> {
     let mut directories = Vec::new();
     #[cfg(windows)]
     if let Some(parent) = std::env::current_exe()
@@ -543,11 +543,14 @@ fn node_program() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("PATH") {
         directories.extend(std::env::split_paths(&path));
     }
-    node_program_in(directories)
+    javascript_program_in(name, directories)
 }
 
-fn node_program_in(directories: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
-    let name = crate::paths::exe_name("node");
+fn javascript_program_in(
+    name: &str,
+    directories: impl IntoIterator<Item = PathBuf>,
+) -> Option<PathBuf> {
+    let name = crate::paths::exe_name(name);
     directories
         .into_iter()
         // PATH entries may be symlinks (Homebrew and version managers). Resolve
@@ -572,28 +575,26 @@ fn node_program_in(directories: impl IntoIterator<Item = PathBuf>) -> Option<Pat
         })
 }
 
-pub fn js_runtime_args(
+fn selected_js_runtime(runtime: &str, program: &Path) -> Option<Vec<String>> {
+    debug_assert!(program.is_absolute());
+    let program = program.to_str()?;
+    Some(vec![
+        "--no-js-runtimes".into(),
+        "--js-runtimes".into(),
+        format!("{runtime}:{program}"),
+    ])
+}
+
+fn js_runtime_args(
     active_pid: &Mutex<Option<u32>>,
     cancelled: &AtomicBool,
 ) -> Result<Vec<String>, String> {
     crate::io_cancel::check(cancelled)?;
-    let Some(program) = node_program() else {
-        // Preserve the platform's existing executable lookup when it resolves
-        // a runtime outside PATH. Without an absolute identity, do not cache it.
-        let mut command = Command::new("node");
-        configure_node_version_probe(&mut command);
-        return Ok(
-            if crate::process::probe_optional_runtime(
-                &mut command,
-                Duration::from_secs(3),
-                active_pid,
-                cancelled,
-            )? {
-                vec!["--js-runtimes".into(), "node".into()]
-            } else {
-                Vec::new()
-            },
-        );
+    let Some(program) = javascript_program("node") else {
+        return Ok(Vec::new());
+    };
+    let Some(args) = selected_js_runtime("node", &program) else {
+        return Ok(Vec::new());
     };
     let node_available = probe_node_cached(
         NODE_PROBE.get_or_init(|| Mutex::new(None)),
@@ -610,19 +611,7 @@ pub fn js_runtime_args(
             )
         },
     )?;
-    Ok(if node_available {
-        // Pin yt-dlp to the binary we probed. For a non-Unicode PATH entry,
-        // preserve its original own PATH lookup because the argument is UTF-8.
-        vec![
-            "--js-runtimes".into(),
-            program
-                .to_str()
-                .map(|path| format!("node:{path}"))
-                .unwrap_or_else(|| "node".into()),
-        ]
-    } else {
-        Vec::new()
-    })
+    Ok(if node_available { args } else { Vec::new() })
 }
 
 const NODE_VERSION_CHECK: &str =
@@ -641,18 +630,25 @@ pub fn source_js_runtime_args(
     cancelled: &AtomicBool,
 ) -> Result<Vec<String>, String> {
     let args = js_runtime_args(active_pid, cancelled)?;
-    if !args.is_empty() || !is_youtube_source(url) {
+    if !args.is_empty() {
         return Ok(args);
     }
-    let mut deno = Command::new("deno");
-    deno.args(["eval", DENO_VERSION_CHECK]);
-    if crate::process::probe_optional_runtime(
-        &mut deno,
-        Duration::from_secs(3),
-        active_pid,
-        cancelled,
-    )? {
-        return Ok(vec!["--js-runtimes".into(), "deno".into()]);
+    if !is_youtube_source(url) {
+        return Ok(vec!["--no-js-runtimes".into()]);
+    }
+    if let Some(program) = javascript_program("deno") {
+        if let Some(args) = selected_js_runtime("deno", &program) {
+            let mut deno = Command::new(program);
+            deno.args(["eval", DENO_VERSION_CHECK]);
+            if crate::process::probe_optional_runtime(
+                &mut deno,
+                Duration::from_secs(3),
+                active_pid,
+                cancelled,
+            )? {
+                return Ok(args);
+            }
+        }
     }
     require_source_js_runtime(url, args)
 }
@@ -871,17 +867,15 @@ pub async fn inspect_media(
                 command.args(&runtime_args);
                 command.args(cookie_jar.args());
                 command.arg(&safe_url);
-                let output = run_output(command, &active_pid, &cancelled)?;
-
-                if output.status.success() {
-                    break output;
-                }
-
-                let error = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                if metadata_retry_reason(&safe_url, &error).is_none()
-                    || attempt >= METADATA_MAX_ATTEMPTS
-                {
-                    break output;
+                let output = run_output(command, &active_pid, &cancelled);
+                let retry = match &output {
+                    Ok(output) if !output.status.success() =>
+                        metadata_retry_reason(&safe_url, String::from_utf8_lossy(&output.stderr).trim()).is_some(),
+                    Err(error) => crate::process::is_process_timeout(error),
+                    Ok(_) => false,
+                };
+                if !retry || attempt >= METADATA_MAX_ATTEMPTS {
+                    break output?;
                 }
 
                 if cancelled.load(Ordering::SeqCst) {
@@ -983,12 +977,12 @@ mod tests {
         fs::set_permissions(second.join("node"), fs::Permissions::from_mode(0o755)).unwrap();
         symlink(&managed, first.join("node")).unwrap();
         assert_eq!(
-            super::node_program_in([first.clone(), second.clone()]),
+            super::javascript_program_in("node", [first.clone(), second.clone()]),
             Some(fs::canonicalize(&managed).unwrap())
         );
         fs::remove_file(&managed).unwrap();
         assert_eq!(
-            super::node_program_in([first, second.clone()]),
+            super::javascript_program_in("node", [first, second.clone()]),
             Some(fs::canonicalize(second.join("node")).unwrap())
         );
         fs::remove_dir_all(root).unwrap();
@@ -1008,12 +1002,12 @@ mod tests {
             fs::set_permissions(directory.join("node"), fs::Permissions::from_mode(mode)).unwrap();
         }
         assert_eq!(
-            super::node_program_in([first.clone(), second.clone()]),
+            super::javascript_program_in("node", [first.clone(), second.clone()]),
             Some(fs::canonicalize(second.join("node")).unwrap())
         );
         fs::set_permissions(first.join("node"), fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(
-            super::node_program_in([first.clone(), second]),
+            super::javascript_program_in("node", [first.clone(), second]),
             Some(fs::canonicalize(first.join("node")).unwrap())
         );
         fs::remove_dir_all(root).unwrap();

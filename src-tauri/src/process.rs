@@ -151,6 +151,20 @@ pub enum OutputEvent<'a> {
 
 // Every stream is polled in this loop, including after the leader has exited.
 // No blocking reader thread may outlive cancellation or the caller's watchdog.
+const PROCESS_TIMEOUT: &str = "Proses melewati batas waktu.";
+const PROCESS_CLEANUP_FAILURE: &str = "Pembersihan proses belum terverifikasi:";
+
+pub(crate) fn is_process_cleanup_failure(error: &str) -> bool {
+    error.starts_with(PROCESS_CLEANUP_FAILURE)
+}
+
+pub(crate) fn is_process_timeout(error: &str) -> bool {
+    error == PROCESS_TIMEOUT
+        || error
+            .strip_prefix(PROCESS_TIMEOUT)
+            .is_some_and(|suffix| suffix.starts_with(" Detail: "))
+}
+
 pub fn run_piped(
     command: &mut Command,
     timeout: Option<Duration>,
@@ -164,7 +178,7 @@ pub fn run_piped(
             return Err("Proses dibatalkan.".into());
         }
         if timeout.is_some_and(|timeout| started.elapsed() >= timeout) {
-            return Err("Proses melewati batas waktu.".into());
+            return Err(PROCESS_TIMEOUT.into());
         }
         Ok(())
     };
@@ -255,9 +269,13 @@ pub fn run_piped(
             }
         }
     })();
-    if outcome.is_err() {
+    if let Err(error) = outcome.as_ref() {
         terminate_child(&mut child);
-        let _ = child.wait();
+        if let Err(cleanup) = child.wait() {
+            return Err(format!(
+                "{PROCESS_CLEANUP_FAILURE} {cleanup}. Penyebab awal: {error}"
+            ));
+        }
     }
     outcome
 }
@@ -442,6 +460,17 @@ fn captured_text(captured: Vec<u8>, truncated: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timeout_classification_accepts_captured_stderr() {
+        assert!(is_process_timeout(PROCESS_TIMEOUT));
+        assert!(is_process_timeout(&format!(
+            "{PROCESS_TIMEOUT} Detail: partial stderr"
+        )));
+        assert!(!is_process_timeout(&format!(
+            "{PROCESS_CLEANUP_FAILURE} {PROCESS_TIMEOUT}"
+        )));
+    }
     use std::io::Write;
     use std::sync::{Arc, Mutex};
 
@@ -506,7 +535,7 @@ mod tests {
                         Some(Duration::from_secs(30)),
                         None,
                         |pid| {
-                            std::fs::write(writer, pid.to_string()).unwrap();
+                            publish_capture_pid(&writer, pid);
                             Ok(())
                         },
                         |_| Ok(()),
@@ -602,11 +631,8 @@ mod tests {
                 #[cfg(windows)]
                 hide_console(&mut command);
                 let child = command.spawn().unwrap();
-                std::fs::write(
-                    std::env::var_os("WHISPERTUBE_CAPTURE_PID_FILE").unwrap(),
-                    child.id().to_string(),
-                )
-                .unwrap();
+                let pid_file = std::env::var_os("WHISPERTUBE_CAPTURE_PID_FILE").unwrap();
+                publish_capture_pid(std::path::Path::new(&pid_file), child.id());
                 // Intentionally leave stderr inherited after the parent exits;
                 // the outer test owns cleanup of this synthetic descendant.
                 drop(child);
@@ -621,11 +647,8 @@ mod tests {
                 command.stdout(Stdio::null()).stderr(Stdio::null());
                 // Inherit the owned leader's Unix group / Windows job.
                 let child = command.spawn().unwrap();
-                std::fs::write(
-                    std::env::var_os("WHISPERTUBE_CAPTURE_PID_FILE").unwrap(),
-                    child.id().to_string(),
-                )
-                .unwrap();
+                let pid_file = std::env::var_os("WHISPERTUBE_CAPTURE_PID_FILE").unwrap();
+                publish_capture_pid(std::path::Path::new(&pid_file), child.id());
                 drop(child);
                 if std::env::var_os("WHISPERTUBE_CAPTURE_PARENT_FAIL").is_some() {
                     std::process::exit(7);
@@ -633,6 +656,14 @@ mod tests {
             }
             _ => panic!("unknown capture fixture"),
         }
+    }
+
+    fn publish_capture_pid(path: &std::path::Path, pid: u32) {
+        // The fixture may exit while the publisher is paused. Expose the PID
+        // file only after its contents have been written and the file closed.
+        let staging = path.with_extension("tmp");
+        std::fs::write(&staging, pid.to_string()).unwrap();
+        std::fs::rename(staging, path).unwrap();
     }
 
     fn capture_child(role: &str) -> Command {
@@ -726,6 +757,10 @@ mod tests {
             #[cfg(windows)]
             assert_process_exited(std::fs::read_to_string(&pid_file).unwrap().parse().unwrap());
             std::fs::remove_file(&pid_file).unwrap();
+        }
+        let unfinished = pid_file.with_extension("tmp");
+        if unfinished.exists() {
+            std::fs::remove_file(unfinished).unwrap();
         }
         assert!(result.unwrap_err().contains("batas waktu"));
         assert!(started.elapsed() < Duration::from_secs(8));

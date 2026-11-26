@@ -17,6 +17,61 @@ pub fn sync_parent(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+pub(crate) fn is_link(metadata: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        // Includes junctions and volume mount points as well as symlinks.
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return true;
+        }
+    }
+    metadata.file_type().is_symlink()
+}
+
+// Validate the handle too: pre-open metadata cannot establish the type of a
+// file that was replaced just before the open.
+pub(crate) fn open_regular_read(path: &Path) -> io::Result<fs::File> {
+    fn require_regular(metadata: &fs::Metadata) -> io::Result<()> {
+        if metadata.is_file() && !is_link(metadata) {
+            return Ok(());
+        }
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Expected an ordinary file",
+        ))
+    }
+
+    require_regular(&fs::symlink_metadata(path)?)?;
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(0x00200000); // FILE_FLAG_OPEN_REPARSE_POINT
+    }
+    let file = options.open(path)?;
+    require_regular(&file.metadata()?)?;
+    Ok(file)
+}
+
+pub(crate) fn require_plain_directory(path: &Path) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_dir() || is_link(&metadata) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "App storage must be an ordinary directory",
+        ));
+    }
+    Ok(())
+}
+
 pub fn create_dir_all(path: &Path) -> io::Result<()> {
     if path.is_dir() {
         return Ok(());
@@ -68,7 +123,10 @@ pub fn create_private_dir_all(path: &Path) -> io::Result<()> {
         directory.sync_all()
     }
     #[cfg(not(unix))]
-    create_dir_all(path)
+    {
+        create_dir_all(path)?;
+        require_plain_directory(path)
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -258,6 +316,18 @@ mod tests {
         assert!(!acl(&root).contains("everyone"));
         assert!(acl(&parent).contains("everyone"));
         fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn regular_read_rejects_directories_and_accepts_ordinary_files() {
+        let directory = tempfile::tempdir().unwrap();
+        assert!(open_regular_read(directory.path()).is_err());
+        let file = directory.path().join("ordinary");
+        fs::write(&file, b"ordinary file").unwrap();
+        assert_eq!(
+            open_regular_read(&file).unwrap().metadata().unwrap().len(),
+            13
+        );
     }
 
     #[test]

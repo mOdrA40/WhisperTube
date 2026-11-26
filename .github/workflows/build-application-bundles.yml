@@ -67,6 +67,23 @@ jobs:
           PY
           cargo test --release --manifest-path "$RUNNER_TEMP/process-check/Cargo.toml" --lib 'process::'
 
+      - name: Verify macOS updater bundle recovery
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          read -r version checksum < <(node -p 'const updater = require("./scripts/cargo-advisory-policy.json").vendoredUpdater; updater.version + " " + updater.checksum')
+          probe="$RUNNER_TEMP/tauri-updater-recovery"
+          archive="$RUNNER_TEMP/tauri-plugin-updater.crate"
+          mkdir -p "$probe"
+          cp -R src-tauri/vendor/tauri-plugin-updater/. "$probe/"
+          curl --proto '=https' --proto-redir '=https' -fsSL \
+            "https://static.crates.io/crates/tauri-plugin-updater/tauri-plugin-updater-$version.crate" -o "$archive"
+          printf '%s  %s\n' "$checksum" "$archive" | shasum -a 256 -c -
+          tar -xOf "$archive" "tauri-plugin-updater-$version/Cargo.lock" > "$probe/Cargo.lock"
+          cargo test --locked --manifest-path "$probe/Cargo.toml" --no-default-features \
+            --features rustls-tls,system-proxy --lib updater::tests::
+
       - name: Install Linux Tauri dependencies
         if: runner.os == 'Linux'
         shell: bash
@@ -139,8 +156,8 @@ jobs:
       - name: Verify application-linked process lifecycle
         run: cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib 'process::'
 
-      - name: Verify native decoder success and partial-input failure
-        run: cargo test --release --manifest-path src-tauri/Cargo.toml --lib transcription::tests::native_ffmpeg_accepts_short_track_but_rejects_corrupt_partial_decode -- --ignored --exact
+      - name: Verify native decoding, track selection, and MP3 recovery
+        run: cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib transcription::tests::native_ -- --ignored
 
       - name: Collect native installers and checksums
         shell: bash
@@ -239,8 +256,8 @@ jobs:
         shell: pwsh
         run: npm run test:uninstall-cleanup
 
-      - name: Verify native decoder success and partial-input failure
-        run: cargo test --release --manifest-path src-tauri/Cargo.toml --lib transcription::tests::native_ffmpeg_accepts_short_track_but_rejects_corrupt_partial_decode -- --ignored --exact
+      - name: Verify native decoding, track selection, and MP3 recovery
+        run: cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib transcription::tests::native_ -- --ignored
 
       - name: Verify real CPU inference before distributing artifacts
         shell: pwsh
@@ -335,6 +352,17 @@ jobs:
           for required in "$windows_asset" "$mac_x64_asset" "$mac_arm64_asset" "$linux_asset" "$linux_deb_asset"; do
             if [[ -z "$required" || ! -f "$required" || ! -f "$required.sig" ]]; then
               echo "Artifact updater atau signature tidak lengkap: ${required:-<kosong>}" >&2
+              exit 1
+            fi
+            if ! signed_version="$(
+              base64 -d "$required.sig" | awk -F '\t' '
+                NR == 3 && /^trusted comment: / {
+                  for (i = 2; i <= NF; i++) {
+                    if ($i ~ /^version:/) print substr($i, 9)
+                  }
+                }'
+            )" || [[ "$signed_version" != "$version" ]]; then
+              echo "Versi di signature updater $(basename "$required") harus cocok dengan tag $version." >&2
               exit 1
             fi
           done

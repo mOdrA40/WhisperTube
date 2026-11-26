@@ -8,6 +8,7 @@ import { useWhisperTube } from "./useWhisperTube";
 const services = vi.hoisted(() => ({
   getSystemStatus: vi.fn(),
   getJobStorageUsage: vi.fn().mockResolvedValue(0),
+  downloadModel: vi.fn(),
   getTranscriptionResumeStage: vi.fn(),
   cancelJob: vi.fn(),
   listModels: vi.fn(),
@@ -36,7 +37,6 @@ const services = vi.hoisted(() => ({
 
 vi.mock("../services/tauri", () => ({
   ...services,
-  downloadModel: vi.fn(),
   exportTranscriptFile: vi.fn(),
   installAccelerator: vi.fn(),
   installCudaEngine: vi.fn(),
@@ -115,10 +115,11 @@ function wrapper({ children }: { children: ReactNode }) {
 
 describe("useWhisperTube", () => {
   it("runs Qwen on its own runtime without requiring a Whisper CPU engine", async () => {
-    services.getSystemStatus.mockResolvedValue({ ...system, cpuEngine: false });
+    services.getSystemStatus.mockResolvedValue({ ...system, cpuEngine: false, qwenRuntime: true });
     services.listModels.mockResolvedValue([...models, { ...models[0], id: "qwen3-asr-1.7b-q8_0" }]);
     const { result } = renderHook(() => useWhisperTube(), { wrapper });
     await waitFor(() => expect(result.current.models).toHaveLength(2));
+    expect(services.listModels).toHaveBeenCalledExactlyOnceWith(true);
     act(() => result.current.setModelId("qwen3-asr-1.7b-q8_0"));
     expect(result.current.runtimeReady).toBe(true);
     act(() => result.current.setUrl(metadata.webpageUrl));
@@ -178,6 +179,7 @@ describe("useWhisperTube", () => {
     services.getSystemStatus.mockResolvedValue(system);
     services.getTranscriptionResumeStage.mockReset().mockResolvedValue(null);
     services.cancelJob.mockResolvedValue(undefined);
+    services.downloadModel.mockReset().mockResolvedValue(undefined);
     services.listModels.mockResolvedValue(models);
     services.listHistory.mockResolvedValue({ items: [], hasMore: false, totalCount: 0 });
     services.listJobCache.mockResolvedValue([]);
@@ -296,6 +298,7 @@ describe("useWhisperTube", () => {
       const { result } = renderHook(() => useWhisperTube(), { wrapper });
       await waitFor(() => expect(result.current.error).toContain("Startup hardware query unavailable"));
       expect(services.getSystemStatus).toHaveBeenCalledOnce();
+      expect(services.listModels).toHaveBeenCalledExactlyOnceWith();
     } finally { configure({ reactStrictMode: previous }); }
   });
 
@@ -344,6 +347,31 @@ describe("useWhisperTube", () => {
       unmount();
       vi.useRealTimers();
     }
+  });
+
+  it("ignores late model progress both when idle and during a newer download of the same model", async () => {
+    const { result } = renderHook(() => useWhisperTube(), { wrapper });
+    await waitFor(() => expect(result.current.system).toEqual(system));
+    const emit = services.subscribeToModelDownload.mock.calls[0][0];
+    await act(async () => result.current.downloadModel("base"));
+    const first = services.downloadModel.mock.calls[0][2];
+    const progress = { id: "base", percent: 75, downloadedBytes: 75, totalBytes: 100, bytesPerSecond: 10 };
+    expect(result.current.operationActive).toBe(false);
+    act(() => emit({ ...progress, operationId: first }));
+    expect(result.current.operationActive).toBe(false);
+
+    let finish!: () => void;
+    services.downloadModel.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+    let pending!: Promise<void>;
+    act(() => { pending = result.current.downloadModel("base"); });
+    const second = services.downloadModel.mock.calls[1][2];
+    expect(second).not.toBe(first);
+    act(() => emit({ ...progress, operationId: first }));
+    expect(result.current.downloadingModel.base.percent).toBe(0);
+    act(() => emit({ ...progress, operationId: second }));
+    expect(result.current.downloadingModel.base.percent).toBe(75);
+    await act(async () => { finish(); await pending; });
+    expect(result.current.operationActive).toBe(false);
   });
 
   it("continues releasing other subscriptions if one cleanup throws", async () => {

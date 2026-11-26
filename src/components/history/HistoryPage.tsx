@@ -9,7 +9,7 @@ import { SquareIcon } from "@phosphor-icons/react/dist/csr/Square";
 import { TrashIcon } from "@phosphor-icons/react/dist/csr/Trash";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { formatBytes, formatDuration, friendlyError } from "../../lib/format";
+import { formatBytes, formatDuration, formatLocalDate, friendlyError } from "../../lib/format";
 import type { AppTab, HistoryFileInfo, HistoryFileKind, HistoryFileScope, HistoryItem } from "../../types";
 import { getModelLabel, useI18n } from "../../i18n";
 import { useModalFocus } from "../../hooks/useModalFocus";
@@ -33,7 +33,6 @@ const MAX_DELETE_SELECTION = 100;
 
 export function HistoryPage({ history, hasMore, loadingMore, operationActive, onRefresh, onLoadMore, onLoad, onDelete, onDeleteFiles, onListFiles, onRevealFile, onTabChange }: HistoryPageProps) {
   const { language, t } = useI18n();
-  const dateLocale = language === "zh" ? "zh-CN" : language === "id" ? "id-ID" : "en-US";
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [pendingDeleteIds, setPendingDeleteIds] = useState<number[] | null>(null);
   const [deleteScope, setDeleteScope] = useState<HistoryFileScope | "all">("all");
@@ -232,7 +231,7 @@ export function HistoryPage({ history, hasMore, loadingMore, operationActive, on
               <div className="history-copy">
                 <strong>{item.title}</strong>
                 <span>
-                  {item.channel} • {new Date(item.createdAt).toLocaleString(dateLocale)}
+                  {item.channel} • {formatLocalDate(item.createdAt, language)}
                 </span>
               </div>
               <div className="history-meta">

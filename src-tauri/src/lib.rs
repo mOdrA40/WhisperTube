@@ -31,6 +31,15 @@ mod user_data;
 use std::sync::atomic::Ordering;
 use tauri::Manager;
 
+struct StartupMaintenance(tokio::sync::Semaphore);
+
+async fn wait_for_startup(app: &tauri::AppHandle) {
+    // No permits are added. Closing the gate releases every waiting command
+    // after maintenance (including its error paths) has finished.
+    let maintenance = app.state::<StartupMaintenance>();
+    let _ = maintenance.0.acquire().await;
+}
+
 fn stop_active_work(app: &tauri::AppHandle) {
     let Some(state) = app.try_state::<state::AppState>() else {
         return;
@@ -40,6 +49,31 @@ fn stop_active_work(app: &tauri::AppHandle) {
     state.runtime_cancelled.store(true, Ordering::SeqCst);
     state.inspect_cancelled.store(true, Ordering::SeqCst);
     process::shutdown();
+}
+
+fn initialize_storage(handle: &tauri::AppHandle) {
+    let history_ready = match history::init_db(handle) {
+        Ok(_) => true,
+        Err(error) => {
+            eprintln!("WhisperTube history startup warning: {error}");
+            false
+        }
+    };
+    if let Err(error) = cookies::cleanup_stale(handle) {
+        eprintln!("WhisperTube cookie storage cleanup warning: {error}");
+    }
+    if history_ready {
+        if let Err(error) = history::cleanup_job_storage(handle) {
+            eprintln!("WhisperTube startup cleanup warning: {error}");
+        }
+    }
+    #[cfg(windows)]
+    if let Err(error) = app_update::cleanup_stale_installers(handle) {
+        eprintln!("WhisperTube updater staging cleanup warning: {error}");
+    }
+    if let Err(error) = paths::cleanup_stale_transient_storage(handle) {
+        eprintln!("WhisperTube transient storage cleanup warning: {error}");
+    }
 }
 
 pub fn run() {
@@ -58,32 +92,24 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(state::AppState::default())
+        .manage(StartupMaintenance(tokio::sync::Semaphore::new(0)))
         .setup(|app| {
-            let handle = app.handle().clone();
-            let history_ready = match history::init_db(&handle) {
-                Ok(_) => true,
-                Err(error) => {
-                    eprintln!("WhisperTube history startup warning: {error}");
-                    false
-                }
-            };
-            if let Err(error) = cookies::cleanup_stale(&handle) {
-                eprintln!("WhisperTube cookie storage cleanup warning: {error}");
-            }
-            if history_ready {
-                if let Err(error) = history::cleanup_job_storage(&handle) {
-                    eprintln!("WhisperTube startup cleanup warning: {error}");
-                }
-            }
-            if let Err(error) = paths::cleanup_stale_transient_storage(&handle) {
-                eprintln!("WhisperTube transient storage cleanup warning: {error}");
-            }
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             if let Some(window) = app.get_webview_window("main") {
                 window
                     .set_decorations(false)
                     .map_err(std::io::Error::other)?;
             }
+            let handle = app.handle().clone();
+            let worker_handle = handle.clone();
+            let maintenance =
+                tauri::async_runtime::spawn_blocking(move || initialize_storage(&worker_handle));
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = maintenance.await {
+                    eprintln!("WhisperTube startup maintenance warning: {error}");
+                }
+                handle.state::<StartupMaintenance>().0.close();
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

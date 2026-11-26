@@ -56,7 +56,8 @@ The Rust backend uses similar boundaries:
 - sources.rs validates source URLs and performs metadata inspection;
 - process.rs provides platform-specific child-process setup and termination;
 - durable.rs publishes flushed files and synchronizes directory entries;
-- resources.rs performs memory, disk, and per-mount allocation checks;
+- resources.rs checks memory and disk allocations. Unix queries the resolved
+  destination filesystem directly, including temporary mounts.
 - transcription.rs owns the media-to-transcript pipeline;
 - checkpoint.rs shares section validation, resumable inference, and exports
   between Whisper and Qwen;
@@ -300,10 +301,13 @@ copies are never selected by these deletion operations. The saved-files dialog
 lists WAV/TXT/SRT/VTT sizes and paths and reveals only validated internal files.
 
 Each job receives an .in-progress marker. A failed or cancelled pipeline
-preserves its job directory for retry. At startup, unreferenced jobs older than
-the 24-hour grace period are removed. A committed history row protects its job
+preserves its job directory for retry. Startup removes an unreferenced job
+after 24 hours only when its directory has a canonical UUID and a regular
+.in-progress marker. Redirected application storage is rejected. A committed history row protects its job
 directory even if result.json is missing or corrupt; cleanup reports that
-problem and preserves recoverable artifacts.
+problem and preserves recoverable artifacts. New History rows retain the audio
+preference in SQLite, so deleting the transcript cannot erase that preference.
+Legacy History without either record keeps the audio for recovery.
 
 History creation writes result.json atomically and commits the SQLite row only
 after the result file is ready. History deletion commits pending_job_deletions
@@ -356,13 +360,13 @@ resolved from the application resource directory. An installed user runtime
 under application-local-data takes precedence over the bundled engine only
 when its runtime manifest matches the expected whisper.cpp version and
 the SHA-256 of every runtime file. Modified or legacy user runtimes are ignored until
-reinstalled. A transcription owns a verified runtime snapshot across chunks:
-each spawn checks the full file inventory, identity and change metadata,
-without rehashing unchanged dependencies. Windows read-sharing handles deny
-runtime writes/deletion during the job; Unix checks include inode and ctime.
-Filesystems lacking stable identities retain full hash checks. This does not
-make a user-writable manifest an authenticated signature or eliminate every
-filesystem race against a malicious local actor.
+reinstalled. A transcription owns a verified runtime snapshot across chunks.
+Each spawn checks the full file inventory. Windows read-sharing handles deny
+runtime writes and deletion during the job. Unix also checks the SHA-256 of
+each snapshot file because same-tick writes can preserve the change timestamp.
+A Windows runtime without a usable file identity is checked against its
+manifest when available. These checks provide runtime integrity within the
+application's storage trust boundary.
 
 Qwen has a separate download-on-demand runtime under
 runtime/<platform>/qwen-transcribe-0.4.1, with no bundled Whisper-engine fallback.
@@ -372,6 +376,7 @@ links, unsafe paths and entries other than regular files/directories and limits
 file count/unpacked bytes.
 The activated library inventory uses the runtime manifest/snapshot checks;
 the worker separately checks the loaded library's ABI version and struct layouts.
+A full UI refresh shares its system-status Qwen result with the model listing.
 
 The Windows developer-only CUDA helper stores its optional engine under
 runtime-dev/windows/cuda. This directory is intentionally outside the bundled
@@ -384,7 +389,7 @@ Windows bootstrap:
 
 - yt-dlp 2026.10.26;
 - FFmpeg 9.0.2 from the pinned Gyan.dev essentials archive;
-- whisper.cpp v1.9.2 CPU binaries from the pinned upstream release;
+- whisper.cpp v1.9.5 CPU binaries from the upstream b5454 release;
 - optional CUDA runtime installed on demand.
 
 The three bootstrap pins must match `src-tauri/runtime-pins.json` (enforced by
@@ -397,19 +402,35 @@ from the official executable; it does not claim that every emSign root is unsafe
 
 macOS bootstrap builds pinned FFmpeg and both CPU and Apple Metal whisper.cpp
 engines. Linux bootstrap builds pinned static FFmpeg and a CPU whisper.cpp
-engine. The Unix scripts pin whisper.cpp v1.9.2 to commit
-306c88f4d1286aec1bf96e544632897886af5501. The published accelerator pack is
-released separately as accelerators-v0.1.3 and uses whisper.cpp v1.9.2.
+engine. The Unix setup scripts and accelerator build workflow pin whisper.cpp
+v1.9.5 to commit d1be6fde11ac6e0407606b4e42fe72d34add8037. The currently
+published Metal and Vulkan packs remain on accelerators-v0.1.3, built with
+whisper.cpp v1.9.2, until a new pack generation and its hashes are available.
+macOS prefers the bundled Metal engine when it is present. Whisper CLI
+processes use their engine directory as the working directory and ignore
+an inherited GGML_BACKEND_PATH. The application expects ordinary directories
+for managed model, runtime, job, and cookie storage, and ordinary files for
+the History database and its SQLite recovery files.
 User-runtime manifests include the accelerator pack generation, so a legacy
 runtime cannot bypass a corrected catalog merely by matching the engine version.
+Vulkan pack builds add a model-free device inventory command. For a legacy
+engine that reports the option as unknown, the application uses a complete
+inventory from that process or queries the CLI help output when needed.
+Vulkan status and backend selection use the verified engine's own inventory
+even when the system's general GPU probe reports no adapter.
+Each inventory process has a ten-second deadline. A completed inventory can
+report zero devices. An unsuccessful probe reports an error to job and
+installation preflight, while Settings retains the installed engine state.
+Settings lists available packages by platform before GPU compatibility is
+known. A Vulkan package must enumerate at least one usable device in staging
+before activation, including on a profile without a downloaded model.
 
-Downloaded model files are SHA-256 verified before use. The verification cache
-is valid only for the current file identity, system change timestamp, size and modification timestamp and is
-cleared by a data reset.
-Filesystems without a usable identity cannot reuse model verification results.
-Local audio cache identities also include file identity and system change time;
-when unavailable, they use a content hash. Older local file identities require
-selecting the source again and do not authorize reusing an old WAV.
+Downloaded model files are SHA-256 verified before use. Windows can reuse this
+result for the same expected hash and unchanged file identity, size and timestamps.
+A data reset clears the cache. Unix verifies the model hash on every use.
+Local audio uses a SHA-256 content hash on Unix and when Windows cannot provide
+a usable file identity. Older local audio cache entries keyed by Unix file
+metadata require inspecting the source again and rebuilding cached audio.
 Accelerator inference probes use the same verifier: an invalid model is skipped
 in favor of the next valid candidate. If models exist but none verify, installation
 reports a model error rather than misdiagnosing all GPU devices as incompatible.
@@ -529,18 +550,27 @@ baseline, and sets an ARMv8-A baseline for AArch64. This favors compatibility
 over peak CPU throughput; GPU backends remain enabled by their build recipe.
 OpenMP, external BLAS and optional llamafile CPU kernels are disabled to avoid
 incidental host-specific dependencies. Metal shaders are embedded.
+The Windows Vulkan pack selects its shader compiler, headers, and import
+library explicitly from the pinned SDK. A missing input stops configuration.
 New builds use @loader_path/@rpath on macOS and $ORIGIN on Linux. Setup/pack
 recipes remove build trees before staged executable self-checks. The accelerator
 workflow also checks the staged binary load paths and rejects external OpenMP
 runtime dependencies. Configuration-policy tests do not replace native
 artifact/inference QA.
 
+On a Windows or Linux machine with a physical Vulkan GPU, set
+WHISPERTUBE_QA_VULKAN_ENGINE to the absolute path of a hash-verified unpacked
+engine and WHISPERTUBE_QA_VULKAN_DEVICE to an unambiguous device name reported
+by the driver. Run the ignored Rust test
+`system::tests::native_vulkan_pack_reports_physical_gpu_through_app_probe`
+to verify that the application recognizes that physical device exactly once.
+
 The application catalog pins the verified accelerators-v0.1.3 assets. The old
 v0.1.2 Unix packs contain build-host load paths and must not be reinstated.
-For a future pack generation, publish a new accelerator tag, inspect all four
-packs, update RELEASE_TAG, the accelerator manifest generation, and SHA-256 pins.
-The catalog/generation contract is tested. Never replace old assets or use an
-application v* tag for this step.
+For a future pack generation, publish a new accelerator tag and inspect all four
+packs. The catalog stores the release tag and whisper.cpp version together in
+PACK_GENERATION. Never replace old assets or use an application v* tag for this
+step.
 
 See [Dependency audit status](../SECURITY.md#dependency-audit-status) for open inherited
 Rust advisories and the evidence required to close them.
@@ -569,10 +599,13 @@ and secret scans locally before pushing as well. Accelerator assets must be
 public before a shipped application can download them without a GitHub credential.
 
 The accelerator hash helper reads the four public release assets without
-changing source by default. Its Apply mode writes verified hashes into the
-application catalog. The application must be rebuilt after that change, and
-published accelerator assets must remain immutable for the lifetime of the
-application build that references them.
+changing source by default. After artifact review, pass `-ReleaseTag <tag>
+-Promote` to preview a new pack generation. The helper reads the whisper.cpp
+version from the workflow at that tag and checks each ZIP's GitHub digest
+against its sidecar. With `-Apply`, it updates the generation and all four
+hashes in one catalog replacement. A regular `-Apply` still refreshes hashes
+for the current generation. Rebuild the application after changing the pins
+and keep published accelerator assets immutable for the lifetime of that build.
 
 ## Known production work
 

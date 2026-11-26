@@ -1,7 +1,36 @@
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmdirSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
+
+export function restoreVendoredUpdaterSource(lockfile, origin) {
+  const updater = /^(\[\[package\]\]\r?\nname = "tauri-plugin-updater"\r?\nversion = "([^"\r\n]+)"\r?\n)(?=dependencies =)/gm;
+  const matches = [...lockfile.matchAll(updater)];
+  if (matches.length !== 1 || matches[0][2] !== origin?.version || !/^[a-f0-9]{64}$/.test(origin.checksum)) {
+    throw new Error("Vendored updater does not match its registry identity in the advisory policy.");
+  }
+  const [match] = matches;
+  const newline = match[1].endsWith("\r\n") ? "\r\n" : "\n";
+  return lockfile.replace(updater, `${match[1]}source = "registry+https://github.com/rust-lang/crates.io-index"${newline}checksum = "${origin.checksum}"${newline}`);
+}
+
+function auditWithRegistryIdentity(origin) {
+  // RustSec does not match registry advisories against path packages.
+  const lockfile = readFileSync("src-tauri/Cargo.lock", "utf8");
+  const audited = restoreVendoredUpdaterSource(lockfile, origin);
+  const directory = mkdtempSync(join(tmpdir(), "whispertube-cargo-audit-"));
+  const path = join(directory, "Cargo.lock");
+  try {
+    writeFileSync(path, audited);
+    return spawnSync("cargo", ["audit", "--file", path, "--json"], {
+      encoding: "utf8", timeout: 120_000, maxBuffer: 8 * 1024 * 1024, windowsHide: true,
+    });
+  } finally {
+    rmSync(path, { force: true });
+    rmdirSync(directory);
+  }
+}
 
 // A tracked residual is not suppressed: print it on every run. New warnings,
 // changed package versions/kinds, vulnerabilities and unavailable audits fail.
@@ -39,9 +68,7 @@ export function evaluateAudit(report, policy) {
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const policy = JSON.parse(readFileSync(new URL("./cargo-advisory-policy.json", import.meta.url), "utf8"));
-    const run = spawnSync("cargo", ["audit", "--file", "src-tauri/Cargo.lock", "--json"], {
-      encoding: "utf8", timeout: 120_000, maxBuffer: 8 * 1024 * 1024, windowsHide: true,
-    });
+    const run = auditWithRegistryIdentity(policy.vendoredUpdater);
     if (run.error) throw run.error;
     if (run.stderr.trim()) console.error(run.stderr.trim());
     const result = evaluateAudit(JSON.parse(run.stdout), policy);

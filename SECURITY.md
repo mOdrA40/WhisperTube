@@ -95,6 +95,11 @@ its size-query/retry path compatible with Rustix's explicit query APIs.
 No advisory exception is added. These dependency matches did not establish
 an exploitable Quinn receiver or Rustix xattr call path in WhisperTube.
 
+The 2026-11-24 audit follow-up updates locked url to 2.5.9 for
+RUSTSEC-2026-0592 and cookie to 0.18.3 for RUSTSEC-2026-0594. RustSec database
+commit 52384ab reported zero vulnerability matches and six tracked warnings
+after those upgrades.
+
 Dependency status is a dated observation, not a permanent assurance. Run
 `npm audit --audit-level=moderate` and `cargo audit --file src-tauri/Cargo.lock`
 against the checked-in lockfiles and a current advisory database. Run both
@@ -121,6 +126,8 @@ gate. It prints every tracked residual, fails for any
 vulnerability or unavailable audit, and rejects new advisories or changes to
 their package version/kind. `scripts/cargo-advisory-policy.json` records the
 exact residuals, owner, upstream dependency path and resolution requirements.
+The gate audits the locally patched updater as its published registry version.
+It supplies the upstream source and checksum in a temporary copy of the lockfile.
 Four unmaintained runtime packages and the glib advisory remain open until a
 compatible upstream migration is verified. The gate also tracks the optional
 `chrono 0.4.45` lockfile entry (RUSTSEC-2026-0543) and fails if `chrono` enters

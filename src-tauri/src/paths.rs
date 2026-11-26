@@ -4,6 +4,7 @@ use std::{
     fs::File,
     io::{Read, Write},
     path::{Component, Path, PathBuf},
+    process::Command,
     sync::atomic::AtomicBool,
     time::{Duration, SystemTime},
 };
@@ -12,10 +13,7 @@ use tauri::{AppHandle, Manager};
 use crate::models::model_spec;
 
 const RUNTIME_MANIFEST_NAME: &str = "runtime-manifest.json";
-const CORE_RUNTIME_MANIFEST_VERSION: &str = "whisper.cpp-v1.9.2";
-// Include the pack generation: an old, hash-valid runtime must not bypass a
-// corrected catalog merely because it uses the same whisper.cpp source tag.
-const ACCELERATOR_RUNTIME_MANIFEST_VERSION: &str = "accelerators-v0.1.3/whisper.cpp-v1.9.2";
+const CORE_RUNTIME_MANIFEST_VERSION: &str = "whisper.cpp-v1.9.5";
 const MAX_RUNTIME_MANIFEST_BYTES: u64 = 64 * 1024;
 pub(crate) const MAX_RUNTIME_FILES: usize = 256;
 const TRANSIENT_STORAGE_GRACE: Duration = Duration::from_secs(24 * 60 * 60);
@@ -44,9 +42,13 @@ pub fn app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 pub fn models_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = app_data_dir(app)?.join("models");
-    fs::create_dir_all(&dir).map_err(|e| format!("Gagal membuat folder models: {e}"))?;
-    Ok(dir)
+    models_dir_in(&app_data_dir(app)?).map_err(|e| format!("Gagal membuka folder models: {e}"))
+}
+
+fn models_dir_in(app_data: &Path) -> std::io::Result<PathBuf> {
+    let path = app_data.join("models");
+    create_plain_dir(&path)?;
+    Ok(path)
 }
 
 pub fn jobs_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -85,9 +87,25 @@ fn runtime_platform() -> &'static str {
 }
 
 pub fn user_runtime_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = app_data_dir(app)?.join("runtime").join(runtime_platform());
-    fs::create_dir_all(&dir).map_err(|e| format!("Gagal membuat folder runtime user: {e}"))?;
-    Ok(dir)
+    user_runtime_dir_in(&app_data_dir(app)?)
+        .map_err(|e| format!("Gagal membuka folder runtime user: {e}"))
+}
+
+fn user_runtime_dir_in(app_data: &Path) -> std::io::Result<PathBuf> {
+    let runtime = app_data.join("runtime");
+    let platform = runtime.join(runtime_platform());
+    create_plain_dir(&runtime)?;
+    create_plain_dir(&platform)?;
+    Ok(platform)
+}
+
+fn create_plain_dir(path: &Path) -> std::io::Result<()> {
+    match fs::create_dir(path) {
+        Ok(()) => crate::durable::sync_parent(path)?,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+    crate::durable::require_plain_directory(path)
 }
 
 pub(crate) fn exe_name(base: &str) -> String {
@@ -102,8 +120,23 @@ pub fn tool_path(app: &AppHandle, name: &str) -> Result<PathBuf, String> {
     Ok(runtime_dir(app)?.join(exe_name(name)))
 }
 
+pub(crate) fn whisper_cli_command(engine: &Path) -> Command {
+    let mut command = Command::new(engine);
+    // The pinned Windows archives dynamically load ggml backends. Scope the
+    // default working-directory search to the packaged runtime and clear the
+    // upstream option for loading an out-of-tree backend.
+    if let Some(directory) = engine.parent().filter(|path| !path.as_os_str().is_empty()) {
+        command.current_dir(directory);
+    }
+    command.env_remove("GGML_BACKEND_PATH");
+    crate::process::hide_console(&mut command);
+    command
+}
+
 pub fn is_regular_file(path: &Path) -> bool {
-    fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
+    fs::symlink_metadata(path).is_ok_and(|metadata| {
+        metadata.is_file() && metadata.len() > 0 && !crate::durable::is_link(&metadata)
+    })
 }
 
 pub fn core_runtime_manifest_version() -> &'static str {
@@ -111,7 +144,7 @@ pub fn core_runtime_manifest_version() -> &'static str {
 }
 
 pub fn accelerator_runtime_manifest_version() -> &'static str {
-    ACCELERATOR_RUNTIME_MANIFEST_VERSION
+    crate::accelerators::PACK_GENERATION
 }
 
 pub fn write_runtime_manifest(
@@ -208,15 +241,12 @@ fn runtime_manifest_header(
         return None;
     }
     let manifest_path = runtime_dir.join(RUNTIME_MANIFEST_NAME);
-    let Ok(metadata) = fs::symlink_metadata(&manifest_path) else {
+    let Ok(file) = crate::durable::open_regular_read(&manifest_path) else {
         return None;
     };
-    if !metadata.is_file() || metadata.len() > MAX_RUNTIME_MANIFEST_BYTES {
+    if file.metadata().ok()?.len() > MAX_RUNTIME_MANIFEST_BYTES {
         return None;
     }
-    let Ok(file) = File::open(&manifest_path) else {
-        return None;
-    };
     let mut bytes = Vec::new();
     if file
         .take(MAX_RUNTIME_MANIFEST_BYTES.saturating_add(1))
@@ -272,12 +302,40 @@ pub(crate) fn runtime_manifest_matches_cancelable(
     let Some(manifest) = runtime_manifest_header(runtime_dir, executable, expected_version) else {
         return Ok(false);
     };
-    let mut expected = manifest.files;
-    expected.sort_unstable_by(|left, right| left.path.cmp(&right.path));
     let mut actual = Vec::new();
     collect_runtime_files(runtime_dir, runtime_dir, &mut actual, cancelled)?;
+    Ok(runtime_files_match(manifest.files, actual))
+}
+
+#[cfg(unix)]
+pub(crate) fn runtime_manifest_matches_hashes<'a>(
+    runtime_dir: &Path,
+    executable: &Path,
+    expected_version: &str,
+    hashes: impl Iterator<Item = (&'a Path, &'a str)>,
+) -> bool {
+    let Some(manifest) = runtime_manifest_header(runtime_dir, executable, expected_version) else {
+        return false;
+    };
+    let actual = hashes
+        .filter(|(path, _)| {
+            !matches!(
+                path.file_name().and_then(|name| name.to_str()),
+                Some(RUNTIME_MANIFEST_NAME | "runtime-manifest.json.tmp")
+            )
+        })
+        .map(|(path, sha256)| RuntimeFile {
+            path: path.to_string_lossy().into_owned(),
+            sha256: sha256.to_owned(),
+        })
+        .collect();
+    runtime_files_match(manifest.files, actual)
+}
+
+fn runtime_files_match(mut expected: Vec<RuntimeFile>, mut actual: Vec<RuntimeFile>) -> bool {
+    expected.sort_unstable_by(|left, right| left.path.cmp(&right.path));
     actual.sort_unstable_by(|left, right| left.path.cmp(&right.path));
-    Ok(expected == actual)
+    expected == actual
 }
 
 #[cfg(test)]
@@ -394,28 +452,32 @@ fn owned_temp_directory(name: &str) -> bool {
 }
 
 pub fn cleanup_stale_transient_storage(app: &AppHandle) -> Result<(), String> {
-    let runtime_root = user_runtime_dir(app)?;
-    let mut errors = cleanup_stale_entries(&runtime_root, true, |name| {
-        owned_uuid_name(
-            name,
-            &[
-                ".cuda-staging-",
-                ".vulkan-staging-",
-                ".metal-staging-",
-                ".qwen-staging-",
-            ],
-        )
-    });
+    let mut errors = match user_runtime_dir(app) {
+        Ok(runtime_root) => cleanup_stale_entries(&runtime_root, true, |name| {
+            owned_uuid_name(
+                name,
+                &[
+                    ".cuda-staging-",
+                    ".vulkan-staging-",
+                    ".metal-staging-",
+                    ".qwen-staging-",
+                ],
+            )
+        }),
+        Err(error) => vec![error],
+    };
     let temp_root = std::env::temp_dir();
     errors.extend(cleanup_stale_entries(
         &temp_root,
         true,
         owned_temp_directory,
     ));
-    let models_root = models_dir(app)?;
-    errors.extend(cleanup_stale_entries(&models_root, false, |name| {
-        name.ends_with(".bin.download")
-    }));
+    match models_dir(app) {
+        Ok(models_root) => errors.extend(cleanup_stale_entries(&models_root, false, |name| {
+            name.ends_with(".bin.download")
+        })),
+        Err(error) => errors.push(error),
+    }
     if errors.is_empty() {
         Ok(())
     } else {
@@ -478,6 +540,14 @@ pub fn activate_runtime(
     fs::rename(staging, destination).map_err(|e| format!("Gagal mengaktifkan runtime: {e}"))
 }
 
+fn backend_manifest_version(backend: &str) -> &'static str {
+    if matches!(backend, "metal" | "vulkan") {
+        accelerator_runtime_manifest_version()
+    } else {
+        CORE_RUNTIME_MANIFEST_VERSION
+    }
+}
+
 pub fn engine_path(app: &AppHandle, backend: &str) -> Result<PathBuf, String> {
     engine_path_cancelable(app, backend, &AtomicBool::new(false))
 }
@@ -488,13 +558,14 @@ pub fn engine_path_cancelable(
     cancelled: &AtomicBool,
 ) -> Result<PathBuf, String> {
     crate::io_cancel::check(cancelled)?;
-    let user_backend_dir = user_runtime_dir(app)?.join(backend);
-    let user_path = user_backend_dir.join(exe_name("whisper-cli"));
-    let expected_version = if matches!(backend, "metal" | "vulkan") {
-        ACCELERATOR_RUNTIME_MANIFEST_VERSION
-    } else {
-        CORE_RUNTIME_MANIFEST_VERSION
+    if let Some(path) = preferred_bundled_metal(&runtime_dir(app)?, backend) {
+        return Ok(path);
+    }
+    let Some(user_backend_dir) = user_engine_dir(app, backend) else {
+        return fallback_engine_path(app, backend);
     };
+    let user_path = user_backend_dir.join(exe_name("whisper-cli"));
+    let expected_version = backend_manifest_version(backend);
     let valid = if is_regular_file(&user_path) {
         match runtime_manifest_matches_cancelable(
             &user_backend_dir,
@@ -518,6 +589,26 @@ pub fn engine_path_cancelable(
     fallback_engine_path(app, backend)
 }
 
+fn user_engine_dir(app: &AppHandle, backend: &str) -> Option<PathBuf> {
+    match user_runtime_dir(app) {
+        Ok(path) => Some(path.join(backend)),
+        Err(error) => {
+            eprintln!("WhisperTube user runtime directory warning: {error}");
+            None
+        }
+    }
+}
+
+fn preferred_bundled_metal(runtime: &Path, backend: &str) -> Option<PathBuf> {
+    // The macOS bundle already ships the updated engine. A legacy separately
+    // downloaded Metal pack must not take precedence over it.
+    if backend != "metal" {
+        return None;
+    }
+    let path = runtime.join(backend).join(exe_name("whisper-cli"));
+    is_regular_file(&path).then_some(path)
+}
+
 fn fallback_engine_path(app: &AppHandle, backend: &str) -> Result<PathBuf, String> {
     #[cfg(debug_assertions)]
     {
@@ -535,6 +626,14 @@ fn fallback_engine_path(app: &AppHandle, backend: &str) -> Result<PathBuf, Strin
         .join(exe_name("whisper-cli")))
 }
 
+pub(crate) fn engine_candidate_exists(app: &AppHandle, backend: &str) -> bool {
+    // Auto uses this only to skip absent engines. A candidate still needs a
+    // verified snapshot before enumeration or inference.
+    user_engine_dir(app, backend)
+        .is_some_and(|directory| is_regular_file(&directory.join(exe_name("whisper-cli"))))
+        || fallback_engine_path(app, backend).is_ok_and(|path| is_regular_file(&path))
+}
+
 /// Resolve and retain the same verified files throughout probe and inference.
 pub fn engine_with_snapshot(
     app: &AppHandle,
@@ -542,15 +641,15 @@ pub fn engine_with_snapshot(
     cancelled: &AtomicBool,
 ) -> Result<(PathBuf, crate::runtime_snapshot::RuntimeSnapshot), String> {
     crate::io_cancel::check(cancelled)?;
-    let user_path = user_runtime_dir(app)?
-        .join(backend)
-        .join(exe_name("whisper-cli"));
-    let version = if matches!(backend, "metal" | "vulkan") {
-        ACCELERATOR_RUNTIME_MANIFEST_VERSION
-    } else {
-        CORE_RUNTIME_MANIFEST_VERSION
-    };
-    if is_regular_file(&user_path) {
+    if let Some(path) = preferred_bundled_metal(&runtime_dir(app)?, backend) {
+        let snapshot = crate::runtime_snapshot::RuntimeSnapshot::capture(&path, None, cancelled)?;
+        return Ok((path, snapshot));
+    }
+    let version = backend_manifest_version(backend);
+    if let Some(user_path) = user_engine_dir(app, backend)
+        .map(|path| path.join(exe_name("whisper-cli")))
+        .filter(|path| is_regular_file(path))
+    {
         match crate::runtime_snapshot::RuntimeSnapshot::capture(
             &user_path,
             Some(version),
@@ -566,6 +665,46 @@ pub fn engine_with_snapshot(
     let path = fallback_engine_path(app, backend)?;
     let snapshot = crate::runtime_snapshot::RuntimeSnapshot::capture(&path, None, cancelled)?;
     Ok((path, snapshot))
+}
+
+pub(crate) fn engine_for_status(
+    app: &AppHandle,
+    backend: &str,
+) -> Result<Option<(PathBuf, crate::runtime_snapshot::RuntimeSnapshot)>, String> {
+    use crate::runtime_snapshot::RuntimeSnapshot;
+
+    if let Some(path) = preferred_bundled_metal(&runtime_dir(app)?, backend) {
+        let snapshot = RuntimeSnapshot::capture_for_status(&path, None)?;
+        return Ok(Some((path, snapshot)));
+    }
+    if let Some(user_path) = user_engine_dir(app, backend)
+        .map(|path| path.join(exe_name("whisper-cli")))
+        .filter(|path| is_regular_file(path))
+    {
+        let version = Some(backend_manifest_version(backend));
+        let snapshot = if backend == "vulkan" {
+            // Status also executes this CLI to discover GPUs. A metadata
+            // cache hit may describe availability, but may not authorize spawn.
+            RuntimeSnapshot::capture(&user_path, version, &AtomicBool::new(false))
+        } else {
+            RuntimeSnapshot::capture_for_status(&user_path, version)
+        };
+        match snapshot {
+            Ok(snapshot) => return Ok(Some((user_path, snapshot))),
+            Err(error) => eprintln!("WhisperTube runtime status validation warning: {error}"),
+        }
+    }
+
+    let path = fallback_engine_path(app, backend)?;
+    if !is_regular_file(&path) {
+        return Ok(None);
+    }
+    let snapshot = if backend == "vulkan" {
+        RuntimeSnapshot::capture(&path, None, &AtomicBool::new(false))?
+    } else {
+        RuntimeSnapshot::capture_for_status(&path, None)?
+    };
+    Ok(Some((path, snapshot)))
 }
 
 /// Reports whether the same validated engine selected for inference is
@@ -599,6 +738,89 @@ mod tests {
             "whispertube-paths-{name}-{}-{nonce}",
             std::process::id()
         ))
+    }
+
+    #[test]
+    #[cfg(any(unix, windows))]
+    fn managed_storage_rejects_redirected_models_and_runtime_directories() {
+        let storage = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let root = storage.path().join("runtime");
+        #[cfg(unix)]
+        let link = std::os::unix::fs::symlink;
+        #[cfg(windows)]
+        let link = |target: &std::path::Path, path: &std::path::Path| {
+            let status = std::process::Command::new("pwsh")
+                .args(["-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference='Stop'; New-Item -ItemType Junction -Path $env:WHISPERTUBE_TEST_LINK -Target $env:WHISPERTUBE_TEST_TARGET | Out-Null"])
+                .env("WHISPERTUBE_TEST_LINK", path)
+                .env("WHISPERTUBE_TEST_TARGET", target)
+                .status()?;
+            if status.success() {
+                Ok(())
+            } else {
+                Err(std::io::Error::other("Could not create test junction"))
+            }
+        };
+        let models = storage.path().join("models");
+        link(outside.path(), &models).unwrap();
+        assert!(super::models_dir_in(storage.path()).is_err());
+        #[cfg(unix)]
+        fs::remove_file(&models).unwrap();
+        #[cfg(windows)]
+        fs::remove_dir(&models).unwrap();
+        assert_eq!(super::models_dir_in(storage.path()).unwrap(), models);
+
+        link(outside.path(), &root).unwrap();
+        assert!(super::user_runtime_dir_in(storage.path()).is_err());
+        assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
+        #[cfg(unix)]
+        fs::remove_file(&root).unwrap();
+        #[cfg(windows)]
+        fs::remove_dir(&root).unwrap();
+
+        fs::create_dir(&root).unwrap();
+        let path = root.join(super::runtime_platform());
+        link(outside.path(), &path).unwrap();
+        assert!(super::user_runtime_dir_in(storage.path()).is_err());
+        #[cfg(unix)]
+        fs::remove_file(&path).unwrap();
+        #[cfg(windows)]
+        fs::remove_dir(&path).unwrap();
+
+        assert_eq!(super::user_runtime_dir_in(storage.path()).unwrap(), path);
+    }
+
+    #[test]
+    fn only_available_bundled_metal_takes_precedence_over_user_runtime() {
+        let runtime = tempfile::tempdir().unwrap();
+        let filename = super::exe_name("whisper-cli");
+        for backend in ["metal", "vulkan", "cpu"] {
+            let directory = runtime.path().join(backend);
+            let engine = directory.join(&filename);
+            assert_eq!(
+                super::preferred_bundled_metal(runtime.path(), backend),
+                None
+            );
+            fs::create_dir(directory).unwrap();
+            fs::write(&engine, b"bundled engine").unwrap();
+            let expected = (backend == "metal").then_some(engine);
+            assert_eq!(
+                super::preferred_bundled_metal(runtime.path(), backend),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn whisper_cli_scopes_dynamic_backend_loading_to_its_runtime_directory() {
+        let runtime = tempfile::tempdir().unwrap();
+        let engine = runtime.path().join(super::exe_name("whisper-cli"));
+        let command = super::whisper_cli_command(&engine);
+        assert_eq!(command.get_program(), engine.as_os_str());
+        assert_eq!(command.get_current_dir(), Some(runtime.path()));
+        assert!(command
+            .get_envs()
+            .any(|(key, value)| { key == "GGML_BACKEND_PATH" && value.is_none() }));
     }
 
     #[test]

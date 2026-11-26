@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OpenFlags};
 use std::{
     collections::{BTreeSet, HashSet},
     ffi::OsStr,
@@ -38,28 +38,54 @@ struct StorageUsageCache {
 static STORAGE_USAGE_CACHE: OnceLock<Mutex<Option<StorageUsageCache>>> = OnceLock::new();
 
 pub fn database_path(app: &AppHandle) -> Result<PathBuf, String> {
-    Ok(app_data_dir(app)?.join("whispertube.db"))
+    checked_database_path(&app_data_dir(app)?.join("whispertube.db"))
+}
+
+fn checked_database_path(database: &Path) -> Result<PathBuf, String> {
+    let parent = database.parent().ok_or("Folder database tidak valid.")?;
+    let name = database.file_name().ok_or("Nama database tidak valid.")?;
+    // Resolve OS-managed aliases in the parent path before asking SQLite not
+    // to follow links. The database and all companions still require ordinary
+    // file types in the resolved application directory.
+    crate::durable::require_plain_directory(parent)
+        .map_err(|e| format!("Folder history database tidak valid: {e}"))?;
+    let database = fs::canonicalize(parent)
+        .map_err(|e| format!("Gagal memvalidasi folder history: {e}"))?
+        .join(name);
+    for suffix in ["", "-journal", "-wal", "-shm"] {
+        let mut path = database.as_os_str().to_owned();
+        path.push(suffix);
+        let path = PathBuf::from(path);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_file() && !crate::durable::is_link(&metadata) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => {
+                return Err(format!(
+                    "History database atau recovery bukan file biasa: {}",
+                    path.display()
+                ));
+            }
+            Err(error) => return Err(format!("Gagal memeriksa file history: {error}")),
+        }
+    }
+    Ok(database)
 }
 
 pub(crate) fn storage_tree_bytes(path: &Path) -> Result<u64, String> {
     let mut total = 0u64;
     for entry in fs::read_dir(path).map_err(|e| format!("Gagal membaca job storage: {e}"))? {
         let entry = entry.map_err(|e| format!("Gagal membaca entry job storage: {e}"))?;
-        let file_type = entry
-            .file_type()
-            .map_err(|e| format!("Gagal membaca tipe file job storage: {e}"))?;
-        if file_type.is_symlink() {
-            return Err("Job storage berisi symbolic link yang tidak diizinkan.".into());
+        let metadata = fs::symlink_metadata(entry.path())
+            .map_err(|e| format!("Gagal membaca metadata job storage: {e}"))?;
+        if crate::durable::is_link(&metadata) {
+            // A link isn't application-owned media and must never be followed
+            // to estimate the space used by this storage tree.
+            continue;
         }
-        if file_type.is_dir() {
+        if metadata.is_dir() {
             total = total.saturating_add(storage_tree_bytes(&entry.path())?);
-        } else if file_type.is_file() {
-            total = total.saturating_add(
-                entry
-                    .metadata()
-                    .map_err(|e| format!("Gagal membaca ukuran job storage: {e}"))?
-                    .len(),
-            );
+        } else if metadata.is_file() {
+            total = total.saturating_add(metadata.len());
         }
     }
     Ok(total)
@@ -112,9 +138,7 @@ pub fn job_storage_bytes(app: &AppHandle) -> Result<u64, String> {
         }
     }
 
-    let root = crate::paths::jobs_dir(app)?;
-    let canonical_root =
-        fs::canonicalize(&root).map_err(|e| format!("Gagal memvalidasi job storage: {e}"))?;
+    let canonical_root = canonical_jobs_root(&crate::paths::jobs_dir(app)?)?;
     let bytes = storage_tree_bytes(&canonical_root)?;
     if let Ok(mut guard) = cache.lock() {
         *guard = Some(StorageUsageCache {
@@ -146,6 +170,7 @@ pub fn init_db(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 fn initialize_database_file(db_path: &Path) -> Result<(), String> {
+    let db_path = checked_database_path(db_path)?;
     if db_path
         .symlink_metadata()
         .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
@@ -153,7 +178,11 @@ fn initialize_database_file(db_path: &Path) -> Result<(), String> {
         let root = db_path.parent().ok_or("Folder database tidak valid.")?;
         crate::user_data::ensure_recovery_files_removed(root)?;
     }
-    let conn = Connection::open(db_path).map_err(|e| format!("Gagal membuka database: {e}"))?;
+    let conn = Connection::open_with_flags(
+        db_path,
+        OpenFlags::default() | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .map_err(|e| format!("Gagal membuka database: {e}"))?;
     configure_connection(&conn)?;
     initialize_schema(&conn)
 }
@@ -205,6 +234,17 @@ pub(crate) fn initialize_schema(conn: &Connection) -> Result<(), String> {
             .pragma_update(None, "user_version", 1)
             .map_err(|e| format!("Gagal menyimpan versi database: {e}"))?;
     }
+    if version < 2 {
+        transaction
+            .execute(
+                "ALTER TABLE history ADD COLUMN retain_audio INTEGER CHECK(retain_audio IN (0,1))",
+                [],
+            )
+            .map_err(|e| format!("Gagal menambahkan preferensi retensi audio: {e}"))?;
+        transaction
+            .pragma_update(None, "user_version", 2)
+            .map_err(|e| format!("Gagal menyimpan versi database: {e}"))?;
+    }
     transaction
         .commit()
         .map_err(|e| format!("Gagal menyelesaikan migrasi database: {e}"))
@@ -213,13 +253,16 @@ pub(crate) fn initialize_schema(conn: &Connection) -> Result<(), String> {
 pub(crate) fn open_connection(app: &AppHandle) -> Result<Connection, String> {
     // A failed startup or reset must not silently create a database beside an
     // old recovery journal. Initialization is owned by startup and reset.
-    let conn = Connection::open_with_flags(database_path(app)?, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
-        .map_err(|e| format!("Gagal membuka history database. Periksa izin penyimpanan atau buka pengaturan pemulihan: {e}"))?;
+    let conn = Connection::open_with_flags(
+        database_path(app)?,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .map_err(|e| format!("Gagal membuka history database. Periksa izin penyimpanan atau buka pengaturan pemulihan: {e}"))?;
     configure_connection(&conn)?;
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(|e| format!("History database tidak dapat dibaca. Periksa cadangan data: {e}"))?;
-    if version < 1 {
+    if version < 2 {
         initialize_schema(&conn)?;
     }
     Ok(conn)
@@ -242,8 +285,8 @@ where
         .map_err(|e| format!("Gagal memulai penyimpanan history: {e}"))?;
     transaction
         .execute(
-        "INSERT INTO history (title, channel, source_url, created_at, duration, language, model, backend, result_path)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        "INSERT INTO history (title, channel, source_url, created_at, duration, language, model, backend, result_path, retain_audio)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             request.title,
             request.channel,
@@ -254,6 +297,7 @@ where
             request.model_id,
             backend,
             result_path.to_string_lossy().to_string(),
+            request.keep_audio,
         ],
     )
     .map_err(|e| format!("Gagal menyimpan history: {e}"))?;
@@ -325,21 +369,7 @@ fn load_history_in(conn: &Connection, root: &Path, id: i64) -> Result<Transcript
     if crate::history_files::is_deleted(conn, id, "transcript")? {
         return crate::history_files::metadata_only_result(conn, id, &job_dir);
     }
-    let safe_result_path = job_dir.join("result.json");
-    let canonical_result = fs::canonicalize(&safe_result_path)
-        .map_err(|e| format!("Gagal memvalidasi file history: {e}"))?;
-    if canonical_result.parent() != Some(job_dir.as_path())
-        || canonical_result.file_name() != Some(OsStr::new("result.json"))
-    {
-        return Err("File history berada di luar folder job WhisperTube.".into());
-    }
-    let file = fs::File::open(canonical_result)
-        .map_err(|e| format!("File transcript history tidak ditemukan: {e}"))?;
-    let mut bytes = Vec::with_capacity(MAX_TRANSCRIPT_RESULT_BYTES.min(64 * 1024) as usize);
-    file.take(MAX_TRANSCRIPT_RESULT_BYTES.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(|e| format!("Gagal membaca file history: {e}"))?;
-    let mut result = decode_history_result(&bytes)?;
+    let mut result = read_result_file(&job_dir)?;
     result.history_id = id;
     result.transcript_available = true;
     result.txt_path = job_dir
@@ -360,6 +390,25 @@ fn load_history_in(conn: &Connection, root: &Path, id: i64) -> Result<Transcript
         && crate::paths::is_regular_file(&audio))
     .then(|| audio.to_string_lossy().into_owned());
     Ok(result)
+}
+
+pub(crate) fn audio_retention(conn: &Connection, id: i64) -> Result<Option<bool>, String> {
+    conn.query_row(
+        "SELECT retain_audio FROM history WHERE id=?1",
+        [id],
+        |row| row.get(0),
+    )
+    .map_err(|e| format!("Gagal membaca preferensi retensi audio: {e}"))
+}
+
+pub(crate) fn read_result_file(job_dir: &Path) -> Result<TranscriptResult, String> {
+    let file = crate::durable::open_regular_read(&job_dir.join("result.json"))
+        .map_err(|e| format!("File transcript history tidak ditemukan: {e}"))?;
+    let mut bytes = Vec::with_capacity(MAX_TRANSCRIPT_RESULT_BYTES.min(64 * 1024) as usize);
+    file.take(MAX_TRANSCRIPT_RESULT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("Gagal membaca file history: {e}"))?;
+    decode_history_result(&bytes)
 }
 
 fn decode_history_result(bytes: &[u8]) -> Result<TranscriptResult, String> {
@@ -401,7 +450,7 @@ pub(crate) fn resume_exclusions(
 ) -> Result<Option<HashSet<PathBuf>>, String> {
     let conn = Connection::open_with_flags(
         database_path(app)?,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )
     .map_err(|e| format!("Gagal membuka history untuk resume: {e}"))?;
     conn.busy_timeout(deadline.saturating_duration_since(Instant::now()))
@@ -484,8 +533,10 @@ fn inventory_history_directories_before(
     Ok((directories, warnings))
 }
 
-fn canonical_jobs_root(root: &Path) -> Result<PathBuf, String> {
-    fs::canonicalize(root).map_err(|e| format!("Gagal memvalidasi history storage: {e}"))
+pub(crate) fn canonical_jobs_root(root: &Path) -> Result<PathBuf, String> {
+    crate::durable::require_plain_directory(root)
+        .and_then(|()| fs::canonicalize(root))
+        .map_err(|e| format!("Gagal memvalidasi history storage: {e}"))
 }
 
 fn direct_child_name(name: &str) -> bool {
@@ -560,7 +611,7 @@ fn resolve_existing_job(root: &Path, path: &Path) -> Result<Option<PathBuf>, Str
     match fs::symlink_metadata(path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(format!("Gagal memeriksa folder job history: {error}")),
-        Ok(meta) if !meta.is_dir() || meta.file_type().is_symlink() => {
+        Ok(meta) if !meta.is_dir() || crate::durable::is_link(&meta) => {
             return Err("Folder history bukan direktori biasa.".into());
         }
         Ok(_) => {}
@@ -645,6 +696,36 @@ pub(crate) fn record_retained_audio_cleanup(job_dir: &Path) -> Result<(), String
     )
 }
 
+fn is_export_staging(name: &str) -> bool {
+    let id = name
+        .strip_prefix("transcript.")
+        .or_else(|| name.strip_prefix("result."))
+        .and_then(|name| name.strip_suffix(".tmp"));
+    id.is_some_and(|id| uuid::Uuid::parse_str(id).is_ok_and(|uuid| uuid.to_string() == id))
+}
+
+pub(crate) fn cleanup_export_staging(job_dir: &Path) -> Result<(), String> {
+    for entry in
+        fs::read_dir(job_dir).map_err(|e| format!("Gagal membaca staging transkrip: {e}"))?
+    {
+        let entry = entry.map_err(|e| format!("Gagal membaca staging transkrip: {e}"))?;
+        if !entry.file_name().to_str().is_some_and(is_export_staging) {
+            continue;
+        }
+        match fs::remove_file(entry.path()) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(format!(
+                    "Gagal menghapus staging {:?}: {e}",
+                    entry.file_name()
+                ))
+            }
+        }
+    }
+    Ok(())
+}
+
 fn cleanup_committed_job(job_dir: &Path) -> Result<(), String> {
     let mut has_temporary = false;
     let mut has_wav = false;
@@ -654,8 +735,10 @@ fn cleanup_committed_job(job_dir: &Path) -> Result<(), String> {
         let entry = entry.map_err(|e| format!("Gagal memeriksa artifact history: {e}"))?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        has_temporary |=
-            name == ".in-progress" || name == ".checkpoints" || name.starts_with("source.");
+        has_temporary |= name == ".in-progress"
+            || name == ".checkpoints"
+            || name.starts_with("source.")
+            || is_export_staging(&name);
         has_wav |= name == "audio.wav";
     }
     // No payload needs decoding when there is nothing to delete. A receipt
@@ -669,7 +752,7 @@ fn cleanup_committed_job(job_dir: &Path) -> Result<(), String> {
         }
         let mut bytes = Vec::new();
         if crate::paths::is_regular_file(&receipt) {
-            fs::File::open(&receipt)
+            crate::durable::open_regular_read(&receipt)
                 .and_then(|file| file.take(256).read_to_end(&mut bytes))
                 .map_err(|e| format!("Gagal membaca receipt cleanup: {e}"))?;
             if bytes == signature.as_bytes() {
@@ -688,22 +771,12 @@ fn cleanup_committed_job_artifacts(job_dir: &Path) -> Result<(), String> {
     let wav = job_dir.join("audio.wav");
     // Only a committed history row authorizes this cleanup. A result file on
     // its own may belong to a rolled-back transaction and must remain resumable.
-    let result_path = fs::canonicalize(job_dir.join("result.json"))
-        .map_err(|e| format!("Gagal memvalidasi hasil untuk cleanup history: {e}"))?;
-    if result_path.parent() != Some(job_dir) {
-        return Err("File history berada di luar folder job WhisperTube.".into());
-    }
-    let file = fs::File::open(result_path)
-        .map_err(|e| format!("Gagal membuka hasil untuk cleanup history: {e}"))?;
-    let mut bytes = Vec::new();
-    file.take(MAX_TRANSCRIPT_RESULT_BYTES.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(|e| format!("Gagal membaca hasil untuk cleanup history: {e}"))?;
-    let result = decode_history_result(&bytes)?;
+    let result = read_result_file(job_dir)?;
     // A missing/unreadable result must not authorize deleting recoverable data,
     // including the original download. Validate retention metadata first.
     cleanup_source_audio(job_dir)?;
     crate::checkpoint::cleanup(job_dir)?;
+    cleanup_export_staging(job_dir)?;
     if result.audio_path.is_none() {
         match fs::remove_file(&wav) {
             Ok(()) => {}
@@ -731,14 +804,14 @@ pub(crate) fn cleanup_job_storage_in(conn: &Connection, root: &Path) -> Result<(
         inventory_history_directories(conn, &canonical_root)?;
     let inventory_complete = reference_warnings.is_empty();
     warnings.extend(reference_warnings);
-    let entries = fs::read_dir(root).map_err(|e| format!("Gagal membaca job storage: {e}"))?;
+    let entries =
+        fs::read_dir(&canonical_root).map_err(|e| format!("Gagal membaca job storage: {e}"))?;
     for entry in entries {
         let entry = entry.map_err(|e| format!("Gagal membaca entry job storage: {e}"))?;
         let path = entry.path();
-        let kind = entry
-            .file_type()
+        let metadata = fs::symlink_metadata(&path)
             .map_err(|e| format!("Gagal membaca tipe job storage: {e}"))?;
-        if !kind.is_dir() || kind.is_symlink() {
+        if !metadata.is_dir() || crate::durable::is_link(&metadata) {
             continue;
         }
         let canonical_job_dir =
@@ -758,7 +831,13 @@ pub(crate) fn cleanup_job_storage_in(conn: &Connection, root: &Path) -> Result<(
             }
             continue;
         }
-        if inventory_complete && is_older_than(&path, ORPHAN_JOB_GRACE) {
+        let name = entry.file_name();
+        let owned = name
+            .to_str()
+            .is_some_and(|name| uuid::Uuid::parse_str(name).is_ok_and(|id| id.to_string() == name))
+            && fs::symlink_metadata(path.join(".in-progress"))
+                .is_ok_and(|marker| marker.is_file() && !crate::durable::is_link(&marker));
+        if inventory_complete && owned && is_older_than(&path, ORPHAN_JOB_GRACE) {
             if let Err(error) = fs::remove_dir_all(&path) {
                 warnings.push(format!(
                     "Gagal membersihkan job storage orphan {}: {error}",
@@ -780,7 +859,9 @@ fn queue_history_deletion(
     conn: &mut Connection,
     root: &Path,
     ids: &[i64],
-) -> Result<Vec<i64>, String> {
+) -> Result<HistoryDeleteOutcome, String> {
+    let root = canonical_jobs_root(root)?;
+    let mut cleanup_warnings = Vec::new();
     if ids.len() > 100 || ids.iter().any(|id| *id <= 0) {
         return Err("Daftar history yang akan dihapus tidak valid.".into());
     }
@@ -796,7 +877,16 @@ fn queue_history_deletion(
                 |row| row.get(0),
             )
             .map_err(|e| format!("History {id} tidak ditemukan: {e}"))?;
-        if let Some(dir) = job_dir_for_result_in(root, &path)? {
+        let directory = match resolve_job_directory(&root, &path) {
+            Ok(directory) => directory,
+            Err(error) => {
+                // Explicit row deletion is safe even when ownership of its
+                // files cannot be identified. Never queue a path from that row.
+                cleanup_warnings.push(format!("History {id} dihapus tanpa menghapus file yang tidak dapat diverifikasi: {error}"));
+                None
+            }
+        };
+        if let Some(dir) = directory {
             let name = dir
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -821,7 +911,10 @@ fn queue_history_deletion(
     transaction
         .commit()
         .map_err(|e| format!("Gagal menyelesaikan penghapusan: {e}"))?;
-    Ok(ids.into_iter().collect())
+    Ok(HistoryDeleteOutcome {
+        deleted_ids: ids.into_iter().collect(),
+        cleanup_warnings,
+    })
 }
 
 fn pending_job_names(conn: &Connection) -> Result<Vec<String>, String> {
@@ -858,7 +951,7 @@ fn cleanup_pending_deletions(conn: &Connection, root: &Path) -> Result<Vec<Strin
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(format!("Gagal membaca folder tertunda: {e}")),
                 Ok(metadata) => {
-                    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    if crate::durable::is_link(&metadata) || !metadata.is_dir() {
                         return Err("Folder tertunda bukan direktori biasa.".into());
                     }
                     let canonical = fs::canonicalize(&target)
@@ -874,6 +967,8 @@ fn cleanup_pending_deletions(conn: &Connection, root: &Path) -> Result<Vec<Strin
                         .map_err(|e| format!("Gagal membersihkan file history: {e}"))?;
                 }
             }
+            crate::durable::sync_parent(&target)
+                .map_err(|e| format!("Gagal menyinkronkan penghapusan job: {e}"))?;
             conn.execute(
                 "DELETE FROM pending_job_deletions WHERE job_name = ?1",
                 [&name],
@@ -893,17 +988,18 @@ fn cleanup_pending_deletions(conn: &Connection, root: &Path) -> Result<Vec<Strin
 pub fn delete_history(app: &AppHandle, ids: &[i64]) -> Result<HistoryDeleteOutcome, String> {
     let mut conn = open_connection(app)?;
     let root = crate::paths::jobs_dir(app)?;
-    let deleted_ids = queue_history_deletion(&mut conn, &root, ids)?;
-    let cleanup_warnings = cleanup_pending_deletions(&conn, &root).unwrap_or_else(|error| {
-        vec![format!(
-            "History telah dihapus; pembersihan tertunda: {error}"
-        )]
-    });
+    let mut outcome = queue_history_deletion(&mut conn, &root, ids)?;
+    outcome
+        .cleanup_warnings
+        .extend(
+            cleanup_pending_deletions(&conn, &root).unwrap_or_else(|error| {
+                vec![format!(
+                    "History telah dihapus; pembersihan tertunda: {error}"
+                )]
+            }),
+        );
     invalidate_job_storage_cache();
-    Ok(HistoryDeleteOutcome {
-        deleted_ids,
-        cleanup_warnings,
-    })
+    Ok(outcome)
 }
 
 pub fn copy_export(app: &AppHandle, source: &str, target: &str) -> Result<(), String> {
@@ -928,8 +1024,7 @@ pub fn copy_export(app: &AppHandle, source: &str, target: &str) -> Result<(), St
         .ok_or_else(|| "Folder source export tidak valid.".to_string())?;
     let canonical_job_dir = fs::canonicalize(job_dir)
         .map_err(|e| format!("Gagal memvalidasi folder source export: {e}"))?;
-    let canonical_jobs_root = fs::canonicalize(crate::paths::jobs_dir(app)?)
-        .map_err(|e| format!("Gagal memvalidasi jobs storage: {e}"))?;
+    let canonical_jobs_root = canonical_jobs_root(&crate::paths::jobs_dir(app)?)?;
     if canonical_job_dir.parent() != Some(canonical_jobs_root.as_path())
         || canonical_source.parent() != Some(canonical_job_dir.as_path())
     {
@@ -963,7 +1058,7 @@ pub fn copy_export(app: &AppHandle, source: &str, target: &str) -> Result<(), St
     {
         return Err("Ekstensi target export harus sama dengan source.".into());
     }
-    let mut input = fs::File::open(canonical_source)
+    let mut input = crate::durable::open_regular_read(&canonical_job_dir.join(source_name))
         .map_err(|e| format!("Gagal membuka source export: {e}"))?;
     write_export_atomically(&mut input, &target_path)
 }
@@ -999,7 +1094,16 @@ fn write_export_atomically(input: &mut impl Read, target: &Path) -> Result<(), S
                 )
             })?;
         }
-        std::io::copy(input, &mut output)?;
+        let size = std::io::copy(
+            &mut (&mut *input).take(MAX_TRANSCRIPT_RESULT_BYTES),
+            &mut output,
+        )?;
+        if size == MAX_TRANSCRIPT_RESULT_BYTES && input.read(&mut [0])? != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "File export melebihi batas ukuran aman.",
+            ));
+        }
         #[cfg(windows)]
         if let Some(permissions) = permissions {
             output.set_permissions(permissions)?;
@@ -1163,8 +1267,7 @@ pub fn reveal_audio(app: &AppHandle, audio_path: &str) -> Result<(), String> {
     let canonical_job_dir = canonical_path
         .parent()
         .ok_or_else(|| "Folder audio tidak valid.".to_string())?;
-    let canonical_jobs_root = fs::canonicalize(crate::paths::jobs_dir(app)?)
-        .map_err(|e| format!("Gagal memvalidasi jobs storage: {e}"))?;
+    let canonical_jobs_root = canonical_jobs_root(&crate::paths::jobs_dir(app)?)?;
     if canonical_job_dir.parent() != Some(canonical_jobs_root.as_path()) {
         return Err("File audio berada di luar storage job WhisperTube.".into());
     }
@@ -1183,7 +1286,7 @@ mod tests {
     };
     use crate::types::MAX_TRANSCRIPT_RESULT_BYTES;
     use rusqlite::Connection;
-    use std::{fs, path::PathBuf};
+    use std::{fs, io::Read, path::PathBuf};
 
     struct Fixture {
         root: PathBuf,
@@ -1193,6 +1296,30 @@ mod tests {
     #[test]
     fn bundled_sqlite_meets_the_wal_security_floor() {
         assert!(rusqlite::version_number() >= 3_054_000);
+    }
+
+    #[test]
+    fn history_database_rejects_non_regular_recovery_files() {
+        let root = tempfile::tempdir().unwrap();
+        let db = root.path().join("whispertube.db");
+        super::initialize_database_file(&db).unwrap();
+        fs::create_dir(root.path().join("whispertube.db-wal")).unwrap();
+        let error = super::initialize_database_file(&db).unwrap_err();
+        assert!(error.contains("bukan file biasa"));
+        assert!(db.is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn history_database_rejects_symlink_even_when_target_is_a_regular_database() {
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("whispertube.db");
+        let separate_database = root.path().join("separate.db");
+        super::initialize_database_file(&separate_database).unwrap();
+        let original = fs::read(&separate_database).unwrap();
+        std::os::unix::fs::symlink(&separate_database, &database).unwrap();
+        assert!(super::initialize_database_file(&database).is_err());
+        assert_eq!(fs::read(separate_database).unwrap(), original);
     }
 
     #[test]
@@ -1263,7 +1390,7 @@ mod tests {
         assert_eq!(
             conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
                 .unwrap(),
-            1
+            2
         );
         let intents = conn
             .prepare("SELECT kind,pending FROM history_file_deletions ORDER BY kind")
@@ -1443,6 +1570,61 @@ mod tests {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.root).unwrap();
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn history_storage_rejects_a_junction_root_before_use() {
+        let container = tempfile::tempdir().unwrap();
+        let ordinary = container.path().join("ordinary");
+        let linked = container.path().join("jobs");
+        fs::create_dir(&ordinary).unwrap();
+        let status = std::process::Command::new("pwsh")
+            .args(["-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference='Stop'; New-Item -ItemType Junction -Path $env:WHISPERTUBE_TEST_JOBS -Target $env:WHISPERTUBE_TEST_ORDINARY | Out-Null"])
+            .env("WHISPERTUBE_TEST_JOBS", &linked)
+            .env("WHISPERTUBE_TEST_ORDINARY", &ordinary)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert!(super::canonical_jobs_root(&linked).is_err());
+        assert!(crate::durable::create_private_dir_all(&linked).is_err());
+        assert!(super::canonical_jobs_root(&ordinary).is_ok());
+    }
+
+    #[test]
+    fn oversize_export_preserves_the_previous_destination() {
+        let fixture = Fixture::new();
+        let target = fixture.root.join("old.txt");
+        fs::write(&target, b"previous").unwrap();
+        let mut input = std::io::repeat(0).take(super::MAX_TRANSCRIPT_RESULT_BYTES + 1);
+        assert!(super::write_export_atomically(&mut input, &target).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"previous");
+        assert_eq!(fs::read_dir(&fixture.root).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn deleting_invalid_metadata_unblocks_pending_cleanup_without_queuing_its_path() {
+        let fixture = Fixture::new();
+        let mut conn = fixture.open();
+        let valid = fixture.insert(&conn, "valid");
+        let invalid = fixture.insert(&conn, "preserved");
+        conn.execute(
+            "UPDATE history SET result_path='untrusted/location/result.json' WHERE id=?1",
+            [invalid],
+        )
+        .unwrap();
+        queue_history_deletion(&mut conn, &fixture.root, &[valid]).unwrap();
+        assert!(!cleanup_pending_deletions(&conn, &fixture.root)
+            .unwrap()
+            .is_empty());
+        let outcome = queue_history_deletion(&mut conn, &fixture.root, &[invalid]).unwrap();
+        assert_eq!(outcome.deleted_ids, [invalid]);
+        assert_eq!(outcome.cleanup_warnings.len(), 1);
+        assert!(cleanup_pending_deletions(&conn, &fixture.root)
+            .unwrap()
+            .is_empty());
+        assert!(!fixture.root.join("valid").exists());
+        assert!(fixture.root.join("preserved/result.json").is_file());
     }
 
     #[test]
@@ -1706,8 +1888,16 @@ mod tests {
         conn.execute("INSERT INTO pending_job_deletions VALUES ('../unsafe')", [])
             .unwrap();
         let committed = fixture.completed_job(&conn, "committed", false);
-        let expired = fixture.root.join("expired");
+        let unrelated = fixture.root.join("expired-non-job");
+        fs::create_dir(&unrelated).unwrap();
+        fs::write(unrelated.join(".in-progress"), b"unrelated marker").unwrap();
+        expire_job(&unrelated);
+        let unmarked = fixture.root.join(uuid::Uuid::new_v4().to_string());
+        fs::create_dir(&unmarked).unwrap();
+        expire_job(&unmarked);
+        let expired = fixture.root.join(uuid::Uuid::new_v4().to_string());
         fs::create_dir(&expired).unwrap();
+        fs::write(expired.join(".in-progress"), b"job marker").unwrap();
         fs::write(expired.join("audio.wav"), b"expired audio").unwrap();
         expire_job(&expired);
         // Even a result file cannot authorize cleanup without a committed row.
@@ -1718,6 +1908,8 @@ mod tests {
         let error = cleanup_job_storage_in(&conn, &fixture.root).unwrap_err();
         assert!(error.contains("Nama folder pada intent penghapusan tidak aman"));
         assert!(!expired.exists());
+        assert!(unrelated.exists());
+        assert!(unmarked.exists());
         assert!(!committed.join("audio.wav").exists());
         assert_eq!(
             fs::read(recent.join("audio.wav")).unwrap(),
@@ -1780,8 +1972,9 @@ mod tests {
             }
             expire_job(&job);
         }
-        let orphan = fixture.root.join("orphan");
+        let orphan = fixture.root.join(uuid::Uuid::new_v4().to_string());
         fs::create_dir(&orphan).unwrap();
+        fs::write(orphan.join(".in-progress"), b"job marker").unwrap();
         expire_job(&orphan);
         let error = cleanup_job_storage_in(&conn, &fixture.root).unwrap_err();
         for name in ["missing", "corrupt", "directory"] {
@@ -1911,7 +2104,9 @@ mod tests {
         let mut conn = fixture.open();
         let id = fixture.insert(&conn, "job");
         assert_eq!(
-            queue_history_deletion(&mut conn, &fixture.root, &[id, id]).unwrap(),
+            queue_history_deletion(&mut conn, &fixture.root, &[id, id])
+                .unwrap()
+                .deleted_ids,
             [id]
         );
         assert!(fixture.root.join("job/result.json").exists());

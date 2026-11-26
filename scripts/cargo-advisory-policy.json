@@ -1,6 +1,10 @@
 {
   "reviewedOn": "2026-11-20",
   "owner": "WhisperTube maintainers",
+  "vendoredUpdater": {
+    "version": "2.14.1",
+    "checksum": "d957abbcb3f9f6c76d22a3a0f012f30880640d0bccb5634d2b12a9937e4c872b"
+  },
   "knownRisks": [
     {
       "id": "RUSTSEC-2026-0543",

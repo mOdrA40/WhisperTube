@@ -1,13 +1,15 @@
+#[cfg(unix)]
+use std::io::Read;
 use std::{
-    collections::hash_map::DefaultHasher,
+    collections::{hash_map::DefaultHasher, HashMap},
     fs::{self, File},
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
-    sync::atomic::AtomicBool,
+    sync::{atomic::AtomicBool, Mutex, OnceLock},
     time::SystemTime,
 };
 
-#[derive(Hash, PartialEq, Eq)]
+#[derive(Clone, Hash, PartialEq, Eq)]
 struct FileStamp {
     path: PathBuf,
     size: u64,
@@ -16,13 +18,25 @@ struct FileStamp {
     changed: [i64; 2],
 }
 
-// Owned by one transcription reservation, never a process-global mtime cache.
+// Windows status probes can reuse metadata while their open handles deny writes.
+// Inference always verifies from scratch.
+struct StatusStamp {
+    version: String,
+    files: Vec<FileStamp>,
+}
+
+static STATUS_CACHE: OnceLock<Mutex<HashMap<PathBuf, StatusStamp>>> = OnceLock::new();
+const MAX_STATUS_CACHE_ENTRIES: usize = 8;
+
+// Owned by one transcription reservation or one short hardware status probe.
 // Windows handles deny writes/deletion until the job releases its runtime.
 pub struct RuntimeSnapshot {
     root: PathBuf,
     executable: PathBuf,
     version: Option<String>,
     stamps: Vec<FileStamp>,
+    #[cfg(unix)]
+    hashes: Vec<String>,
     _files: Vec<File>,
 }
 
@@ -41,6 +55,8 @@ impl RuntimeSnapshot {
         }
         let mut hash = DefaultHasher::new();
         (&self.root, &self.version, &self.stamps).hash(&mut hash);
+        #[cfg(unix)]
+        self.hashes.hash(&mut hash);
         Some(hash.finish())
     }
 
@@ -49,35 +65,107 @@ impl RuntimeSnapshot {
         version: Option<&str>,
         cancelled: &AtomicBool,
     ) -> Result<Self, String> {
-        let root = fs::canonicalize(executable.parent().ok_or("Folder runtime tidak valid.")?)
+        Self::capture_inner(executable, version, cancelled, false)
+    }
+
+    pub(crate) fn capture_for_status(
+        executable: &Path,
+        version: Option<&str>,
+    ) -> Result<Self, String> {
+        Self::capture_inner(executable, version, &AtomicBool::new(false), true)
+    }
+
+    fn capture_inner(
+        executable: &Path,
+        version: Option<&str>,
+        cancelled: &AtomicBool,
+        for_status: bool,
+    ) -> Result<Self, String> {
+        let parent = executable.parent().ok_or("Folder runtime tidak valid.")?;
+        if version.is_some() {
+            crate::durable::require_plain_directory(parent)
+                .map_err(|e| format!("Gagal memvalidasi folder runtime: {e}"))?;
+        }
+        let root = fs::canonicalize(parent)
             .map_err(|e| format!("Gagal memvalidasi folder runtime: {e}"))?;
         let executable = root.join(executable.file_name().ok_or("Nama runtime tidak valid.")?);
+        // Acquire before hashing so concurrent Qwen model and system
+        // refreshes share the first verified result for the current runtime.
+        let mut cache = if cfg!(windows) && for_status && version.is_some() {
+            Some(
+                STATUS_CACHE
+                    .get_or_init(|| Mutex::new(HashMap::new()))
+                    .lock()
+                    .map_err(|_| "Cache status runtime terkunci.")?,
+            )
+        } else {
+            None
+        };
         let (stamps, files) = inventory(&root, &executable, version.is_some(), cancelled)?;
-        if let Some(version) = version {
-            if !crate::paths::runtime_manifest_matches_cancelable(
-                &root,
-                &executable,
-                version,
-                cancelled,
-            )? {
-                return Err("Runtime gagal verifikasi sebelum transkripsi.".into());
+        #[cfg(unix)]
+        let hashes = inventory_hashes(&stamps, &files, cancelled)?;
+        let stable = stamps
+            .iter()
+            .all(|stamp| stamp.identity.is_some() && stamp.modified.is_some());
+        let reuse = stable
+            && version.zip(cache.as_ref()).is_some_and(|(version, cache)| {
+                cache
+                    .get(&executable)
+                    .is_some_and(|previous| previous.version == version && previous.files == stamps)
+            });
+        if !reuse {
+            if let Some(version) = version {
+                #[cfg(unix)]
+                let matches = crate::paths::runtime_manifest_matches_hashes(
+                    &root,
+                    &executable,
+                    version,
+                    stamps
+                        .iter()
+                        .zip(&hashes)
+                        .map(|(stamp, hash)| (stamp.path.as_path(), hash.as_str())),
+                );
+                #[cfg(windows)]
+                let matches = crate::paths::runtime_manifest_matches_cancelable(
+                    &root,
+                    &executable,
+                    version,
+                    cancelled,
+                )?;
+                if !matches {
+                    return Err("Runtime gagal verifikasi sebelum transkripsi.".into());
+                }
             }
-        }
-        let (after, _) = inventory(&root, &executable, version.is_some(), cancelled)?;
-        if after != stamps {
-            return Err("Runtime berubah selama verifikasi.".into());
+            let (after, _) = inventory(&root, &executable, version.is_some(), cancelled)?;
+            if after != stamps {
+                return Err("Runtime berubah selama verifikasi.".into());
+            }
+            if let (Some(version), Some(cache)) = (version.filter(|_| stable), cache.as_mut()) {
+                if cache.len() >= MAX_STATUS_CACHE_ENTRIES {
+                    cache.clear();
+                }
+                cache.insert(
+                    executable.clone(),
+                    StatusStamp {
+                        version: version.into(),
+                        files: stamps.clone(),
+                    },
+                );
+            }
         }
         Ok(Self {
             root,
             executable,
             version: version.map(str::to_owned),
             stamps,
+            #[cfg(unix)]
+            hashes,
             _files: files,
         })
     }
 
     pub fn validate(&self, cancelled: &AtomicBool) -> Result<(), String> {
-        let (current, _) = inventory(
+        let (current, files) = inventory(
             &self.root,
             &self.executable,
             self.version.is_some(),
@@ -88,8 +176,15 @@ impl RuntimeSnapshot {
                 "Runtime berubah selama transkripsi. Coba lagi untuk memilih backend ulang.".into(),
             );
         }
+        #[cfg(unix)]
+        if inventory_hashes(&current, &files, cancelled)? != self.hashes {
+            return Err("Isi runtime berubah selama transkripsi. Pilih ulang backend.".into());
+        }
+        #[cfg(windows)]
+        let _files = files;
         // Filesystems that cannot provide a stable identity keep the original
         // full hash check. A weak size/mtime fingerprint must not skip integrity.
+        #[cfg(windows)]
         if self
             .stamps
             .iter()
@@ -110,6 +205,27 @@ impl RuntimeSnapshot {
     }
 }
 
+#[cfg(unix)]
+fn inventory_hashes(
+    stamps: &[FileStamp],
+    files: &[File],
+    cancelled: &AtomicBool,
+) -> Result<Vec<String>, String> {
+    // POSIX read handles do not prevent writes, and ctime can be coarse.
+    files
+        .iter()
+        .zip(stamps)
+        .map(|(file, stamp)| {
+            let mut contents = file.take(stamp.size.saturating_add(1));
+            let hash = crate::io_cancel::hash_reader(&mut contents, cancelled)?;
+            if contents.limit() != 1 {
+                return Err("Ukuran file runtime berubah selama verifikasi.".into());
+            }
+            Ok(hash)
+        })
+        .collect()
+}
+
 fn inventory(
     root: &Path,
     executable: &Path,
@@ -119,14 +235,13 @@ fn inventory(
     fn visit(
         root: &Path,
         path: &Path,
-        stamps: &mut Vec<FileStamp>,
-        files: &mut Vec<File>,
+        entries: &mut Vec<(FileStamp, File)>,
         cancelled: &AtomicBool,
     ) -> Result<(), String> {
         crate::io_cancel::check(cancelled)?;
         let metadata = fs::symlink_metadata(path)
             .map_err(|e| format!("Gagal membaca identitas runtime: {e}"))?;
-        if metadata.file_type().is_symlink() {
+        if crate::durable::is_link(&metadata) {
             return Err("Runtime berisi symbolic link.".into());
         }
         if metadata.is_dir() {
@@ -138,13 +253,12 @@ fn inventory(
                     &entry
                         .map_err(|e| format!("Gagal membaca entry runtime: {e}"))?
                         .path(),
-                    stamps,
-                    files,
+                    entries,
                     cancelled,
                 )?;
             }
         } else if metadata.is_file() {
-            if files.len() > crate::paths::MAX_RUNTIME_FILES {
+            if entries.len() > crate::paths::MAX_RUNTIME_FILES {
                 return Err("Runtime memiliki terlalu banyak file.".into());
             }
             let mut options = fs::OpenOptions::new();
@@ -152,7 +266,12 @@ fn inventory(
             #[cfg(windows)]
             {
                 use std::os::windows::fs::OpenOptionsExt;
-                options.share_mode(1); // FILE_SHARE_READ; no writer/delete may race the verified job.
+                options.custom_flags(0x00200000).share_mode(1); // FILE_SHARE_READ; no writer/delete may race the verified job.
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
             }
             let file = options
                 .open(path)
@@ -160,8 +279,11 @@ fn inventory(
             let metadata = file
                 .metadata()
                 .map_err(|e| format!("Gagal membaca metadata runtime: {e}"))?;
+            if !metadata.is_file() || crate::durable::is_link(&metadata) {
+                return Err("Runtime bukan file biasa.".into());
+            }
             let (identity, changed) = file_identity(&file, &metadata);
-            stamps.push(FileStamp {
+            let stamp = FileStamp {
                 path: path
                     .strip_prefix(root)
                     .map_err(|_| "Path runtime tidak valid.")?
@@ -170,23 +292,22 @@ fn inventory(
                 modified: metadata.modified().ok(),
                 identity,
                 changed,
-            });
-            files.push(file);
+            };
+            entries.push((stamp, file));
         } else {
             return Err("Runtime bukan file biasa.".into());
         }
         Ok(())
     }
-    let (mut stamps, mut files) = (Vec::new(), Vec::new());
+    let mut entries = Vec::new();
     visit(
         root,
         if all_files { root } else { executable },
-        &mut stamps,
-        &mut files,
+        &mut entries,
         cancelled,
     )?;
-    stamps.sort_unstable_by(|left, right| left.path.cmp(&right.path));
-    Ok((stamps, files))
+    entries.sort_unstable_by(|(left, _), (right, _)| left.path.cmp(&right.path));
+    Ok(entries.into_iter().unzip())
 }
 
 #[cfg(unix)]
@@ -316,7 +437,8 @@ mod tests {
         let modified = fs::metadata(&dependency).unwrap().modified().unwrap();
         let cancelled = AtomicBool::new(false);
         crate::paths::write_runtime_manifest(&root, "whisper-cli.exe", "test", &cancelled).unwrap();
-        let snapshot = RuntimeSnapshot::capture(&engine, Some("test"), &cancelled).unwrap();
+        let snapshot = RuntimeSnapshot::capture_for_status(&engine, Some("test")).unwrap();
+        drop(RuntimeSnapshot::capture_for_status(&engine, Some("test")).unwrap());
         #[cfg(windows)]
         {
             assert!(fs::write(&dependency, b"changed").is_err());
@@ -333,10 +455,12 @@ mod tests {
                 .set_times(fs::FileTimes::new().set_modified(modified))
                 .unwrap();
             assert!(snapshot.validate(&cancelled).is_err());
+            assert!(RuntimeSnapshot::capture_for_status(&engine, Some("test")).is_err());
         }
         let _ = modified;
         drop(snapshot);
         fs::write(&dependency, b"changed").unwrap();
+        assert!(RuntimeSnapshot::capture_for_status(&engine, Some("test")).is_err());
         assert!(RuntimeSnapshot::capture(&engine, Some("test"), &cancelled).is_err());
         fs::remove_dir_all(root).unwrap();
     }

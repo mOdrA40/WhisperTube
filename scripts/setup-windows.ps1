@@ -16,9 +16,10 @@ $YtDlpSha256 = "f5389d3698ecde4ef06f4e6b1ce0294fe9ac1396228c8990b8d3416d6d177a7d
 $FfmpegVersion = "9.0.2"
 $FfmpegSha256 = "60f467265b1e312373dbcd92200c2618a74850f98d3d078e94296bb3fa2047ba"
 $FfmpegBinarySha256 = "3256173f3f8bffd7df12227c68adf68025edb1832273a9530688a7bb1ed8edec"
-$WhisperVersion = "v1.9.2"
-# Matches the official whisper.cpp v1.9.2 asset.
-$WhisperCpuSha256 = "49dcc16de826f20bd53d44f947a1ae49dfa81f86cad67a64d80820cb192d674a"
+$WhisperVersion = "v1.9.5"
+# The b5454 assets were built from the exact v1.9.5 commit d1be6fde11ac6e0407606b4e42fe72d34add8037.
+$WhisperAssetTag = "b5454"
+$WhisperCpuSha256 = "6ba69e3482d7826214f90a6a9c84ca07782aec1e1d0c6a7c30c994fd5d816ccb"
 
 function Write-Step($Text) {
     Write-Host "`n==> $Text" -ForegroundColor Cyan
@@ -97,7 +98,7 @@ try {
     Write-Step "Downloading and verifying whisper.cpp CPU engine $WhisperVersion"
     $WhisperZip = Join-Path $Temp "whisper-cpu.zip"
     $WhisperExtract = Join-Path $Temp "whisper-cpu"
-    Download-File "https://github.com/ggml-org/whisper.cpp/releases/download/$WhisperVersion/whisper-bin-x64.zip" $WhisperZip
+    Download-File "https://github.com/ggml-org/whisper.cpp/releases/download/$WhisperAssetTag/whisper-bin-x64.zip" $WhisperZip
     Assert-Sha256 $WhisperZip $WhisperCpuSha256 "whisper.cpp CPU archive"
     Expand-Archive -Path $WhisperZip -DestinationPath $WhisperExtract -Force
     $ReleaseDir = Get-ChildItem -Path $WhisperExtract -Directory -Recurse | Where-Object { $_.Name -eq "Release" } | Select-Object -First 1

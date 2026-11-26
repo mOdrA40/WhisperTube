@@ -5,6 +5,7 @@ use std::{
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use minisign_verify::{PublicKey, Signature};
+use reqwest_updater::{header, Client, Proxy, Response};
 use serde::Serialize;
 use tauri::{ipc::Channel, Manager, ResourceId, State, Webview};
 use tauri_plugin_updater::Update;
@@ -50,7 +51,8 @@ fn verify_signature(bytes: &[u8], public_key: &str, signature: &str) -> Result<(
 }
 
 async fn download(update: &Update, on_progress: &Channel<UpdateProgress>) -> Result<File, String> {
-    let mut client = reqwest::Client::builder()
+    // Tauri initializes the shared rustls provider before returning an Update.
+    let mut client = Client::builder()
         .user_agent(concat!("WhisperTube/", env!("CARGO_PKG_VERSION")))
         .https_only(true)
         .connect_timeout(Duration::from_secs(30))
@@ -58,15 +60,12 @@ async fn download(update: &Update, on_progress: &Channel<UpdateProgress>) -> Res
     if update.no_proxy {
         client = client.no_proxy();
     } else if let Some(proxy) = &update.proxy {
-        client = client
-            .proxy(reqwest::Proxy::all(proxy.as_str()).map_err(|e| e.without_url().to_string())?);
+        client = client.proxy(Proxy::all(proxy.as_str()).map_err(|e| e.without_url().to_string())?);
     }
     let mut headers = update.headers.clone();
     headers
-        .entry(reqwest::header::ACCEPT)
-        .or_insert(reqwest::header::HeaderValue::from_static(
-            "application/octet-stream",
-        ));
+        .entry(header::ACCEPT)
+        .or_insert(header::HeaderValue::from_static("application/octet-stream"));
     let response = client
         .build()
         .map_err(|e| format!("Klien pembaruan gagal dibuat: {}", e.without_url()))?
@@ -74,7 +73,7 @@ async fn download(update: &Update, on_progress: &Channel<UpdateProgress>) -> Res
         .headers(headers)
         .send()
         .await
-        .and_then(reqwest::Response::error_for_status)
+        .and_then(Response::error_for_status)
         .map_err(|e| format!("Paket pembaruan gagal diunduh: {}", e.without_url()))?;
     if !response.status().is_success() {
         return Err(format!(
@@ -100,7 +99,7 @@ async fn download(update: &Update, on_progress: &Channel<UpdateProgress>) -> Res
 }
 
 async fn stream_package(
-    mut response: reqwest::Response,
+    mut response: Response,
     max_bytes: u64,
     mut emit: impl FnMut(u64, Option<u64>, bool),
 ) -> Result<File, String> {
@@ -137,6 +136,184 @@ async fn stream_package(
     Ok(file.into_std().await)
 }
 
+#[cfg(target_os = "linux")]
+fn install_appimage(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::{self, Read, Write};
+
+    fn is_appimage(bytes: &[u8]) -> bool {
+        bytes.starts_with(b"\x7fELF") && bytes.get(8..11) == Some(b"AI\x02")
+    }
+
+    if !is_appimage(bytes) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Paket pembaruan bukan AppImage yang valid.",
+        ));
+    }
+
+    let target = path.canonicalize()?;
+    let mut installed = crate::durable::open_regular_read(&target)?;
+    let mut header = [0; 11];
+    installed.read_exact(&mut header)?;
+    if !is_appimage(&header) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "File AppImage yang sedang berjalan tidak valid.",
+        ));
+    }
+    let parent = target
+        .parent()
+        .ok_or_else(|| io::Error::other("Folder AppImage tidak dapat ditentukan."))?;
+    let mut staged = tempfile::NamedTempFile::new_in(parent)?;
+    staged.write_all(bytes)?;
+    staged
+        .as_file()
+        .set_permissions(installed.metadata()?.permissions())?;
+    staged.as_file().sync_all()?;
+    staged.persist(&target).map_err(|failure| failure.error)?;
+    crate::durable::sync_parent(&target)
+}
+
+#[cfg(windows)]
+pub(crate) fn cleanup_stale_installers(app: &tauri::AppHandle) -> std::io::Result<()> {
+    cleanup_stale_installers_in(
+        &std::env::temp_dir(),
+        &app.package_info().name,
+        std::time::SystemTime::now(),
+    )
+}
+
+#[cfg(windows)]
+fn cleanup_stale_installers_in(
+    root: &std::path::Path,
+    app_name: &str,
+    now: std::time::SystemTime,
+) -> std::io::Result<()> {
+    use std::{fs, io, os::windows::fs::OpenOptionsExt, path::Path};
+
+    const GRACE: Duration = Duration::from_secs(24 * 60 * 60);
+    const FILE_READ_ATTRIBUTES: u32 = 0x80;
+    const DELETE: u32 = 0x10000;
+    const FILE_SHARE_READ: u32 = 1;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x02000000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x00200000;
+
+    fn expired(metadata: &fs::Metadata, now: std::time::SystemTime) -> bool {
+        metadata
+            .modified()
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age >= GRACE)
+    }
+
+    fn open_directory(path: &Path, access: u32) -> io::Result<(File, fs::Metadata)> {
+        let directory = fs::OpenOptions::new()
+            .access_mode(access)
+            .share_mode(FILE_SHARE_READ)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)?;
+        let metadata = directory.metadata()?;
+        if !metadata.is_dir() || crate::durable::is_link(&metadata) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Expected an ordinary updater directory",
+            ));
+        }
+        Ok((directory, metadata))
+    }
+
+    // Keep the root and each candidate directory open without delete sharing
+    // while resolving their children. Only aged entries with the updater's
+    // exact naming pattern are eligible.
+    let (_root_handle, _) = open_directory(root, FILE_READ_ATTRIBUTES)?;
+    let prefix = format!("{app_name}-");
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some((version, suffix)) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix(&prefix))
+            .and_then(|name| name.rsplit_once("-updater-"))
+        else {
+            continue;
+        };
+        if semver::Version::parse(version).is_err()
+            || suffix.len() != 6
+            || !suffix.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        {
+            continue;
+        }
+        let path = entry.path();
+        let Ok((directory, metadata)) = open_directory(&path, FILE_READ_ATTRIBUTES | DELETE) else {
+            continue;
+        };
+        if !expired(&metadata, now) {
+            continue;
+        }
+        let installer = path.join(format!("{app_name}-{version}-installer.exe"));
+        match fs::OpenOptions::new()
+            .access_mode(FILE_READ_ATTRIBUTES | DELETE)
+            .share_mode(0)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(&installer)
+        {
+            Ok(handle) => {
+                let metadata = handle.metadata()?;
+                if !metadata.is_file()
+                    || crate::durable::is_link(&metadata)
+                    || !expired(&metadata, now)
+                {
+                    continue;
+                }
+                if let Err(error) = mark_for_deletion(&handle) {
+                    eprintln!("WhisperTube stale updater package skipped: {error}");
+                    continue;
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(_) => continue,
+        }
+        // Windows can only mark this directory for removal if it is empty.
+        match mark_for_deletion(&directory) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::DirectoryNotEmpty => {}
+            Err(error) => eprintln!("WhisperTube stale updater directory skipped: {error}"),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn mark_for_deletion(file: &File) -> std::io::Result<()> {
+    use std::{ffi::c_void, os::windows::io::AsRawHandle};
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn SetFileInformationByHandle(
+            file: *mut c_void,
+            class: i32,
+            information: *const c_void,
+            size: u32,
+        ) -> i32;
+    }
+
+    const FILE_DISPOSITION_INFO: i32 = 4;
+    let delete_on_close = 1u8; // FILE_DISPOSITION_INFO contains one BOOLEAN.
+                               // SAFETY: the caller owns a live handle opened with DELETE access.
+    let status = unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle(),
+            FILE_DISPOSITION_INFO,
+            (&delete_on_close as *const u8).cast(),
+            std::mem::size_of_val(&delete_on_close) as u32,
+        )
+    };
+    if status == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn install_app_update(
     webview: Webview,
@@ -144,6 +321,7 @@ pub async fn install_app_update(
     rid: ResourceId,
     on_progress: Channel<UpdateProgress>,
 ) -> Result<(), ErrorPayload> {
+    crate::wait_for_startup(webview.app_handle()).await;
     let reservation = OperationGuard::reserve_app_update(&state)?;
     let update = webview
         .resources_table()
@@ -163,6 +341,18 @@ pub async fn install_app_update(
         .and_then(serde_json::Value::as_str)
         .ok_or("Kunci publik pembaruan belum dikonfigurasi.")?
         .to_owned();
+    #[cfg(target_os = "linux")]
+    let appimage = match tauri::utils::platform::bundle_type() {
+        Some(tauri::utils::config::BundleType::AppImage) => Some(
+            webview
+                .app_handle()
+                .env()
+                .appimage
+                .clone()
+                .ok_or("Lokasi AppImage yang sedang berjalan tidak dapat ditentukan.")?,
+        ),
+        _ => None,
+    };
     let file = download(&update, &on_progress).await?;
     tokio::task::spawn_blocking(move || {
         let _reservation = reservation;
@@ -171,6 +361,14 @@ pub async fn install_app_update(
         let bytes = unsafe { memmap2::MmapOptions::new().map(&file) }
             .map_err(|e| format!("Paket pembaruan tidak dapat dibuka: {e}"))?;
         verify_signature(&bytes, &public_key, &update.signature)?;
+        #[cfg(target_os = "linux")]
+        if let Some(path) = appimage {
+            update
+                .verify(&bytes)
+                .map_err(|e| format!("Verifikasi paket AppImage gagal: {e}"))?;
+            return install_appimage(std::path::Path::new(&path), &bytes)
+                .map_err(|e| format!("Pemasangan pembaruan AppImage gagal: {e}"));
+        }
         update
             .install(&bytes)
             .map_err(|e| format!("Pemasangan pembaruan gagal: {e}"))
@@ -185,6 +383,86 @@ mod tests {
     use super::*;
 
     #[test]
+    fn packaged_updater_requires_an_authenticated_version() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let updater: tauri_plugin_updater::Config =
+            serde_json::from_value(config["plugins"]["updater"].clone()).unwrap();
+        assert!(updater.require_signed_version);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn appimage_replacement_preserves_an_open_executable_and_its_mode() {
+        use std::{fs, io::Read, os::unix::fs::PermissionsExt};
+
+        let root = tempfile::tempdir().unwrap();
+        let image = root.path().join("WhisperTube.AppImage");
+        let original = b"\x7fELF\x02\x01\x01\x00AI\x02 original executable";
+        fs::write(&image, original).unwrap();
+        fs::set_permissions(&image, fs::Permissions::from_mode(0o751)).unwrap();
+        let mut running = File::open(&image).unwrap();
+
+        let error = install_appimage(&image, b"wrong package format").unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(fs::read(&image).unwrap(), original);
+
+        let replacement = b"\x7fELF\x02\x01\x01\x00AI\x02 replacement fixture";
+        install_appimage(&image, replacement).unwrap();
+        assert_eq!(fs::read(&image).unwrap(), replacement);
+        assert_eq!(
+            fs::metadata(&image).unwrap().permissions().mode() & 0o777,
+            0o751
+        );
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+        let mut old_bytes = Vec::new();
+        running.read_to_end(&mut old_bytes).unwrap();
+        assert_eq!(old_bytes, original);
+
+        let other = root.path().join("another executable");
+        let other_bytes = b"\x7fELF ordinary program";
+        fs::write(&other, other_bytes).unwrap();
+        let error = install_appimage(&other, replacement).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(fs::read(other).unwrap(), other_bytes);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stale_updater_cleanup_preserves_recent_and_unrelated_content() {
+        use std::{fs, os::windows::fs::OpenOptionsExt};
+
+        let storage = tempfile::tempdir().unwrap();
+        let expired = storage.path().join("WhisperTube-1.2.2-updater-abcd12");
+        fs::create_dir(&expired).unwrap();
+        let owned = storage.path().join("WhisperTube-1.2.3-updater-abcd12");
+        let neighbor = storage.path().join("WhisperTube-other-updater-abcd12");
+        fs::create_dir(&owned).unwrap();
+        fs::create_dir(&neighbor).unwrap();
+        let installer = owned.join("WhisperTube-1.2.3-installer.exe");
+        fs::write(&installer, b"inert installer fixture").unwrap();
+        let canary = owned.join("user.txt");
+        fs::write(&canary, b"unrelated").unwrap();
+        let now = std::time::SystemTime::now();
+        let after_grace = now + Duration::from_secs(48 * 60 * 60);
+        cleanup_stale_installers_in(storage.path(), "WhisperTube", now).unwrap();
+        assert!(installer.is_file());
+        let reader = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&installer)
+            .unwrap();
+        cleanup_stale_installers_in(storage.path(), "WhisperTube", after_grace).unwrap();
+        assert!(!expired.exists());
+        assert!(installer.is_file());
+        drop(reader);
+        cleanup_stale_installers_in(storage.path(), "WhisperTube", after_grace).unwrap();
+        assert!(!installer.exists());
+        assert!(neighbor.is_dir());
+        assert_eq!(fs::read(&canary).unwrap(), b"unrelated");
+    }
+
+    #[test]
     fn checks_total_and_streamed_bytes_against_the_same_limit() {
         assert_eq!(checked_size(0, 16, 16), Ok(16));
         assert_eq!(checked_size(10, 6, 16), Ok(16));
@@ -197,7 +475,8 @@ mod tests {
         use std::io::{BufRead, BufReader, Read, Seek, Write};
         use std::net::TcpListener;
 
-        let client = reqwest::Client::builder()
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let client = Client::builder()
             .no_proxy()
             .timeout(Duration::from_secs(5))
             .build()

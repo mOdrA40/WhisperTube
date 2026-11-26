@@ -1,6 +1,19 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { evaluateAudit } from "./check-cargo-advisories.mjs";
+import { evaluateAudit, restoreVendoredUpdaterSource } from "./check-cargo-advisories.mjs";
+
+test("audits the pinned registry version of the patched updater", () => {
+  const lock = [
+    "[[package]]", 'name = "tauri-plugin-updater"', 'version = "2.14.1"', "dependencies = []", "",
+  ].join("\n");
+  const origin = { version: "2.14.1", checksum: "a".repeat(64) };
+  assert.equal(restoreVendoredUpdaterSource(lock, origin), lock.replace(
+    "dependencies = []", `source = "registry+https://github.com/rust-lang/crates.io-index"\nchecksum = "${origin.checksum}"\ndependencies = []`,
+  ));
+  assert.throws(() => restoreVendoredUpdaterSource(lock, { ...origin, version: "2.14.2" }));
+  assert.throws(() => restoreVendoredUpdaterSource(lock + lock, origin));
+  assert.throws(() => restoreVendoredUpdaterSource(lock, { ...origin, checksum: "invalid" }));
+});
 
 const risk = { id: "RUSTSEC-fixture", package: "inherited", version: "1.0.0", kind: "unmaintained",
   upstream: "upstream fixture", resolution: "compatible upstream upgrade" };

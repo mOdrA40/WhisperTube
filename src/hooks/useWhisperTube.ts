@@ -152,6 +152,7 @@ export function useWhisperTube() {
     source: string; pending: boolean; stage: TranscriptionResumeStage | null;
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const modelDownloadRequest = useRef<{ id: string; operationId: string } | null>(null);
   const [downloadingModel, setDownloadingModel] = useState<Record<string, ModelDownloadPayload>>({});
   const [installingCuda, setInstallingCuda] = useState(false);
   const [cudaDownloadPercent, setCudaDownloadPercent] = useState(0);
@@ -243,9 +244,13 @@ export function useWhisperTube() {
       const historyRequest = scope === "all" || scope === "history"
         ? listHistory()
         : Promise.resolve(null);
+      const systemRequest = scope === "all" ? getSystemStatus() : Promise.resolve(null);
+      const modelsRequest = scope === "all"
+        ? systemRequest.then((status) => listModels(status?.qwenRuntime), () => listModels())
+        : scope === "models" ? listModels() : Promise.resolve(null);
       const [systemResult, modelsResult, historyResult, storageResult] = await Promise.allSettled([
-        scope === "all" ? getSystemStatus() : Promise.resolve(null),
-        scope === "all" || scope === "models" ? listModels() : Promise.resolve(null),
+        systemRequest,
+        modelsRequest,
         historyRequest,
         // History and storage each reserve native storage access. Sequence
         // them so they cannot reject one another during reconciliation.
@@ -366,7 +371,8 @@ export function useWhisperTube() {
       );
     }));
     ownSubscription(subscribeToModelDownload((payload) => {
-      if (disposed) return;
+      const active = modelDownloadRequest.current;
+      if (disposed || !active || active.id !== payload.id || active.operationId !== payload.operationId) return;
       setDownloadingModel((previous) => ({ ...previous, [payload.id]: payload }));
       setNetworkSpeedBytesPerSecond(payload.bytesPerSecond);
     }));
@@ -401,7 +407,7 @@ export function useWhisperTube() {
       setAppUpdateStatus(update ? "available" : "up-to-date");
     } catch (cause) {
       if (request !== appUpdateCheckRequest.current) return;
-      setAppUpdateStatus("idle");
+      setAppUpdateStatus(appUpdate ? "available" : "idle");
       setAppUpdateError(friendlyError(cause));
     }
   }
@@ -538,7 +544,10 @@ export function useWhisperTube() {
   }, [backend, selectedCudaDevice, selectedModel, system, t]);
   const acceleratorWarning = useMemo(() => {
     if (!system || isQwenModel(modelId) || backend === "auto" || backend === "cpu" || backend === "cuda") return null;
-    if (backend === "vulkan" && !system.computeDevices.some((device) => device.backend === "vulkan")) {
+    if (backend === "vulkan" && !system.computeDevices.some((device) =>
+      device.backend === "vulkan" &&
+      (!computeTargetId.startsWith("vulkan:") || device.id === computeTargetId),
+    )) {
       return t("error.vulkanDeviceUnavailable");
     }
     const accelerator = system.accelerators.find((item) => item.backend === backend);
@@ -548,7 +557,7 @@ export function useWhisperTube() {
       });
     }
     return null;
-  }, [backend, modelId, system, t]);
+  }, [backend, computeTargetId, modelId, system, t]);
   const canStart = Boolean(!operationActive && !checkingResume && metadata && selectedModel?.installed && runtimeReady && !vramWarning && !acceleratorWarning);
   const modelDownloadBlockReasons = useMemo<Record<string, string>>(() => {
     const reasons: Record<string, string> = {};
@@ -643,19 +652,24 @@ export function useWhisperTube() {
   }
 
   async function handleDownloadModel(id: string) {
-    if (operationActive) return;
+    if (operationActive || modelDownloadRequest.current) return;
+    const operationId = Array.from(crypto.getRandomValues(new Uint32Array(4)),
+      (part) => part.toString(16).padStart(8, "0")).join("");
+    modelDownloadRequest.current = { id, operationId };
     setError(null);
     setDownloadingModel((previous) => ({
       ...previous,
       [id]: { id, downloadedBytes: 0, totalBytes: 0, percent: 0, bytesPerSecond: null },
     }));
     try {
-      await downloadModel(id, computeTargetId);
+      await downloadModel(id, computeTargetId, operationId);
       await refreshAfterSuccessfulOperation(isQwenModel(id) ? "all" : "models");
     } catch (cause) {
+      if (isQwenModel(id)) await refreshAfterMutationFailure();
       const message = friendlyError(cause);
       if (!message.toLowerCase().includes("dibatalkan")) setError(message);
     } finally {
+      modelDownloadRequest.current = null;
       setNetworkSpeedBytesPerSecond(null);
       setDownloadingModel((previous) => {
         const next = { ...previous };
@@ -671,7 +685,11 @@ export function useWhisperTube() {
     setError(null);
     try {
       await deleteModel(id);
-      if (modelId === id) setModelId("base");
+      if (modelId === id) {
+        setModelId("base");
+        setBackend("auto");
+        setComputeTargetId("auto");
+      }
       await refreshAfterSuccessfulOperation("models");
     } catch (cause) {
       setError(friendlyError(cause));
@@ -845,6 +863,8 @@ export function useWhisperTube() {
       setSearchQuery("");
       await refreshAfterSuccessfulOperation("history");
     } catch (cause) {
+      await refreshAfterMutationFailure("storage");
+      if (errorCode(cause) === "model_invalid") await refreshAfterMutationFailure("models");
       setRetrySource(JSON.stringify([metadata.webpageUrl, metadata.duration]));
       const message = friendlyError(cause);
       const normalizedMessage = message.toLowerCase();

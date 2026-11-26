@@ -3,13 +3,25 @@
 WhisperTube uses the Tauri v2 updater. The updater reads a static latest.json
 manifest from the stable GitHub Release and verifies each artifact with the
 embedded updater public key before installation.
+Tauri requires the authenticated version in the signature to match the
+manifest version. The release workflow checks this version against the Git
+tag before publishing the manifest.
 
 The app streams the package to a private temporary file and limits the
 transfer to 256 MiB and 15 minutes. It verifies the mapped file with the
 embedded Minisign key before handing it to Tauri's platform installer.
-The same size limit applies when the server omits Content-Length. The
-installer remains unavailable when the package is incomplete or its
-signature fails verification.
+The manifest check and package download use the same platform certificate
+trust and system proxy support. Package downloads require HTTPS.
+The same size limit applies when the server omits Content-Length. On macOS,
+the updater swaps bundles or preserves the old bundle when publication fails.
+The pinned updater includes a local macOS patch that preserves the backup when
+another entry occupies the install path during rollback.
+On Linux, AppImage updates flush the staged executable before atomically
+replacing the installed image in its directory.
+On Windows, startup may clear installer packages at least 24 hours old
+whose paths match the updater's staging convention. Cleanup uses the verified
+file handle and preserves other files in the staging directory. An incomplete
+package or failed signature verification blocks installation.
 
 ## Application release flow
 
@@ -48,7 +60,7 @@ The published application release also contains the NSIS, DMG, Debian, and
 AppImage installers plus SHA-256 sidecar files. The manifest publishes separate
 linux-x86_64-appimage and linux-x86_64-deb targets with their respective signed
 payloads. The generic linux-x86_64 target remains an AppImage fallback. The
-pinned Tauri updater 2.11.0 looks for the installed bundle's specific target
+pinned Tauri updater 2.14.1 looks for the installed bundle's specific target
 before the generic target: a Debian installation uses the .deb updater path,
 while an AppImage installation uses the AppImage path. Debian installation
 uses dpkg and may require a system privilege prompt. This describes the
@@ -97,9 +109,11 @@ are deliberately enabled. Keep the path outside the repository:
     $env:TAURI_SIGNING_PRIVATE_KEY_PATH = '<absolute path outside the repository>'
     .\scripts\build-windows.ps1
 
-The same environment variables are supported by the macOS and Linux build
-scripts. Clear the environment variables after the test build and do not
-paste the private key itself into a command or log.
+The macOS and Linux build scripts accept the same variables. The scripts pass
+the key path to Tauri when `TAURI_SIGNING_PRIVATE_KEY` is unset. An explicit
+`TAURI_SIGNING_PRIVATE_KEY` takes precedence. Clear the environment variables
+after the test build and do not paste the private key itself into a command or
+log.
 
 ## Accelerator releases are separate
 

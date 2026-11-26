@@ -72,20 +72,26 @@ function Invoke-RestMethod {
   param($Uri, $Headers, $TimeoutSec)
   $global:RequestedUrls += $Uri
   if ($Uri -like 'https://fixture.invalid/sidecars/*') { return ('a' * 64) }
+  if ($Uri -like '*/contents/.github/workflows/build-accelerator-packs.yml?ref=*') {
+    $recipe = "          WHISPER_VERSION: v1.9.5"
+    return @{ content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($recipe)) }
+  }
   $assets = @()
   foreach ($name in @('macos-arm64-metal', 'macos-x64-metal', 'linux-x64-vulkan', 'windows-x64-vulkan')) {
     $base = "whispertube-$name"
-    $assets += @{ name = "$base.zip"; digest = ('sha256:' + ('a' * 64)) }
+    $hash = if ($env:WHISPERTUBE_TEST_BAD_DIGEST -and $name -eq 'windows-x64-vulkan') { 'b' * 64 } else { 'a' * 64 }
+    $assets += @{ name = "$base.zip"; digest = ('sha256:' + $hash) }
     $assets += @{ name = "$base.sha256"; browser_download_url = "https://fixture.invalid/sidecars/$base" }
   }
-  return @{ assets = $assets }
+  return @{ assets = $assets; tag_name = ([uri]$Uri).Segments[-1]; draft = $false }
 }
 `;
 
 test.skipIf(process.platform !== "win32")("hash synchronization derives the catalog identity and writes matching pins", () => fixture((root) => {
   const original = readFileSync(join(root, "src-tauri/src/accelerators.rs"), "utf8");
   const repository = original.match(/const RELEASE_REPOSITORY:\s*&str\s*=\s*"([^"]+)";/)[1];
-  const tag = original.match(/const RELEASE_TAG:\s*&str\s*=\s*"([^"]+)";/)[1];
+  const generation = original.match(/const PACK_GENERATION:\s*&str\s*=\s*"([^"]+)";/)[1];
+  const tag = generation.split("/")[0];
   const result = powershell(root, fakeRelease + `
 & ./scripts/sync-accelerator-hashes.ps1 -Apply
 Write-Output ("REQUESTED_API=" + $global:RequestedUrls[0])
@@ -93,8 +99,8 @@ Write-Output ("REQUESTED_API=" + $global:RequestedUrls[0])
   assert.equal(result.code, 0, result.output);
   assert.ok(result.output.includes("REQUESTED_API=https://api.github.com/repos/" + repository + "/releases/tags/" + tag));
   const updated = readFileSync(join(root, "src-tauri/src/accelerators.rs"), "utf8");
-  assert.equal((updated.match(/Some\("a{64}"\)/g) ?? []).length, 4);
-  assert.ok(updated.includes('"' + tag + '"'));
+  assert.equal((updated.match(/const \w+_SHA256: Option<&str>\s*=\s*Some\("a{64}"\);/g) ?? []).length, 4);
+  assert.ok(updated.includes('"' + generation + '"'));
 }));
 
 test.skipIf(process.platform !== "win32")("cross-release Apply fails before any request or write", () => fixture((root) => {
@@ -110,6 +116,31 @@ function Invoke-RestMethod { throw 'NETWORK_MUST_NOT_RUN' }
   assert.equal(readFileSync(path, "utf8"), original);
 }));
 
+test.skipIf(process.platform !== "win32")("promoting a reviewed pack updates its release, runtime version and hashes together", () => fixture((root) => {
+  const path = join(root, "src-tauri/src/accelerators.rs");
+  const result = powershell(root, fakeRelease + `
+& ./scripts/sync-accelerator-hashes.ps1 -ReleaseTag accelerators-v99.0.1 -Promote -Apply
+$global:RequestedUrls | Write-Output
+`);
+  assert.equal(result.code, 0, result.output);
+  assert.match(result.output, /build-accelerator-packs\.yml\?ref=accelerators-v99\.0\.1/);
+  const updated = readFileSync(path, "utf8");
+  assert.match(updated, /const PACK_GENERATION: &str = "accelerators-v99\.0\.1\/whisper\.cpp-v1\.9\.5";/);
+  assert.equal((updated.match(/const \w+_SHA256: Option<&str>\s*=\s*Some\("a{64}"\);/g) ?? []).length, 4);
+}));
+
+test.skipIf(process.platform !== "win32")("a digest mismatch preserves the entire accelerator catalog", () => fixture((root) => {
+  const path = join(root, "src-tauri/src/accelerators.rs");
+  const original = readFileSync(path, "utf8");
+  const result = powershell(root, fakeRelease + `
+$env:WHISPERTUBE_TEST_BAD_DIGEST = '1'
+& ./scripts/sync-accelerator-hashes.ps1 -ReleaseTag accelerators-v99.0.1 -Promote -Apply
+`);
+  assert.notEqual(result.code, 0);
+  assert.match(result.output, /Digest GitHub dan sidecar berbeda/);
+  assert.equal(readFileSync(path, "utf8"), original);
+}));
+
 test.skipIf(process.platform !== "win32")("read-only synchronization never changes the catalog", () => fixture((root) => {
   const path = join(root, "src-tauri/src/accelerators.rs");
   const original = readFileSync(path, "utf8");
@@ -118,12 +149,87 @@ test.skipIf(process.platform !== "win32")("read-only synchronization never chang
   assert.equal(readFileSync(path, "utf8"), original);
 }));
 
-test.skipIf(process.platform !== "win32")("failed npm build does not print success", () => fixture((root) => {
+function writeWindowsBuildFixture(root) {
   for (const path of ["yt-dlp.exe", "ffmpeg.exe", "cpu/whisper-cli.exe", "cpu/whisper.dll"]) {
     const file = join(root, "src-tauri/runtime/windows", path);
     mkdirSync(resolve(file, ".."), { recursive: true });
     writeFileSync(file, "");
   }
+}
+
+test.skipIf(process.platform !== "win32")("Windows updater build forwards a key path and restores the caller environment", () => fixture((root) => {
+  writeWindowsBuildFixture(root);
+  writeFileSync(join(root, "local key fixture"), "");
+  const result = powershell(root, `
+$env:TAURI_CREATE_UPDATER_ARTIFACTS = 'true'
+$env:TAURI_SIGNING_PRIVATE_KEY = $null
+$env:TAURI_SIGNING_PRIVATE_KEY_PATH = (Resolve-Path -LiteralPath 'local key fixture').Path
+function npm {
+  if ($env:TAURI_SIGNING_PRIVATE_KEY -ne $env:TAURI_SIGNING_PRIVATE_KEY_PATH -or $args -notcontains '--config') {
+    throw 'Updater options absent from npm invocation'
+  }
+  $global:LASTEXITCODE = 17
+}
+try { & ./scripts/build-windows.ps1 } catch {
+  if ($_.Exception.Message -notlike '*npm exit code 17*') { throw }
+}
+if (Test-Path Env:TAURI_SIGNING_PRIVATE_KEY) { throw 'Signing variable leaked to caller' }
+`);
+  assert.equal(result.code, 0, result.output);
+}));
+
+test.skipIf(process.platform === "win32")("Unix updater builds forward an existing signing path and reject a missing file", () => fixture((root) => {
+  const bin = join(root, "bin");
+  mkdirSync(bin);
+  for (const command of ["cargo", "patchelf", "pkg-config", "xcode-select"]) {
+    writeFileSync(join(bin, command), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  }
+  writeFileSync(join(bin, "npm"), `#!/bin/sh
+if [ "$1" = ci ]; then exit 0; fi
+test "$1" = run && test "$2" = tauri:build || exit 2
+test "$TAURI_SIGNING_PRIVATE_KEY" = "$EXPECTED_SIGNING_KEY" || exit 3
+`, { mode: 0o755 });
+  const key = join(root, "local key fixture");
+  writeFileSync(key, "");
+  for (const platform of ["linux", "macos"]) {
+    const script = join(root, "scripts", `build-${platform}.sh`);
+    copyFileSync(resolve("scripts", `build-${platform}.sh`), script);
+    const runtime = join(root, "src-tauri", "runtime", platform);
+    for (const path of ["ffmpeg", "yt-dlp", "cpu/whisper-cli", "metal/whisper-cli"]) {
+      const file = join(runtime, path);
+      mkdirSync(resolve(file, ".."), { recursive: true });
+      writeFileSync(file, "");
+    }
+    const env = {
+      ...process.env,
+      PATH: `${bin}:${process.env.PATH}`,
+      TAURI_CREATE_UPDATER_ARTIFACTS: "true",
+      TAURI_SIGNING_PRIVATE_KEY: "",
+      TAURI_SIGNING_PRIVATE_KEY_PATH: key,
+      EXPECTED_SIGNING_KEY: key,
+    };
+    const run = (changes) => spawnSync("bash", [script], {
+      env: { ...env, ...changes }, encoding: "utf8", timeout: 15_000,
+    });
+    const forwarded = run({});
+    assert.ifError(forwarded.error);
+    assert.equal(forwarded.status, 0, forwarded.stdout + forwarded.stderr);
+    const missing = run({ TAURI_SIGNING_PRIVATE_KEY_PATH: join(root, "missing-key") });
+    assert.ifError(missing.error);
+    assert.equal(missing.status, 1);
+    assert.match(missing.stderr, /TAURI_SIGNING_PRIVATE_KEY_PATH harus menunjuk file/);
+    const explicit = run({
+      TAURI_SIGNING_PRIVATE_KEY: "explicit-key-fixture",
+      TAURI_SIGNING_PRIVATE_KEY_PATH: join(root, "missing-key"),
+      EXPECTED_SIGNING_KEY: "explicit-key-fixture",
+    });
+    assert.ifError(explicit.error);
+    assert.equal(explicit.status, 0, explicit.stdout + explicit.stderr);
+  }
+}));
+
+test.skipIf(process.platform !== "win32")("failed npm build does not print success", () => fixture((root) => {
+  writeWindowsBuildFixture(root);
   const result = powershell(root, `
 $env:TAURI_CREATE_UPDATER_ARTIFACTS = 'false'
 function npm { $global:LASTEXITCODE = 17 }

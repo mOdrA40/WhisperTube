@@ -28,6 +28,8 @@ minisign-verify = "0.2.5"
 semver = "1"
 tempfile = "3"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+# Keep streamed package downloads on the updater's certificate and proxy stack.
+reqwest-updater = { package = "reqwest", version = "0.13", default-features = false, features = ["rustls-no-provider", "stream", "system-proxy"] }
 # Preserve native SQLite and statement caching without the optional Wasm backend.
 rusqlite = { version = "0.41.1", default-features = false, features = ["bundled", "cache"] }
 uuid = { version = "1", features = ["v4"] }
@@ -38,16 +40,19 @@ flate2 = "1"
 tar = "0.4"
 sha2 = "0.10"
 url = "2"
-tokio = { version = "1.53.3", features = ["fs", "io-util", "macros", "rt-multi-thread", "time"] }
+tokio = { version = "1.53.3", features = ["fs", "io-util", "macros", "rt-multi-thread", "sync", "time"] }
 zip = { version = "9.0.5", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 # Releases use raw .exe/.AppImage; macOS .app.tar.gz support is unconditional.
 # Do not enable the updater's legacy Windows ZIP / Linux gzip feature without
 # reviewing its archive dependency and the release workflow formats together.
-tauri-plugin-updater = { version = "2.11.0", default-features = false, features = ["rustls-tls", "system-proxy"] }
+tauri-plugin-updater = { version = "=2.14.1", default-features = false, features = ["rustls-tls", "system-proxy"] }
 tauri-plugin-process = "2.3.1"
 tauri-plugin-single-instance = "2"
 sysinfo = "0.33"
 tauri-plugin-notification = "2"
+
+[dev-dependencies]
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
 [target.'cfg(unix)'.dependencies]
 # Already in the dependency graph. Use the platform's siginfo_t/WAIT constants
@@ -59,3 +64,6 @@ libc = "0.2"
 # our own identity for unpackaged builds instead of the PowerShell fallback.
 tauri-winrt-notification = "0.8.1"
 windows-registry = "0.6"
+
+[patch.crates-io]
+tauri-plugin-updater = { path = "vendor/tauri-plugin-updater" }

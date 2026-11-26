@@ -85,7 +85,10 @@ pub(crate) fn metadata_only_result(
         )
         .map_err(|e| format!("Gagal membaca metadata history: {e}"))?;
     let audio = job.join("audio.wav");
-    if !is_deleted(conn, id, "audio")? && crate::paths::is_regular_file(&audio) {
+    if history::audio_retention(conn, id)? != Some(false)
+        && !is_deleted(conn, id, "audio")?
+        && crate::paths::is_regular_file(&audio)
+    {
         result.audio_path = Some(audio.to_string_lossy().into_owned());
     }
     Ok(result)
@@ -146,6 +149,24 @@ pub(crate) fn cleanup_pending(conn: &Connection, root: &Path) -> Result<Vec<Stri
     for (id, kind) in rows {
         let cleanup = || -> Result<(), String> {
             if let Some(job) = job_directory(conn, root, id)? {
+                let mut retention = history::audio_retention(conn, id)?;
+                if kind == "transcript" && retention.is_none() {
+                    // Older rows stored the preference only in the result. Persist it
+                    // before unlinking that file, including when replaying an old intent.
+                    match history::read_result_file(&job) {
+                        Ok(result) => {
+                            let keep = result.audio_path.is_some();
+                            conn.execute(
+                                "UPDATE history SET retain_audio=?1 WHERE id=?2 AND retain_audio IS NULL",
+                                params![keep, id],
+                            ).map_err(|e| format!("Gagal menyimpan retensi audio lama: {e}"))?;
+                            retention = Some(keep);
+                        }
+                        Err(error) => {
+                            eprintln!("WhisperTube metadata retensi audio lama ({id}): {error}")
+                        }
+                    }
+                }
                 let names: &[&str] = match kind.as_str() {
                     "audio" => &["audio.wav"],
                     "transcript" => &[
@@ -160,7 +181,14 @@ pub(crate) fn cleanup_pending(conn: &Connection, root: &Path) -> Result<Vec<Stri
                     _ => return Err("Jenis penghapusan file tidak valid.".into()),
                 };
                 let mut errors = vec![];
-                for name in names.iter().copied().chain(std::iter::once(".in-progress")) {
+                let unwanted_audio =
+                    (kind == "transcript" && retention == Some(false)).then_some("audio.wav");
+                for name in names
+                    .iter()
+                    .copied()
+                    .chain([".in-progress"])
+                    .chain(unwanted_audio)
+                {
                     match fs::remove_file(job.join(name)) {
                         Ok(()) => {}
                         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -180,32 +208,15 @@ pub(crate) fn cleanup_pending(conn: &Connection, root: &Path) -> Result<Vec<Stri
                     errors.push(e);
                 }
                 if kind == "transcript" {
-                    // Final export writes use transcript.<UUID>.tmp siblings.
-                    // A crash can leave an older sibling even after a retry
-                    // commits successfully. Unlink only that owned pattern.
-                    for entry in fs::read_dir(&job)
-                        .map_err(|e| format!("Gagal membaca staging transkrip: {e}"))?
-                    {
-                        let entry =
-                            entry.map_err(|e| format!("Gagal membaca staging transkrip: {e}"))?;
-                        let name = entry.file_name();
-                        let name = name.to_string_lossy();
-                        let owned = name
-                            .strip_prefix("transcript.")
-                            .and_then(|name| name.strip_suffix(".tmp"))
-                            .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok());
-                        if owned {
-                            match fs::remove_file(entry.path()) {
-                                Ok(()) => {}
-                                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                                Err(e) => errors.push(format!("Staging {name}: {e}")),
-                            }
-                        }
+                    if let Err(e) = history::cleanup_export_staging(&job) {
+                        errors.push(e);
                     }
                 }
                 if !errors.is_empty() {
                     return Err(errors.join("; "));
                 }
+                crate::durable::sync_parent(&job.join("result.json"))
+                    .map_err(|e| format!("Gagal menyinkronkan penghapusan file: {e}"))?;
             }
             conn.execute(
                 "UPDATE history_file_deletions SET pending=0 WHERE history_id=?1 AND kind=?2 AND pending<>0",
@@ -245,11 +256,12 @@ fn list_in(conn: &Connection, root: &Path, id: i64) -> Result<Vec<HistoryFileInf
     let job = job_directory(conn, root, id)?.ok_or("Folder file history tidak tersedia.")?;
     [HistoryFileKind::Audio, HistoryFileKind::Txt, HistoryFileKind::Srt, HistoryFileKind::Vtt].into_iter().map(|kind| {
         let path = job.join(file_name(kind));
-        let deleted = is_deleted(conn, id, file_scope(kind))?;
+        let deleted = is_deleted(conn, id, file_scope(kind))?
+            || (matches!(kind, HistoryFileKind::Audio) && history::audio_retention(conn, id)? == Some(false));
         let pending: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM history_file_deletions WHERE history_id=?1 AND kind=?2 AND pending=1)", params![id, file_scope(kind)], |r| r.get(0))
             .map_err(|e| format!("Gagal membaca status cleanup: {e}"))?;
         let bytes = match fs::symlink_metadata(&path) {
-            Ok(m) if m.is_file() && !m.file_type().is_symlink() => Some(m.len()),
+            Ok(m) if m.is_file() && !crate::durable::is_link(&m) => Some(m.len()),
             Ok(_) => None,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(format!("Gagal membaca file history: {e}")),
@@ -335,6 +347,30 @@ mod tests {
     }
 
     #[test]
+    fn deleting_the_transcript_replays_cleanup_for_unretained_audio() {
+        let fixture = Fixture::new();
+        let mut conn = fixture.open();
+        conn.execute("UPDATE history SET retain_audio=0 WHERE id=1", [])
+            .unwrap();
+        let audio = fixture.job.join("audio.wav");
+        fs::remove_file(&audio).unwrap();
+        fs::create_dir(&audio).unwrap();
+        queue_deletion(&mut conn, &fixture.root, &[1], HistoryFileScope::Transcript).unwrap();
+        assert!(!cleanup_pending(&conn, &fixture.root).unwrap().is_empty());
+        assert!(!fixture.job.join("result.json").exists());
+        fs::remove_dir(&audio).unwrap();
+        fs::write(&audio, b"unretained WAV").unwrap();
+        assert!(metadata_only_result(&conn, 1, &fixture.job)
+            .unwrap()
+            .audio_path
+            .is_none());
+        drop(conn);
+        let conn = fixture.open();
+        assert!(cleanup_pending(&conn, &fixture.root).unwrap().is_empty());
+        assert!(!audio.exists());
+    }
+
+    #[test]
     fn legacy_cleanup_migration_is_durable_and_does_not_requeue_audio() {
         let fixture = Fixture::new();
         let mut conn = fixture.open();
@@ -343,12 +379,14 @@ mod tests {
         }
         conn.execute("UPDATE history_file_deletions SET pending=0", [])
             .unwrap();
+        conn.execute("ALTER TABLE history DROP COLUMN retain_audio", [])
+            .unwrap();
         conn.pragma_update(None, "user_version", 0).unwrap();
         history::initialize_schema(&conn).unwrap();
         assert_eq!(
             conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
                 .unwrap(),
-            1
+            2
         );
         // Simulate a restart after migration commits but before cleanup runs.
         drop(conn);
@@ -386,6 +424,8 @@ mod tests {
         let mut conn = fixture.open();
         queue_deletion(&mut conn, &fixture.root, &[1], HistoryFileScope::Transcript).unwrap();
         conn.execute("UPDATE history_file_deletions SET pending=0", [])
+            .unwrap();
+        conn.execute("ALTER TABLE history DROP COLUMN retain_audio", [])
             .unwrap();
         conn.pragma_update(None, "user_version", 0).unwrap();
         conn.execute_batch(
@@ -451,6 +491,8 @@ mod tests {
         queue_deletion(&mut conn, &fixture.root, &[1], HistoryFileScope::Transcript).unwrap();
         conn.execute("UPDATE history_file_deletions SET pending=0", [])
             .unwrap();
+        conn.execute("ALTER TABLE history DROP COLUMN retain_audio", [])
+            .unwrap();
         conn.pragma_update(None, "user_version", 0).unwrap(); // Pre-migration database.
         drop(conn);
         let conn = fixture.open();
@@ -470,6 +512,8 @@ mod tests {
         let mut conn = fixture.open();
         queue_deletion(&mut conn, &fixture.root, &[1], HistoryFileScope::Transcript).unwrap();
         conn.execute("UPDATE history_file_deletions SET pending=0", [])
+            .unwrap();
+        conn.execute("ALTER TABLE history DROP COLUMN retain_audio", [])
             .unwrap();
         conn.pragma_update(None, "user_version", 0).unwrap();
         history::initialize_schema(&conn).unwrap();
